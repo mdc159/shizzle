@@ -51,9 +51,24 @@ export interface LibraryResponse {
 
 export interface JobStatus {
   jobId: string;
-  status: 'pending' | 'extracting' | 'splitting' | 'encoding' | 'ready' | 'failed';
+  /** Phase 2 job model (design spec section 4):
+   *  pending → downloading → dispatched → splitting → verifying → publishing → ready | failed */
+  status:
+    | 'pending'
+    | 'downloading'
+    | 'dispatched'
+    | 'splitting'
+    | 'verifying'
+    | 'publishing'
+    | 'ready'
+    | 'failed';
   progress?: number;
   message?: string;
   error?: string;
+  /** Structured machine-readable failure code (e.g. YTDLP_BLOCKED). */
+  errorCode?: string;
+  attempt?: number;
+  stageTimings?: Record<string, number>;
+  trackId?: string;
 }
 

@@ -15,12 +15,13 @@ import { toast } from 'sonner';
 import type { JobStatus } from '@/types/karaoke';
 import { cn } from '@/lib/utils';
 
-// Processing steps for progress display
+// Processing steps for progress display (Phase 2 job stages)
 const STEPS = [
   { status: 'pending', label: 'Queued' },
-  { status: 'extracting', label: 'Extracting Audio' },
+  { status: 'downloading', label: 'Fetching Source' },
   { status: 'splitting', label: 'Separating Stems' },
-  { status: 'encoding', label: 'Encoding' },
+  { status: 'verifying', label: 'Verifying' },
+  { status: 'publishing', label: 'Publishing' },
   { status: 'ready', label: 'Complete' },
 ] as const;
 

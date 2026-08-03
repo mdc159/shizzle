@@ -1,0 +1,16 @@
+# Local/stack reverse proxy — plain HTTP on :80 for now.
+# The VPS variant adds the real hostname + auto-TLS (Phase 5/6); Phase 4 moves
+# media delivery to CloudFront, so this only fronts the API.
+
+:80 {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy api:8001
+	}
+
+	# Placeholder root response until the UI is served here (Phase 6).
+	handle {
+		respond "shizzle stack: API at /api" 200
+	}
+}

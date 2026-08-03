@@ -4,6 +4,23 @@
 #   docker compose -f infra/compose.yml --profile local up -d --build
 #   docker compose -f infra/compose.yml --profile local down
 #
+# `stack` profile: the 4-service control plane mirroring the VPS layout
+# (api + orchestrator + postgres + caddy). Phase 2 — see specs Phase 2.4.
+#   docker compose -f infra/compose.yml --profile stack up -d --build
+# Caddy publishes on :80 by default (override with CADDY_HTTP_PORT for local
+# machines where 80 is taken).
+#
+# `test` profile: just Postgres, for the contract/fault-injection suite:
+#   docker compose -f infra/compose.yml --profile test -p shizzle-test up -d postgres
+# (host port 5433 to avoid clashing with any local Postgres; override with
+# POSTGRES_HOST_PORT when running `stack` and `test` side by side).
+#
+# MACHINE GOTCHA (Mike's PC, verified 2026-08-02): a global COMPOSE_PROJECT_NAME
+# env var (another project) OVERRIDES the `name:` below and will graft these
+# services onto that project. Always pass an explicit -p with this file:
+#   docker compose -p shizzle -f infra/compose.yml --profile <profile> ...
+# Global POSTGRES_* env vars also leak into interpolation; pin them in .env.
+#
 # The UI dev server is NOT containerized. Run it on the host:
 #   npm --prefix ui run dev
 # ui/vite.config.ts already proxies /api -> http://localhost:8001, so the
@@ -34,3 +51,93 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+  # ── stack profile: control plane mirroring the VPS ─────────────────────────
+
+  postgres:
+    profiles: ["stack", "test"]
+    image: postgres:16-alpine
+    # No fixed container_name: the `stack` (project shizzle) and `test`
+    # (project shizzle-test) profiles must be able to run side by side.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shizzle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shizzle}
+      POSTGRES_DB: ${POSTGRES_DB:-shizzle}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Host access for the contract suite / psql. Parametrized so the `test`
+      # project (default 5433) and a running `stack` project can coexist.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shizzle} -d ${POSTGRES_DB:-shizzle}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    profiles: ["stack"]
+    build:
+      context: ../server
+      dockerfile: Dockerfile.api
+    image: shizzle-api
+    container_name: shizzle-api
+    # Migrations run here (single writer of schema), then the API starts.
+    command: sh -c "alembic upgrade head && uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD:-shizzle}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - ../data:/app/data
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orchestrator:
+    profiles: ["stack"]
+    image: shizzle-api
+    container_name: shizzle-orchestrator
+    command: python -m shizzle_server.orchestrator
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD:-shizzle}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      # This slim image has no Demucs; the local pipeline fails cleanly with a
+      # structured code. Set SHIZZLE_PIPELINE=test for restart drills; Phase 3
+      # replaces this path with RunPod dispatch.
+      SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-local}
+      SHIZZLE_TEST_STAGE_SLEEP: ${SHIZZLE_TEST_STAGE_SLEEP:-0}
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    profiles: ["stack"]
+    image: caddy:2
+    container_name: shizzle-caddy
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+    volumes:
+      - ./caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
