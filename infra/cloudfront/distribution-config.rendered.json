@@ -1,0 +1,146 @@
+{
+  "DistributionConfig": {
+    "CallerReference": "shizzle-production-1785722336",
+    "Aliases": { "Quantity": 0 },
+    "DefaultRootObject": "",
+    "Origins": {
+      "Quantity": 2,
+      "Items": [
+        {
+          "Id": "s3-media",
+          "DomainName": "shizzle-spike-media-9abf4c.s3.us-east-1.amazonaws.com",
+          "OriginPath": "",
+          "CustomHeaders": { "Quantity": 0 },
+          "S3OriginConfig": { "OriginAccessIdentity": "" },
+          "OriginAccessControlId": "E1T203UNY8R6AY",
+          "ConnectionAttempts": 3,
+          "ConnectionTimeout": 10,
+          "OriginShield": { "Enabled": false }
+        },
+        {
+          "Id": "vps-api",
+          "DomainName": "vps.shizzle.systems",
+          "OriginPath": "",
+          "CustomHeaders": { "Quantity": 0 },
+          "CustomOriginConfig": {
+            "HTTPPort": 80,
+            "HTTPSPort": 443,
+            "OriginProtocolPolicy": "http-only",
+            "OriginSslProtocols": { "Quantity": 1, "Items": ["TLSv1.2"] },
+            "OriginReadTimeout": 60,
+            "OriginKeepaliveTimeout": 5
+          },
+          "ConnectionAttempts": 3,
+          "ConnectionTimeout": 10,
+          "OriginShield": { "Enabled": false }
+        }
+      ]
+    },
+    "OriginGroups": { "Quantity": 0 },
+    "DefaultCacheBehavior": {
+      "TargetOriginId": "s3-media",
+      "TrustedSigners": { "Enabled": false, "Quantity": 0 },
+      "TrustedKeyGroups": {
+        "Enabled": true,
+        "Quantity": 1,
+        "Items": ["cfad272c-929b-45be-93db-501dd50e5948"]
+      },
+      "ViewerProtocolPolicy": "redirect-to-https",
+      "AllowedMethods": {
+        "Quantity": 2,
+        "Items": ["GET", "HEAD"],
+        "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] }
+      },
+      "Compress": true,
+      "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+      "SmoothStreaming": false,
+      "FieldLevelEncryptionId": "",
+      "LambdaFunctionAssociations": { "Quantity": 0 },
+      "FunctionAssociations": { "Quantity": 0 }
+    },
+    "CacheBehaviors": {
+      "Quantity": 3,
+      "Items": [
+        {
+          "PathPattern": "/api/*",
+          "TargetOriginId": "vps-api",
+          "TrustedSigners": { "Enabled": false, "Quantity": 0 },
+          "TrustedKeyGroups": { "Enabled": false, "Quantity": 0 },
+          "ViewerProtocolPolicy": "redirect-to-https",
+          "AllowedMethods": {
+            "Quantity": 7,
+            "Items": ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+            "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] }
+          },
+          "Compress": true,
+          "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+          "OriginRequestPolicyId": "216adef6-5c7f-47e4-b989-5492eafa07d3",
+          "SmoothStreaming": false,
+          "FieldLevelEncryptionId": "",
+          "LambdaFunctionAssociations": { "Quantity": 0 },
+          "FunctionAssociations": { "Quantity": 0 }
+        },
+        {
+          "PathPattern": "/ws/*",
+          "TargetOriginId": "vps-api",
+          "TrustedSigners": { "Enabled": false, "Quantity": 0 },
+          "TrustedKeyGroups": { "Enabled": false, "Quantity": 0 },
+          "ViewerProtocolPolicy": "redirect-to-https",
+          "AllowedMethods": {
+            "Quantity": 7,
+            "Items": ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+            "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] }
+          },
+          "Compress": false,
+          "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+          "OriginRequestPolicyId": "216adef6-5c7f-47e4-b989-5492eafa07d3",
+          "SmoothStreaming": false,
+          "FieldLevelEncryptionId": "",
+          "LambdaFunctionAssociations": { "Quantity": 0 },
+          "FunctionAssociations": { "Quantity": 0 }
+        },
+        {
+          "PathPattern": "/media/*",
+          "TargetOriginId": "s3-media",
+          "TrustedSigners": { "Enabled": false, "Quantity": 0 },
+          "TrustedKeyGroups": {
+            "Enabled": true,
+            "Quantity": 1,
+            "Items": ["cfad272c-929b-45be-93db-501dd50e5948"]
+          },
+          "ViewerProtocolPolicy": "redirect-to-https",
+          "AllowedMethods": {
+            "Quantity": 2,
+            "Items": ["GET", "HEAD"],
+            "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] }
+          },
+          "Compress": true,
+          "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+          "SmoothStreaming": false,
+          "FieldLevelEncryptionId": "",
+          "LambdaFunctionAssociations": { "Quantity": 0 },
+          "FunctionAssociations": { "Quantity": 0 }
+        }
+      ]
+    },
+    "CustomErrorResponses": { "Quantity": 0 },
+    "Comment": "shizzle production",
+    "Logging": { "Enabled": false, "IncludeCookies": false, "Bucket": "", "Prefix": "" },
+    "PriceClass": "PriceClass_100",
+    "Enabled": true,
+    "ViewerCertificate": {
+      "CloudFrontDefaultCertificate": true,
+      "MinimumProtocolVersion": "TLSv1"
+    },
+    "Restrictions": { "GeoRestriction": { "RestrictionType": "none", "Quantity": 0 } },
+    "WebACLId": "",
+    "HttpVersion": "http2and3",
+    "IsIPV6Enabled": true
+  },
+  "Tags": {
+    "Items": [
+      { "Key": "project", "Value": "shizzle" },
+      { "Key": "purpose", "Value": "shizzle production" }
+    ]
+  }
+}
