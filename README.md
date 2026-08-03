@@ -1,5 +1,7 @@
 # Shizzle — Cloud Karaoke Stem Mixer
 
+![URL to encore: play button → server → GPU → bucket → projector](specs/shizzle-cloud-karaoke-implementation/pipeline.png)
+
 Paste a YouTube URL → a serverless GPU splits the song into six stems (vocals,
 drums, bass, guitar, piano, shizzle) → S3 + CloudFront serve it anywhere → any
 browser plays the video with live per-stem faders → an iPad pairs by QR code as
