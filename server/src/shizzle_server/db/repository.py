@@ -38,6 +38,16 @@ def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
     return uuid.uuid5(_TRACK_NS, f"track:{job_id}")
 
 
+def track_id_for_import(source_ref: str) -> uuid.UUID:
+    """Deterministic id for a track with no job behind it (library import).
+
+    `source_ref` is the stable identifier of the imported material — for the
+    legacy S3 library, the `karaoke/pub/{folder}` folder name. Re-running an
+    import converges on the same row instead of duplicating the library.
+    """
+    return uuid.uuid5(_TRACK_NS, f"import:{source_ref}")
+
+
 def _aware(dt: datetime | None) -> datetime | None:
     """SQLite returns naive datetimes; normalize to UTC-aware for comparisons."""
     if dt is not None and dt.tzinfo is None:
@@ -448,6 +458,45 @@ class TrackRepository:
                 stmt = stmt.where(Track.deleted_at.is_(None))
             res = await session.execute(stmt)
             return list(res.scalars().all())
+
+    async def upsert_imported(
+        self,
+        track_id: uuid.UUID,
+        *,
+        title: str,
+        artist: str = "",
+        duration_seconds: float,
+        s3_prefix: str,
+        manifest_key: str,
+        generation: int = 1,
+        integrity: dict[str, Any] | None = None,
+    ) -> tuple[Track, bool]:
+        """Insert or refresh a track row that has no job behind it.
+
+        Used by the library importer (`scripts/import_legacy_library.py`),
+        which publishes objects to S3 itself and then records the row. Jobs go
+        through `JobRepository.publish_track` instead — that one also owns the
+        publishing -> ready transition, which does not apply here.
+
+        Returns `(track, created)`. Idempotent: re-running the import with the
+        same deterministic `track_id` updates the existing row in place and
+        clears any soft delete, so the library converges rather than doubling.
+        """
+        async with self._sf() as session, session.begin():
+            track = await session.get(Track, track_id, with_for_update=True)
+            created = track is None
+            if track is None:
+                track = Track(id=track_id, title=title, s3_prefix=s3_prefix, manifest_key="")
+                session.add(track)
+            track.title = title
+            track.artist = artist
+            track.duration_seconds = duration_seconds
+            track.s3_prefix = s3_prefix
+            track.generation = generation
+            track.manifest_key = manifest_key
+            track.integrity = integrity
+            track.deleted_at = None
+            return track, created
 
     async def soft_delete(self, track_id: uuid.UUID) -> bool:
         """Mark deleted (design: no silent retention deletion; manual only)."""
