@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+secrets/
+youtube_cookies.txt
+
+# Runtime media — the k25 lesson: 4.3 GB of media in git history. Never again.
+data/
+*.wav
+*.m4a
+*.mp4
+*.webm
+*.mkv
+!fixtures/golden-30s.mp4
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+ui/playwright-report/
+ui/test-results/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.swp
+
+# Spike scratch output (results docs ARE committed; raw dumps are not)
+spikes/**/out/
