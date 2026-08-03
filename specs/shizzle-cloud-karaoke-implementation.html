@@ -175,9 +175,9 @@
 
       <h4>0.2 Signed-cookie media proof (needs fresh AWS creds)</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> Audit surviving infra first: <code>aws s3 ls s3://karaoke-pimpshizzle</code>, RunPod dashboard check — inventory anything reusable into <code>spikes/RESULTS.md</code></li>
-        <li><code class="status">[]</code> Stand up minimal proof: private S3 + OAC + one CloudFront distro with <code>/media/*</code> and a stub <code>/api/cookie</code> origin issuing signed cookies</li>
-        <li><code class="status">[]</code> Prove: same-origin <code>&lt;audio&gt;</code> streams a stem with Range requests through signed cookies on Chromium + iPad Safari</li>
+        <li><code class="status">[x]</code> Audit surviving infra first: <code>aws s3 ls s3://karaoke-pimpshizzle</code>, RunPod dashboard check — inventory anything reusable into <code>spikes/RESULTS.md</code></li>
+        <li><code class="status">[x]</code> Stand up minimal proof: private S3 + OAC + one CloudFront distro with <code>/media/*</code> and a stub <code>/api/cookie</code> origin issuing signed cookies</li>
+        <li><code class="status">[x]</code> Prove: same-origin <code>&lt;audio&gt;</code> streams a stem with Range requests through signed cookies on Chromium + iPad Safari</li>
       </ul>
 
       <h4>0.3 Demucs gain/null behavior</h4>
@@ -501,6 +501,7 @@
       <tr><td>"It's got to sound good" — quality gates + blinded bitrate choice are requirements, not polish</td><td>Mike, 2026-08-02</td></tr>
       <tr><td>Hostinger KVM 2 (2 vCPU / 8 GB / 100 GB), US region</td><td>Mike, 2026-08-02 (agent sizing, Mike confirmed intent)</td></tr>
       <tr><td>nextgen-rewrite = trunk; copy files, never merge 3.5 GB histories</td><td>Agent default from exploration, unchallenged</td></tr>
+      <tr><td>App domain: <code>cbass.space</code> (Route 53 zone in this AWS account); host <code>shizzle.cbass.space</code></td><td>Domain: Mike, 2026-08-02. Subdomain (apex already points at srv1264451): agent working default</td></tr>
       <tr><td><code>multi-track.mp4</code> kept (reviewer wanted deferral)</td><td>Agent, pending Mike's veto — it's his archival format</td></tr>
     </table>
 
