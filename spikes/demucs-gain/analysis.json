@@ -1,0 +1,113 @@
+{
+  "song": "k25/data/47bae048e13c (shortest, 199.7s)",
+  "model": "htdemucs_6s",
+  "segment": 7,
+  "overlap": 0.25,
+  "shifts": 0,
+  "sample_rate": 44100,
+  "ref": {
+    "rms_dbfs": -10.86,
+    "peak_dbfs": 0.63
+  },
+  "stems": {
+    "drums": {
+      "A_int24_rescale": {
+        "rms_dbfs": -19.98,
+        "peak_dbfs": -0.09
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -18.75,
+        "peak_dbfs": 1.15
+      },
+      "gain_A_vs_B_db": -1.236
+    },
+    "bass": {
+      "A_int24_rescale": {
+        "rms_dbfs": -18.36,
+        "peak_dbfs": -7.34
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -18.36,
+        "peak_dbfs": -7.34
+      },
+      "gain_A_vs_B_db": -0.0
+    },
+    "other": {
+      "A_int24_rescale": {
+        "rms_dbfs": -53.14,
+        "peak_dbfs": -20.22
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -53.14,
+        "peak_dbfs": -20.22
+      },
+      "gain_A_vs_B_db": -0.0
+    },
+    "vocals": {
+      "A_int24_rescale": {
+        "rms_dbfs": -20.88,
+        "peak_dbfs": -0.86
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -20.88,
+        "peak_dbfs": -0.86
+      },
+      "gain_A_vs_B_db": -0.0
+    },
+    "guitar": {
+      "A_int24_rescale": {
+        "rms_dbfs": -15.68,
+        "peak_dbfs": -0.09
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -15.56,
+        "peak_dbfs": 0.04
+      },
+      "gain_A_vs_B_db": -0.128
+    },
+    "piano": {
+      "A_int24_rescale": {
+        "rms_dbfs": -37.03,
+        "peak_dbfs": -9.32
+      },
+      "B_float32_clipnone": {
+        "rms_dbfs": -37.03,
+        "peak_dbfs": -9.32
+      },
+      "gain_A_vs_B_db": -0.0
+    }
+  },
+  "runs": {
+    "A_int24_rescale": {
+      "sum": {
+        "rms_dbfs": -11.3,
+        "peak_dbfs": 0.58
+      },
+      "residual": {
+        "rms_dbfs": -31.07,
+        "peak_dbfs": -10.75
+      },
+      "null_depth_db": 20.21,
+      "n_samples": 8805377
+    },
+    "B_float32_clipnone": {
+      "sum": {
+        "rms_dbfs": -11.01,
+        "peak_dbfs": 1.28
+      },
+      "residual": {
+        "rms_dbfs": -33.43,
+        "peak_dbfs": -10.95
+      },
+      "null_depth_db": 22.57,
+      "n_samples": 8805377
+    }
+  },
+  "gain_policy": {
+    "max_float_stem_peak": 1.14152,
+    "max_unity_sum_peak": 1.158879,
+    "common_gain": 0.854274,
+    "common_gain_db": -1.368,
+    "note": "single gain applied identically to all 6 stems (and implied mix); recorded in manifest; preserves relative levels exactly"
+  }
+}

@@ -182,13 +182,13 @@
 
       <h4>0.3 Demucs gain/null behavior</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> <code>spikes/demucs-gain/run.py</code>: split the golden track twice on the 4070 — current flags vs float-preserving output (no per-stem rescale), measure unity-sum RMS/peak residual for both</li>
-        <li><code class="status">[]</code> Decide and record: gain policy (float or common attenuation factor), acceptable residual thresholds for the two integrity gates</li>
+        <li><code class="status">[x]</code> <code>spikes/demucs-gain/run.py</code>: split the golden track twice on the 4070 — current flags vs float-preserving output (no per-stem rescale), measure unity-sum RMS/peak residual for both</li>
+        <li><code class="status">[x]</code> Decide and record: gain policy (float or common attenuation factor), acceptable residual thresholds for the two integrity gates</li>
       </ul>
 
       <h4>0.4 Blinded AAC bitrate comparison</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> <code>spikes/aac-abx/make_renditions.py</code>: from one golden track's float stems, produce 256k AAC / 320k AAC / ALAC remixes, randomized filenames + answer key</li>
+        <li><code class="status">[x]</code> <code>spikes/aac-abx/make_renditions.py</code>: from one golden track's float stems, produce 256k AAC / 320k AAC / ALAC remixes, randomized filenames + answer key</li>
         <li><code class="status">[]</code> Mike listens blind on the real rig (projector + main speakers); record chosen default bitrate in <code>spikes/RESULTS.md</code></li>
       </ul>
 

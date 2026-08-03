@@ -1,0 +1,32 @@
+{
+  "source": "spike 0.3 run B float stems, common gain 0.854274 (-1.368 dB)",
+  "sample_rate": 44100,
+  "encoder": "ffmpeg 4.4.2 native aac / alac; remix files ALAC s32p",
+  "blind_trim_db": -3.0,
+  "renditions": {
+    "aac256": {
+      "remix_peak_dbfs": 0.96,
+      "lag_samples": 0,
+      "residual_rms_dbfs": -31.54,
+      "residual_peak_dbfs": -3.32,
+      "null_depth_db": 19.16,
+      "n_samples": 8805376
+    },
+    "aac320": {
+      "remix_peak_dbfs": 0.82,
+      "lag_samples": 0,
+      "residual_rms_dbfs": -31.67,
+      "residual_peak_dbfs": -2.92,
+      "null_depth_db": 19.29,
+      "n_samples": 8805376
+    },
+    "alac": {
+      "remix_peak_dbfs": -0.09,
+      "lag_samples": 0,
+      "residual_rms_dbfs": -129.0,
+      "residual_peak_dbfs": -123.32,
+      "null_depth_db": 116.63,
+      "n_samples": 8805377
+    }
+  }
+}
