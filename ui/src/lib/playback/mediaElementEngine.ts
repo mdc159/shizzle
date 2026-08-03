@@ -18,6 +18,7 @@ import type { Stem, StemId, StemsManifest } from '@/types/karaoke';
 import type { PlaybackEngine } from './PlaybackEngine';
 import type { PlaybackMetrics, StemMetrics } from './metrics';
 import { dbToLinear } from './db';
+import { resolveMediaUrl } from './mediaUrl';
 import {
   HARD_DRIFT_SEC,
   STALL_TICKS_THRESHOLD,
@@ -100,7 +101,7 @@ class MediaElementEngine implements PlaybackEngine {
       const el = new Audio();
       el.crossOrigin = 'anonymous';
       el.preload = 'auto';
-      el.src = `${baseUrl}/${stem.file}`;
+      el.src = resolveMediaUrl(baseUrl, stem.file);
 
       const source = this.ctx!.createMediaElementSource(el);
       const gain = this.ctx!.createGain();

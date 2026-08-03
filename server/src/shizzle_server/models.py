@@ -54,6 +54,21 @@ class SubmitUrlRequest(BaseModel):
     title: str | None = None
 
 
+class AuthRequest(BaseModel):
+    passcode: str = Field(min_length=1, max_length=256)
+
+
+class AuthResponse(BaseModel):
+    token: str
+    expiresIn: int
+    mediaCookies: bool = False
+
+
+class MediaSessionResponse(BaseModel):
+    expiresIn: int
+    cloudfront: bool
+
+
 class TrackInfo(BaseModel):
     id: str
     title: str

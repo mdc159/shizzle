@@ -1,23 +1,58 @@
 /**
- * API Client for Local Karaoke Stem Splitter
+ * API Client for the Shizzle control plane.
  *
- * Communicates with local FastAPI backend for:
- * - File upload and processing
- * - Library browsing
- * - Job status polling
- * - Stem manifest loading
+ * - Passcode auth (POST /api/auth) → bearer token on every call (see auth.ts).
+ * - Library, job status, upload.
+ * - Playback manifest: GET /api/tracks/{id}/manifest returns a manifest whose
+ *   `video` / `stems[].file` are same-origin `/cdn` paths (cloud tracks) that
+ *   Caddy proxies to CloudFront behind signed cookies, or relative paths
+ *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
 import type { Track, StemsManifest, JobStatus, LibraryResponse } from '@/types/karaoke';
+import { authFetch, setToken } from '@/lib/auth';
+
+interface AuthResult {
+  ok: boolean;
+  mediaCookies: boolean;
+}
 
 /**
- * Upload a video file for stem separation
+ * Exchange the shared passcode for a device token (+ CloudFront media cookies).
+ * Returns ok=false on a wrong passcode.
+ */
+export async function login(passcode: string): Promise<AuthResult> {
+  const response = await fetch('/api/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ passcode }),
+  });
+  if (response.status === 401) return { ok: false, mediaCookies: false };
+  if (!response.ok) throw new Error(`Auth failed: ${response.statusText}`);
+  const data = await response.json();
+  setToken(data.token);
+  return { ok: true, mediaCookies: !!data.mediaCookies };
+}
+
+/**
+ * Refresh the CloudFront signed cookies for this device. Called on app mount
+ * so a returning (still-tokened) device re-arms media access.
+ */
+export async function refreshMediaSession(): Promise<{ cloudfront: boolean }> {
+  const response = await authFetch('/api/media/session', { method: 'POST' });
+  if (!response.ok) throw new Error(`Media session failed: ${response.statusText}`);
+  return response.json();
+}
+
+/**
+ * Upload a video file for stem separation.
  */
 export async function uploadFile(file: File): Promise<{ jobId: string }> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch('/api/upload', {
+  const response = await authFetch('/api/upload', {
     method: 'POST',
     body: formData,
   });
@@ -30,10 +65,10 @@ export async function uploadFile(file: File): Promise<{ jobId: string }> {
 }
 
 /**
- * Fetch library of completed tracks
+ * Fetch library of completed tracks.
  */
 export async function getLibrary(): Promise<Track[]> {
-  const response = await fetch('/api/library');
+  const response = await authFetch('/api/library');
 
   if (!response.ok) {
     throw new Error(`Failed to fetch library: ${response.statusText}`);
@@ -44,10 +79,10 @@ export async function getLibrary(): Promise<Track[]> {
 }
 
 /**
- * Poll job status during processing
+ * Poll job status during processing.
  */
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+  const response = await authFetch(`/api/jobs/${encodeURIComponent(jobId)}`);
 
   if (!response.ok) {
     if (response.status === 404) {
@@ -60,16 +95,12 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
 }
 
 /**
- * Load stems manifest for a track
- * @param slug - Track slug (job ID)
- * @param baseUrl - Base URL for the track files (e.g., /api/tracks/{id})
+ * Load the playback manifest for a track. The server resolves media refs to
+ * fetchable URLs (same-origin `/cdn` for cloud tracks, relative for local).
+ * @param trackId - Track id (slug).
  */
-export async function loadManifest(slug: string, baseUrl?: string): Promise<StemsManifest> {
-  const manifestUrl = baseUrl
-    ? `${baseUrl}/stems.json`
-    : `/api/tracks/${slug}/stems.json`;
-
-  const response = await fetch(manifestUrl);
+export async function loadManifest(trackId: string): Promise<StemsManifest> {
+  const response = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/manifest`);
 
   if (!response.ok) {
     throw new Error(`Failed to load manifest: ${response.statusText}`);

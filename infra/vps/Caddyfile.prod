@@ -1,0 +1,40 @@
+# Shizzle production Caddyfile (VPS: /opt/shizzle/Caddyfile).
+#
+# - Serves the built UI (ui/dist -> /srv/ui) at shizzle.systems with automatic
+#   HTTPS (Let's Encrypt; cert reused from the preserved caddy_data volume).
+# - Reverse-proxies /api and /ws to the api container.
+# - Reverse-proxies the same-origin /cdn path to the production CloudFront
+#   distribution (d2488k8kjndpsy.cloudfront.net, ELKN8VGSX0M64), Host-rewritten
+#   so CloudFront routes it. Media is private-S3 behind signed cookies; the
+#   cookies are set on shizzle.systems (Path=/cdn) and forwarded here.
+# - No explicit :80 server, so Caddy's standard HTTP->HTTPS redirect returns.
+
+shizzle.systems, www.shizzle.systems {
+	encode zstd gzip
+
+	# API + WebSocket relay -> control plane. reverse_proxy handles the WS
+	# upgrade transparently. (No /ws routes ship yet — remote pairing is a
+	# documented gap — but the route is ready.)
+	handle /api/* {
+		reverse_proxy api:8001
+	}
+	handle /ws/* {
+		reverse_proxy api:8001
+	}
+
+	# Same-origin media proxy -> CloudFront (signed-cookie gated private S3).
+	# handle_path strips /cdn, so /cdn/tracks/<id>/1/x.m4a -> CF /tracks/<id>/1/x.m4a
+	# which maps to the S3 key of the same name (default behavior).
+	handle_path /cdn/* {
+		reverse_proxy https://d2488k8kjndpsy.cloudfront.net {
+			header_up Host d2488k8kjndpsy.cloudfront.net
+		}
+	}
+
+	# Static UI (SPA fallback to index.html).
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -10,24 +10,36 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 
+from . import cloudfront, media
+from .auth import (
+    TOKEN_COOKIE,
+    check_passcode,
+    create_device_token,
+    require_auth,
+)
 from .db.models import SourceType, Track
 from .db.repository import HeartbeatRepository, JobRepository, TrackRepository
 from .models import (
+    AuthRequest,
+    AuthResponse,
     HealthResponse,
     JobListResponse,
     JobResponse,
     LibraryResponse,
+    MediaSessionResponse,
     SubmitUrlRequest,
     TrackInfo,
 )
@@ -37,6 +49,31 @@ from .settings import Settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
+
+# Gate every protected route with this. It is a no-op when no passcode is
+# configured (local/test), and a 401 on a bad token when one is.
+Protected = Depends(require_auth)
+
+
+def _set_media_cookies(response: Response, settings: Settings) -> bool:
+    """Attach the three CloudFront signed cookies scoped to the /cdn path.
+
+    Returns whether cookies were issued (False when CloudFront is unconfigured,
+    e.g. the front end is up but CDN media delivery is not wired yet)."""
+    if not settings.cloudfront_enabled:
+        return False
+    cookies = cloudfront.signed_cookies(settings)
+    for name, value in cookies.items():
+        response.set_cookie(
+            name,
+            value,
+            max_age=settings.media_ttl_seconds,
+            path=settings.media_cookie_path,
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+    return True
 
 
 # --- app.state accessors (wired by main.create_app) --------------------------
@@ -72,11 +109,57 @@ def _parse_track_id(track_id: str) -> uuid.UUID:
         raise HTTPException(404, "Track not found") from None
 
 
+# --- auth (design spec §7) ---------------------------------------------------
+
+
+@router.post("/auth")
+async def authenticate(request: Request, body: AuthRequest) -> JSONResponse:
+    """Exchange the shared passcode for a device token + media cookies.
+
+    When no passcode is configured the gate is off; we still mint a token so
+    the client flow is uniform.
+    """
+    settings = _settings(request)
+    if settings.auth_enabled and not check_passcode(settings, body.passcode):
+        raise HTTPException(401, "Incorrect passcode")
+
+    token, expiry = create_device_token(settings)
+    # Placeholder body; media-cookie issuance decides the mediaCookies flag,
+    # then we re-serialize (set_cookie appends distinct Set-Cookie headers).
+    response = JSONResponse({})
+    response.set_cookie(
+        TOKEN_COOKIE,
+        token,
+        max_age=settings.auth_token_ttl_seconds,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    issued = _set_media_cookies(response, settings)
+    payload = AuthResponse(token=token, expiresIn=expiry, mediaCookies=issued)
+    response.body = response.render(payload.model_dump())
+    response.headers["content-length"] = str(len(response.body))
+    return response
+
+
+@router.post("/media/session")
+async def media_session(request: Request, _auth: None = Protected) -> JSONResponse:
+    """Refresh the CloudFront signed cookies for this device (media TTL)."""
+    settings = _settings(request)
+    payload = MediaSessionResponse(
+        expiresIn=settings.media_ttl_seconds, cloudfront=settings.cloudfront_enabled
+    )
+    response = JSONResponse(payload.model_dump())
+    _set_media_cookies(response, settings)
+    return response
+
+
 # --- ingest ------------------------------------------------------------------
 
 
 @router.post("/upload")
-async def upload_file(request: Request, file: UploadFile) -> dict:
+async def upload_file(request: Request, file: UploadFile, _auth: None = Protected) -> dict:
     """Accept an MP4 upload, persist it, and create a pending job row."""
     settings = _settings(request)
     if not file.filename:
@@ -141,7 +224,7 @@ async def upload_file(request: Request, file: UploadFile) -> dict:
 
 
 @router.post("/submit-url")
-async def submit_url(request: Request, body: SubmitUrlRequest) -> dict:
+async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Protected) -> dict:
     """Create a url-sourced job. Phase 2: it will fail at the downloading stub
     with a structured YTDLP_BLOCKED error (Phase 3 implements yt-dlp ingest)."""
     parsed = urlparse(body.url)
@@ -161,7 +244,7 @@ async def submit_url(request: Request, body: SubmitUrlRequest) -> dict:
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(request: Request, job_id: str) -> JobResponse:
+async def get_job_status(request: Request, job_id: str, _auth: None = Protected) -> JobResponse:
     job = await _jobs(request).get_job(_parse_job_id(job_id))
     if job is None:
         raise HTTPException(404, "Job not found")
@@ -169,7 +252,9 @@ async def get_job_status(request: Request, job_id: str) -> JobResponse:
 
 
 @router.get("/jobs")
-async def list_jobs(request: Request, limit: int = 50, offset: int = 0) -> JobListResponse:
+async def list_jobs(
+    request: Request, limit: int = 50, offset: int = 0, _auth: None = Protected
+) -> JobListResponse:
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     jobs, total = await _jobs(request).list_jobs(limit=limit, offset=offset)
@@ -185,19 +270,53 @@ async def list_jobs(request: Request, limit: int = 50, offset: int = 0) -> JobLi
 
 
 @router.get("/library")
-async def get_library(request: Request) -> LibraryResponse:
+async def get_library(request: Request, _auth: None = Protected) -> LibraryResponse:
     tracks = await _tracks(request).list_tracks(include_deleted=False)
     infos = [TrackInfo.from_track(t) for t in tracks]
     return LibraryResponse(tracks=infos, total=len(infos))
 
 
 @router.delete("/tracks/{track_id}")
-async def delete_track(request: Request, track_id: str) -> dict:
+async def delete_track(request: Request, track_id: str, _auth: None = Protected) -> dict:
     """Soft delete (design: manual delete only, no silent retention deletion)."""
     deleted = await _tracks(request).soft_delete(_parse_track_id(track_id))
     if not deleted:
         raise HTTPException(404, "Track not found")
     return {"deleted": track_id}
+
+
+@router.get("/tracks/{track_id}/manifest")
+async def get_track_manifest(
+    request: Request, track_id: str, _auth: None = Protected
+) -> dict[str, Any]:
+    """Return the playback manifest with media refs the player can fetch.
+
+    Cloud tracks (S3 prefix ``tracks/…``): read manifest.json from S3 and
+    rewrite ``video`` + ``stems[].file`` to same-origin ``/cdn`` paths that
+    Caddy proxies to CloudFront (signed-cookie gated). Local tracks: read the
+    on-disk manifest and leave refs relative (the player joins them with the
+    ``/api/tracks/{id}`` base). Declared before the ``{path:path}`` catch-all so
+    it wins the route match.
+    """
+    settings = _settings(request)
+    track = await _tracks(request).get(_parse_track_id(track_id))
+    if track is None or track.deleted_at is not None:
+        raise HTTPException(404, "Track not found")
+
+    if track.s3_prefix.startswith("local/"):
+        _, job_dir = await _resolve_local_track_dir(request, track_id)
+        manifest_path = (job_dir / "stems.json").resolve()
+        if not manifest_path.is_relative_to(job_dir) or not manifest_path.exists():
+            raise HTTPException(404, "Manifest not found")
+        return dict(json.loads(manifest_path.read_text()))
+
+    # Cloud track: pull from S3 and rewrite to /cdn paths.
+    try:
+        raw = await asyncio.to_thread(media.load_s3_manifest, settings, track.manifest_key)
+    except Exception as exc:  # noqa: BLE001 - surface as 502 with a clean message
+        logger.warning("manifest fetch failed for %s: %s", track_id, exc)
+        raise HTTPException(502, "Manifest unavailable") from exc
+    return media.rewrite_cloud_manifest(settings, raw, track.s3_prefix)
 
 
 async def _resolve_local_track_dir(request: Request, track_id: str) -> tuple[Track, Path]:
@@ -213,7 +332,7 @@ async def _resolve_local_track_dir(request: Request, track_id: str) -> tuple[Tra
 
 
 @router.get("/tracks/{track_id}/download")
-async def download_track(request: Request, track_id: str) -> FileResponse:
+async def download_track(request: Request, track_id: str, _auth: None = Protected) -> FileResponse:
     """Download the multi-track MP4 (Mike's archival format)."""
     _, job_dir = await _resolve_local_track_dir(request, track_id)
     mp4 = job_dir / "multi-track.mp4"
@@ -223,7 +342,9 @@ async def download_track(request: Request, track_id: str) -> FileResponse:
 
 
 @router.get("/tracks/{track_id}/{path:path}")
-async def serve_track_file(request: Request, track_id: str, path: str) -> FileResponse:
+async def serve_track_file(
+    request: Request, track_id: str, path: str, _auth: None = Protected
+) -> FileResponse:
     """Serve video, stems, or manifest files for a locally stored track."""
     _, job_dir = await _resolve_local_track_dir(request, track_id)
     file_path = (job_dir / path).resolve()

@@ -26,6 +26,7 @@ dependencies = [
     "pydantic>=2.5",
     "pydantic-settings>=2.1",
     "boto3>=1.34",
+    "cryptography>=42.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.31.0",
     "alembic>=1.18.5",

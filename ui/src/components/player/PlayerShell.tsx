@@ -4,6 +4,7 @@ import { TransportControls } from './TransportControls';
 import { cn } from '@/lib/utils';
 import { useAudioSync } from '@/hooks/useAudioSync';
 import { loadManifest } from '@/lib/api';
+import { resolveMediaUrl } from '@/lib/playback/mediaUrl';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -54,7 +55,6 @@ export const PlayerShell: React.FC = () => {
   }, [playing, showControls, setControlsVisible]);
 
   const trackSlug = currentTrack?.slug;
-  const trackPublicUrl = currentTrack?.publicUrl;
 
   // Load manifest when track changes
   useEffect(() => {
@@ -66,8 +66,8 @@ export const PlayerShell: React.FC = () => {
     const fetchManifest = async () => {
       setIsLoading(true);
       try {
-        // Pass publicUrl (S3) if available, otherwise fallback to VPS path
-        const manifestData = await loadManifest(trackSlug, trackPublicUrl);
+        // Server resolves media refs (same-origin /cdn for cloud, relative for local).
+        const manifestData = await loadManifest(trackSlug);
         setManifest(manifestData);
         setDuration(manifestData.duration);
       } catch (err) {
@@ -80,7 +80,7 @@ export const PlayerShell: React.FC = () => {
     };
 
     fetchManifest();
-  }, [trackSlug, trackPublicUrl, setManifest, setDuration]);
+  }, [trackSlug, setManifest, setDuration]);
 
   // Handle Time Updates - sync store with video time
   const handleTimeUpdate = useCallback(() => {
@@ -97,9 +97,10 @@ export const PlayerShell: React.FC = () => {
     }
   }, [currentTime, handleSeek]);
 
-  // Build video URL from manifest (use S3 publicUrl if available)
+  // Build video URL from manifest. Cloud manifests carry a same-origin /cdn
+  // path; local manifests carry a relative path joined with the track base.
   const videoSrc = currentTrack && manifest
-    ? `${currentTrack.publicUrl || `/videos/${currentTrack.slug}`}/${manifest.video}`
+    ? resolveMediaUrl(currentTrack.publicUrl || `/videos/${currentTrack.slug}`, manifest.video)
     : undefined;
 
   return (

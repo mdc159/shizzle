@@ -51,6 +51,58 @@ class Settings(BaseSettings):
 
     processing_profile_version: int = 1
 
+    # --- auth (design spec §7) -----------------------------------------------
+    # One shared passcode friends enter once per device. When empty (the local
+    # and test default) the gate is OFF — every route is open, which keeps the
+    # single-container profile and the unit suite working with no secrets. Set
+    # a real value on the VPS to turn the gate on. Rotating the passcode (its
+    # value is bound into every token's signature) revokes all issued tokens.
+    shizzle_passcode: str = ""
+    auth_version: int = 1
+    token_signing_secret: str = "dev-insecure-change-me"
+    auth_token_ttl_seconds: int = 7 * 24 * 3600
+
+    # --- AWS / S3 media ------------------------------------------------------
+    # The imported legacy library lives in `karaoke-pimpshizzle` under
+    # `tracks/{id}/{generation}/…` (see scripts/import_legacy_library.py). The
+    # media-manifest route reads manifest.json from here.
+    aws_region: str = "us-east-1"
+    # Machine gotcha: a global AWS_ENDPOINT_URL points this PC at Cloudflare R2.
+    # Empty means "use real AWS"; the S3 client factory pops the env override.
+    aws_endpoint_url: str = ""
+    s3_media_bucket: str = "karaoke-pimpshizzle"
+
+    # --- CloudFront signed-cookie media delivery (design spec §3/§7) ---------
+    # Media is served through CloudFront (OAC over the private bucket + a
+    # trusted key group requiring signed cookies). Caddy reverse-proxies the
+    # same-origin path `media_cookie_path` (/cdn) to the distribution so the
+    # signed cookies — set on shizzle.systems — ride along same-origin.
+    cloudfront_domain: str = ""  # e.g. d2488k8kjndpsy.cloudfront.net
+    cloudfront_key_pair_id: str = ""
+    cloudfront_private_key_path: str = ""
+    # Same-origin path under shizzle.systems that Caddy maps to the CDN. The
+    # signed cookies are scoped here; the rewritten manifest points media at it.
+    media_cookie_path: str = "/cdn"
+    # Signed-cookie validity. Refreshed by /api/media/session.
+    media_ttl_seconds: int = 24 * 3600
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.shizzle_passcode)
+
+    @property
+    def cloudfront_enabled(self) -> bool:
+        return bool(
+            self.cloudfront_domain
+            and self.cloudfront_key_pair_id
+            and self.cloudfront_private_key_path
+        )
+
+    @property
+    def cloudfront_resource_base(self) -> str:
+        """The URL prefix CloudFront sees (behind the Caddy /cdn proxy)."""
+        return f"https://{self.cloudfront_domain}"
+
 
 def get_settings() -> Settings:
     """Fresh settings from the environment (cheap; no global cache so tests can override env)."""
