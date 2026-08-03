@@ -162,14 +162,14 @@
     <p>Status markers: <code>[]</code> idle · <code>[wip]</code> in progress · <code>[x]</code> complete · <code>[f]</code> failed. All start as <code>[]</code>; the Build Plan workflow updates them as it works.</p>
 
     <div class="phase">
-      <h3><code class="status">[]</code> Phase 0: Risk Spikes — prove the hard assumptions first</h3>
+      <h3><code class="status">[wip]</code> Phase 0: Risk Spikes — prove the hard assumptions first</h3>
       <p>Cheap, isolated experiments that decide the design's riskiest bets before structural work. Every spike writes its outcome (numbers, verdict, decision) to <code>spikes/RESULTS.md</code>. Blocked-on-credentials spikes (0.2) may run concurrently with Phase 1 but must complete before Phase 3.</p>
 
       <h4>0.1 Stem-skew playback probe (decides PlaybackEngine path)</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> Build <code>spikes/skew-probe/</code>: static page loading a full processed track from <code>X:\GitHub\k25\data\</code> (video + 6 m4a) via six <code>&lt;audio&gt;</code> + gain nodes</li>
-        <li><code class="status">[]</code> Instrument: sample every 250 ms — each stem's <code>currentTime</code> delta vs video (min/max/per-stem, never average-only), <code>readyState</code>/stalled flags, correction events; dump JSON report on song end</li>
-        <li><code class="status">[]</code> Run a full song on: Chromium laptop (HDMI reference), iPad Safari, Samsung projector Tizen browser</li>
+        <li><code class="status">[x]</code> Build <code>spikes/skew-probe/</code>: static page loading a full processed track from <code>X:\GitHub\k25\data\</code> (video + 6 m4a) via six <code>&lt;audio&gt;</code> + gain nodes</li>
+        <li><code class="status">[x]</code> Instrument: sample every 250 ms — each stem's <code>currentTime</code> delta vs video (min/max/per-stem, never average-only), <code>readyState</code>/stalled flags, correction events; dump JSON report on song end</li>
+        <li><code class="status">[wip]</code> Run a full song on: Chromium laptop (HDMI reference) <strong>✔ 3 ms corrected / 6 ms raw — PASS</strong>; iPad Safari + Samsung projector Tizen browser pending human runs</li>
         <li><code class="status">[]</code> Record verdict in <code>spikes/RESULTS.md</code>: max skew per device vs 50 ms threshold; Tizen supported/opportunistic/unsupported; segment-scheduler contingency triggered or not</li>
       </ul>
 
@@ -204,7 +204,7 @@
     </div>
 
     <div class="phase">
-      <h3><code class="status">[]</code> Phase 1: Repo Assembly + Local Golden Pipeline</h3>
+      <h3><code class="status">[wip]</code> Phase 1: Repo Assembly + Local Golden Pipeline</h3>
       <p>Fresh monorepo, salvage copied in with provenance, strict tooling from day one, and the local pipeline running on the 4070 as the reference implementation. No cloud dependencies yet.</p>
       <figure>
         <img src="shizzle-cloud-karaoke-implementation/phase1.png" alt="Three old repositories funneling selected blocks into one clean repository with a provenance ledger">

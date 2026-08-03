@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shizzle skew probe 0.1</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, Consolas, monospace; background: #111; color: #ddd; margin: 12px; font-size: 13px; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  button { font: inherit; padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+  #status { margin: 8px 0; color: #9c9; }
+  #status.err { color: #f88; }
+  video { width: 320px; max-width: 90vw; background: #000; display: block; margin: 8px 0; }
+  table { border-collapse: collapse; margin: 8px 0; }
+  th, td { border: 1px solid #444; padding: 3px 8px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .warn { color: #fc6; }
+  .bad  { color: #f66; }
+  #summary { white-space: pre; background: #1a1a1a; padding: 8px; border: 1px solid #333; }
+  .mode-corrected { color: #6cf; }
+  .mode-raw { color: #f9c; }
+</style>
+</head>
+<body>
+<h1>Shizzle skew probe 0.1 — six-stem sync vs muted video</h1>
+<div>
+  <button id="btnPlay" disabled>Play</button>
+  <button id="btnMode" disabled>Mode: corrected</button>
+  <button id="btnDownload" disabled>Download JSON report</button>
+  <span id="modeLabel" class="mode-corrected">corrected</span>
+</div>
+<div id="status">loading…</div>
+<video id="video" muted playsinline></video>
+<table id="live">
+  <thead><tr><th>stem</th><th>delta ms (stem − video)</th><th>readyState</th><th>waiting</th><th>stalled</th><th>rate</th></tr></thead>
+  <tbody></tbody>
+</table>
+<div id="summary">no samples yet</div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// Config — tiered drift policy ported from k25-nextgen-rewrite useAudioSync.ts
+// ---------------------------------------------------------------------------
+const SOFT_DRIFT_SEC = 0.05;    // < 50 ms: ignore
+const HARD_DRIFT_SEC = 0.25;    // 50–250 ms: playbackRate nudge; > 250 ms: hard seek
+const NUDGE_MAX = 0.005;        // ±0.5 % playbackRate
+const STALL_TICKS_THRESHOLD = 3;
+const STALL_ADVANCE_SEC = 0.02; // video must advance > this per 1 s tick
+const CORRECTION_INTERVAL_MS = 1000;
+const SAMPLE_INTERVAL_MS = 250;
+const CONSOLE_SUMMARY_MS = 5000;
+
+const qs = new URLSearchParams(location.search);
+const trackBase = (qs.get('track') || '/track').replace(/\/+$/, '');
+
+const statusEl = document.getElementById('status');
+const video = document.getElementById('video');
+const btnPlay = document.getElementById('btnPlay');
+const btnMode = document.getElementById('btnMode');
+const btnDownload = document.getElementById('btnDownload');
+const modeLabel = document.getElementById('modeLabel');
+const liveBody = document.querySelector('#live tbody');
+const summaryEl = document.getElementById('summary');
+
+let manifest = null;
+let stems = [];            // { id, el, gain, srcNode, waiting, stalled }
+let audioCtx = null;
+let mode = 'corrected';    // 'corrected' | 'raw'
+let playing = false;
+let samples = [];          // sample records
+let corrections = [];      // { t, wall, type: 'nudge'|'hardSeek'|'stallBailout', ... }
+let stallBailouts = 0;
+let sampleTimer = null, correctionTimer = null, consoleTimer = null;
+let lastVideoTime = 0;
+let stalledTicks = 0;
+let runStartWall = null;
+
+function setStatus(msg, err) {
+  statusEl.textContent = msg;
+  statusEl.className = err ? 'err' : '';
+}
+
+// ---------------------------------------------------------------------------
+// Load
+// ---------------------------------------------------------------------------
+async function init() {
+  try {
+    const res = await fetch(trackBase + '/stems.json');
+    if (!res.ok) throw new Error('stems.json HTTP ' + res.status);
+    manifest = await res.json();
+  } catch (e) {
+    setStatus('failed to load ' + trackBase + '/stems.json — ' + e.message, true);
+    return;
+  }
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  video.src = trackBase + '/' + (manifest.video || 'video.mp4');
+  video.muted = true;
+  video.preload = 'auto';
+
+  stems = manifest.stems.map(s => {
+    const el = new Audio();
+    el.src = trackBase + '/' + s.file;
+    el.preload = 'auto';
+    el.crossOrigin = 'anonymous';
+    const srcNode = audioCtx.createMediaElementSource(el);
+    const gain = audioCtx.createGain();
+    gain.gain.value = 1;
+    srcNode.connect(gain).connect(audioCtx.destination);
+    const st = { id: s.id, el, gain, srcNode, waiting: 0, stalled: 0 };
+    el.addEventListener('waiting', () => { st.waiting++; });
+    el.addEventListener('stalled', () => { st.stalled++; });
+    return st;
+  });
+
+  const waitReady = m => new Promise((resolve, reject) => {
+    if (m.readyState >= 3) return resolve();
+    m.addEventListener('canplay', resolve, { once: true });
+    m.addEventListener('error', () => reject(new Error('media error: ' + (m.currentSrc || m.src))), { once: true });
+  });
+
+  try {
+    await Promise.all([waitReady(video), ...stems.map(s => waitReady(s.el))]);
+  } catch (e) {
+    setStatus(e.message, true);
+    return;
+  }
+
+  setStatus('ready — "' + (manifest.title || '?') + '" ' + (manifest.duration || '?') + 's, ' + stems.length + ' stems, mode=' + mode);
+  btnPlay.disabled = btnMode.disabled = btnDownload.disabled = false;
+  window.__probeReady = true;
+}
+
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+async function play() {
+  if (playing) return;
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  // align stems to video before starting
+  hardSeekAll(video.currentTime, 'startAlign');
+  lastVideoTime = video.currentTime;
+  stalledTicks = 0;
+  if (runStartWall === null) runStartWall = Date.now();
+  await Promise.all([video.play(), ...stems.map(s => s.el.play())]);
+  playing = true;
+  btnPlay.textContent = 'Pause';
+  startTimers();
+}
+
+function pause() {
+  playing = false;
+  video.pause();
+  stems.forEach(s => { s.el.pause(); s.el.playbackRate = 1; });
+  btnPlay.textContent = 'Play';
+  stopTimers();
+}
+
+function hardSeekAll(t, why) {
+  stems.forEach(s => {
+    if (Math.abs(s.el.currentTime - t) > 0.001) s.el.currentTime = t;
+    s.el.playbackRate = 1;
+  });
+  if (why !== 'startAlign') {
+    corrections.push({ t: video.currentTime, wall: Date.now(), type: 'hardSeek', why });
+  }
+}
+
+function startTimers() {
+  sampleTimer = setInterval(sampleTick, SAMPLE_INTERVAL_MS);
+  correctionTimer = setInterval(correctionTick, CORRECTION_INTERVAL_MS);
+  consoleTimer = setInterval(() => console.log('PROBE_SUMMARY ' + JSON.stringify(computeSummary())), CONSOLE_SUMMARY_MS);
+}
+function stopTimers() {
+  clearInterval(sampleTimer); clearInterval(correctionTimer); clearInterval(consoleTimer);
+}
+
+// ---------------------------------------------------------------------------
+// Correction loop (1 s cadence) — the ported tiered policy
+// ---------------------------------------------------------------------------
+function correctionTick() {
+  if (!playing) return;
+
+  const vt = video.currentTime;
+  const advanced = vt > lastVideoTime + STALL_ADVANCE_SEC;
+  lastVideoTime = vt;
+
+  if (!advanced) {
+    stalledTicks++;
+    if (stalledTicks >= STALL_TICKS_THRESHOLD) {
+      stallBailouts++;
+      corrections.push({ t: vt, wall: Date.now(), type: 'stallBailout' });
+      pause();
+      setStatus('video stalled — bailed out; press Play to resume', true);
+      stalledTicks = 0;
+    }
+    return;
+  }
+  stalledTicks = 0;
+
+  if (mode !== 'corrected') return; // raw mode: measure only, never correct
+
+  const audioTime = stems.reduce((a, s) => a + s.el.currentTime, 0) / stems.length;
+  const drift = audioTime - vt;
+  const absDrift = Math.abs(drift);
+
+  if (absDrift < SOFT_DRIFT_SEC) {
+    stems.forEach(s => { s.el.playbackRate = 1; });
+    return;
+  }
+
+  if (absDrift < HARD_DRIFT_SEC) {
+    const nudge = Math.max(-NUDGE_MAX, Math.min(NUDGE_MAX, -drift * 0.03));
+    stems.forEach(s => { s.el.playbackRate = 1 + nudge; });
+    corrections.push({ t: vt, wall: Date.now(), type: 'nudge', driftMs: Math.round(drift * 1000), rate: 1 + nudge });
+    return;
+  }
+
+  hardSeekAll(vt, 'drift ' + Math.round(drift * 1000) + 'ms');
+}
+
+// ---------------------------------------------------------------------------
+// Sampler (250 ms)
+// ---------------------------------------------------------------------------
+function sampleTick() {
+  if (!playing) return;
+  const vt = video.currentTime;
+  const rec = {
+    wall: Date.now(),
+    videoTime: +vt.toFixed(3),
+    stems: stems.map(s => ({
+      id: s.id,
+      deltaMs: Math.round((s.el.currentTime - vt) * 1000),
+      readyState: s.el.readyState,
+      waiting: s.waiting,
+      stalled: s.stalled,
+      rate: +s.el.playbackRate.toFixed(4),
+    })),
+  };
+  const deltas = rec.stems.map(x => x.deltaMs);
+  rec.interStemSkewMs = Math.max(...deltas) - Math.min(...deltas);
+  rec.mixDriftMs = Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length);
+  samples.push(rec);
+  renderLive(rec);
+  renderSummary();
+}
+
+function renderLive(rec) {
+  liveBody.innerHTML = rec.stems.map(s => {
+    const cls = Math.abs(s.deltaMs) > 250 ? 'bad' : Math.abs(s.deltaMs) > 50 ? 'warn' : '';
+    return '<tr><td>' + s.id + '</td><td class="' + cls + '">' + s.deltaMs +
+      '</td><td>' + s.readyState + '</td><td>' + s.waiting + '</td><td>' + s.stalled +
+      '</td><td>' + s.rate + '</td></tr>';
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+function computeSummary() {
+  const perStem = {};
+  stems.forEach(s => { perStem[s.id] = { min: Infinity, max: -Infinity, sum: 0, n: 0 }; });
+  let maxInterStem = 0, maxAbsMixDrift = 0;
+  samples.forEach(rec => {
+    rec.stems.forEach(x => {
+      const p = perStem[x.id];
+      if (!p) return;
+      p.min = Math.min(p.min, x.deltaMs); p.max = Math.max(p.max, x.deltaMs);
+      p.sum += x.deltaMs; p.n++;
+    });
+    maxInterStem = Math.max(maxInterStem, rec.interStemSkewMs);
+    maxAbsMixDrift = Math.max(maxAbsMixDrift, Math.abs(rec.mixDriftMs));
+  });
+  const stemsOut = {};
+  Object.entries(perStem).forEach(([id, p]) => {
+    stemsOut[id] = p.n ? { minMs: p.min, maxMs: p.max, meanMs: +(p.sum / p.n).toFixed(1) } : null;
+  });
+  return {
+    mode,
+    track: trackBase,
+    title: manifest ? manifest.title : null,
+    samples: samples.length,
+    playedSec: samples.length ? +(samples.length * SAMPLE_INTERVAL_MS / 1000).toFixed(1) : 0,
+    videoTime: +video.currentTime.toFixed(1),
+    maxInterStemSkewMs: maxInterStem,
+    maxAbsMixDriftMs: maxAbsMixDrift,
+    perStem: stemsOut,
+    counts: {
+      nudges: corrections.filter(c => c.type === 'nudge').length,
+      hardSeeks: corrections.filter(c => c.type === 'hardSeek').length,
+      stallBailouts,
+      stemWaitingEvents: stems.reduce((a, s) => a + s.waiting, 0),
+      stemStalledEvents: stems.reduce((a, s) => a + s.stalled, 0),
+    },
+    ua: navigator.userAgent,
+  };
+}
+
+function renderSummary() {
+  const s = computeSummary();
+  const lines = [
+    'mode=' + s.mode + '  samples=' + s.samples + '  played≈' + s.playedSec + 's  videoTime=' + s.videoTime + 's',
+    'max inter-stem skew: ' + s.maxInterStemSkewMs + ' ms    max |mix−video| drift: ' + s.maxAbsMixDriftMs + ' ms',
+    'nudges=' + s.counts.nudges + '  hardSeeks=' + s.counts.hardSeeks + '  stallBailouts=' + s.counts.stallBailouts +
+      '  waiting=' + s.counts.stemWaitingEvents + '  stalled=' + s.counts.stemStalledEvents,
+    'per-stem delta ms (min / mean / max):',
+  ];
+  Object.entries(s.perStem).forEach(([id, p]) => {
+    lines.push('  ' + id.padEnd(8) + (p ? p.minMs + ' / ' + p.meanMs + ' / ' + p.maxMs : '—'));
+  });
+  summaryEl.textContent = lines.join('\n');
+}
+
+function fullReport() {
+  return {
+    summary: computeSummary(),
+    corrections,
+    samples,
+    generatedAt: new Date().toISOString(),
+    runStartWall,
+  };
+}
+
+function downloadReport() {
+  const blob = new Blob([JSON.stringify(fullReport(), null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'skew-report-' + mode + '-' + Date.now() + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring + automation hooks
+// ---------------------------------------------------------------------------
+btnPlay.addEventListener('click', () => playing ? pause() : play());
+btnMode.addEventListener('click', () => setMode(mode === 'corrected' ? 'raw' : 'corrected'));
+btnDownload.addEventListener('click', downloadReport);
+
+function setMode(m) {
+  mode = m;
+  btnMode.textContent = 'Mode: ' + m;
+  modeLabel.textContent = m;
+  modeLabel.className = 'mode-' + m;
+  if (m === 'raw') stems.forEach(s => { s.el.playbackRate = 1; });
+}
+
+window.__probe = {
+  play, pause, setMode,
+  getSummary: computeSummary,
+  getReport: fullReport,
+  isPlaying: () => playing,
+  videoTime: () => video.currentTime,
+};
+
+init();
+</script>
+</body>
+</html>

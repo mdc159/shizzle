@@ -1,0 +1,102 @@
+{
+  "corrected": {
+    "mode": "corrected",
+    "track": "/track",
+    "title": "acdc-flick",
+    "samples": 760,
+    "playedSec": 190,
+    "videoTime": 190,
+    "maxInterStemSkewMs": 3,
+    "maxAbsMixDriftMs": 537,
+    "perStem": {
+      "vocals": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.7
+      },
+      "drums": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.7
+      },
+      "bass": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.7
+      },
+      "guitar": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.8
+      },
+      "piano": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.8
+      },
+      "shizzle": {
+        "minMs": -537,
+        "maxMs": 14,
+        "meanMs": 0.7
+      }
+    },
+    "counts": {
+      "nudges": 0,
+      "hardSeeks": 1,
+      "stallBailouts": 0,
+      "stemWaitingEvents": 6,
+      "stemStalledEvents": 0
+    },
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+  },
+  "raw": {
+    "mode": "raw",
+    "track": "/track",
+    "title": "acdc-flick",
+    "samples": 260,
+    "playedSec": 65,
+    "videoTime": 65,
+    "maxInterStemSkewMs": 6,
+    "maxAbsMixDriftMs": 5,
+    "perStem": {
+      "vocals": {
+        "minMs": -7,
+        "maxMs": 4,
+        "meanMs": -1.8
+      },
+      "drums": {
+        "minMs": -5,
+        "maxMs": 6,
+        "meanMs": 0.3
+      },
+      "bass": {
+        "minMs": -5,
+        "maxMs": 6,
+        "meanMs": 0.3
+      },
+      "guitar": {
+        "minMs": -5,
+        "maxMs": 6,
+        "meanMs": 0.4
+      },
+      "piano": {
+        "minMs": -5,
+        "maxMs": 6,
+        "meanMs": 0.6
+      },
+      "shizzle": {
+        "minMs": -7,
+        "maxMs": 4,
+        "meanMs": -1.6
+      }
+    },
+    "counts": {
+      "nudges": 0,
+      "hardSeeks": 0,
+      "stallBailouts": 0,
+      "stemWaitingEvents": 0,
+      "stemStalledEvents": 0
+    },
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+  }
+}
