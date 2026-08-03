@@ -213,19 +213,19 @@
 
       <h4>1.1 Scaffold and tooling</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> Create monorepo layout: <code>server/</code>, <code>worker/</code>, <code>ui/</code>, <code>infra/</code>, <code>spikes/</code>, <code>fixtures/</code>, <code>docs/</code>; root README</li>
-        <li><code class="status">[]</code> Python: uv workspaces for <code>server/</code> and <code>worker/</code>; copy ruff + mypy-strict + pytest config from <code>archive/agent/pyproject.toml</code> into both</li>
-        <li><code class="status">[]</code> UI: copy nextgen <code>ui/</code> wholesale; keep ESLint flat config + knip; wire <code>npm run lint &amp;&amp; npm run typecheck &amp;&amp; npm run knip</code> as one <code>check</code> script</li>
-        <li><code class="status">[]</code> <code>.gitignore</code> from nextgen (data/, media, env) — never from k25</li>
-        <li><code class="status">[]</code> Create <code>fixtures/golden-30s.mp4</code>: 30 s rights-safe clip (generate tones+video with ffmpeg) for CI; full-length personal golden track stays local-only, path via env var</li>
+        <li><code class="status">[x]</code> Create monorepo layout: <code>server/</code>, <code>worker/</code>, <code>ui/</code>, <code>infra/</code>, <code>spikes/</code>, <code>fixtures/</code>, <code>docs/</code>; root README</li>
+        <li><code class="status">[x]</code> Python: uv workspaces for <code>server/</code> and <code>worker/</code>; copy ruff + mypy-strict + pytest config from <code>archive/agent/pyproject.toml</code> into both</li>
+        <li><code class="status">[x]</code> UI: copy nextgen <code>ui/</code> wholesale; keep ESLint flat config + knip; wire <code>npm run lint &amp;&amp; npm run typecheck &amp;&amp; npm run knip</code> as one <code>check</code> script</li>
+        <li><code class="status">[x]</code> <code>.gitignore</code> from nextgen (data/, media, env) — never from k25</li>
+        <li><code class="status">[x]</code> Create <code>fixtures/golden-30s.mp4</code>: 30 s rights-safe clip (generate tones+video with ffmpeg) for CI; full-length personal golden track stays local-only, path via env var</li>
       </ul>
 
       <h4>1.2 Salvage copy-in with provenance</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> Copy server trunk from nextgen <code>local-server/</code> → <code>server/</code>, renamed <code>shizzle_server</code>; delete stale docs, dead env files, orphan configs listed in the spec's "not carried" table</li>
-        <li><code class="status">[]</code> Copy <code>archive/runpod/</code> → <code>worker/</code>; <code>s3_multipart.py</code> + <code>circuit_breaker.py</code> (with their tests) → <code>server/src/shizzle_server/lib/</code></li>
-        <li><code class="status">[]</code> Hand-port mute/solo + −60…+12 dB from k25's uncommitted <code>MixerDrawer.tsx</code>/<code>useStore.ts</code></li>
-        <li><code class="status">[]</code> Write <code>docs/provenance.md</code>: one row per salvaged unit — source repo, commit or "uncommitted working tree 2026-08-02", path, intentional changes, tests carried</li>
+        <li><code class="status">[x]</code> Copy server trunk from nextgen <code>local-server/</code> → <code>server/</code>, renamed <code>shizzle_server</code>; delete stale docs, dead env files, orphan configs listed in the spec's "not carried" table</li>
+        <li><code class="status">[x]</code> Copy <code>archive/runpod/</code> → <code>worker/</code>; <code>s3_multipart.py</code> + <code>circuit_breaker.py</code> (with their tests) → <code>server/src/shizzle_server/lib/</code></li>
+        <li><code class="status">[x]</code> Hand-port mute/solo + −60…+12 dB from k25's uncommitted <code>MixerDrawer.tsx</code>/<code>useStore.ts</code></li>
+        <li><code class="status">[x]</code> Write <code>docs/provenance.md</code>: one row per salvaged unit — source repo, commit or "uncommitted working tree 2026-08-02", path, intentional changes, tests carried</li>
       </ul>
 
       <h4>1.3 Contract and audio-graph corrections (spec §5)</h4>

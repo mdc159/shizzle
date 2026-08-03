@@ -1,0 +1,6 @@
+runpod
+boto3
+demucs
+numpy<2
+soundfile
+requests
