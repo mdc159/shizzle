@@ -5,7 +5,8 @@ export interface Stem {
   id: StemId;
   name: string;
   file: string;
-  default_gain: number;
+  /** Default stem gain in dB (manifest v3). Convert via dbToLinear() at load. */
+  default_gain_db: number;
 }
 
 export interface StemsManifest {

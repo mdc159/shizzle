@@ -1,0 +1,1 @@
+{"Changes":[{"Action":"UPSERT","ResourceRecordSet":{"Name":"shizzle.systems.","Type":"A","TTL":300,"ResourceRecords":[{"Value":"72.60.173.171"}]}},{"Action":"UPSERT","ResourceRecordSet":{"Name":"www.shizzle.systems.","Type":"CNAME","TTL":300,"ResourceRecords":[{"Value":"shizzle.systems"}]}}]}

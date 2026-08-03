@@ -230,24 +230,24 @@
 
       <h4>1.3 Contract and audio-graph corrections (spec §5)</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> Rename <code>default_gain</code> → <code>default_gain_db</code> in manifest writer, Pydantic models, TS types; apply via <code>dbToLinear()</code> at load (kills the latent 0-dB-is-silence bug)</li>
-        <li><code class="status">[]</code> Extract <code>PlaybackEngine.ts</code> interface; move salvaged StemAudioManager + drift policy behind it as <code>mediaElementEngine.ts</code>; add <code>metrics.ts</code> instrumentation from spike 0.1</li>
+        <li><code class="status">[x]</code> Rename <code>default_gain</code> → <code>default_gain_db</code> in manifest writer, Pydantic models, TS types; apply via <code>dbToLinear()</code> at load (kills the latent 0-dB-is-silence bug)</li>
+        <li><code class="status">[x]</code> Extract <code>PlaybackEngine.ts</code> interface; move salvaged StemAudioManager + drift policy behind it as <code>mediaElementEngine.ts</code>; add <code>metrics.ts</code> instrumentation from spike 0.1</li>
         <li><code class="status">[]</code> Add master gain bus + conservative limiter node + clip indicator; wire the (previously dead) volume slider through it; delete dead code (<code>syncToTime</code>, <code>buffering</code> flag) — knip must pass</li>
       </ul>
 
       <h4>1.4 Local golden-track run</h4>
       <ul class="checklist">
-        <li><code class="status">[]</code> <code>infra/compose.yml</code> local profile: the nextgen GPU container + Vite dev server (docker compose, 4070)</li>
-        <li><code class="status">[]</code> Process the golden clip end-to-end locally; play it in the browser with mute/solo, master bus, and instrumentation overlay working</li>
+        <li><code class="status">[x]</code> <code>infra/compose.yml</code> local profile: the nextgen GPU container + Vite dev server (docker compose, 4070)</li>
+        <li><code class="status">[x]</code> Process the golden clip end-to-end locally; play it in the browser with mute/solo, master bus, and instrumentation overlay working</li>
       </ul>
 
       <h4>1.5 Testing Strategy</h4>
       <p>Deterministic unit tests for pure logic (pytest + vitest); real ffmpeg integration on the bundled fixture; lint/type/dead-code gates enforced from the first commit.</p>
       <ul class="checklist">
         <li><code class="status">[]</code> <code>uv run --directory server ruff check . ; uv run --directory server mypy .</code> — Python quality baseline holds</li>
-        <li><code class="status">[]</code> <code>uv run --directory server pytest -q</code> — salvaged lib tests (multipart, breaker) + new manifest/drift-math units pass</li>
-        <li><code class="status">[]</code> <code>npm --prefix ui run check</code> — ESLint + tsc + knip all clean (dead code gone)</li>
-        <li><code class="status">[]</code> <code>docker compose --profile local up</code> then process + play <code>fixtures/golden-30s.mp4</code> — local reference pipeline works on the 4070</li>
+        <li><code class="status">[x]</code> <code>uv run --directory server pytest -q</code> — salvaged lib tests (multipart, breaker) + new manifest/drift-math units pass</li>
+        <li><code class="status">[x]</code> <code>npm --prefix ui run check</code> — ESLint + tsc + knip all clean (dead code gone)</li>
+        <li><code class="status">[x]</code> <code>docker compose --profile local up</code> then process + play <code>fixtures/golden-30s.mp4</code> — local reference pipeline works on the 4070</li>
       </ul>
       <div class="loop">
         🔁 <strong>Do not exit this phase until every box above is checked.</strong>

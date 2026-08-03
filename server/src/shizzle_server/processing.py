@@ -232,11 +232,13 @@ def write_manifest(
             "id": STEM_ID_MAP[stem],
             "name": STEM_DISPLAY_NAMES[stem],
             "file": f"stems/{stem}.{ext}",
-            "default_gain": 0,
+            # dB, not linear. Consumers convert via dbToLinear() at load time.
+            "default_gain_db": 0.0,
         })
 
     manifest = {
-        "version": 2,
+        # v3: default_gain (linear, latent 0-is-silence bug) -> default_gain_db (dB)
+        "version": 3,
         "title": title,
         "artist": "",
         "duration": duration,

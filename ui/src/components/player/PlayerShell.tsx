@@ -53,9 +53,12 @@ export const PlayerShell: React.FC = () => {
     }
   }, [playing, showControls, setControlsVisible]);
 
+  const trackSlug = currentTrack?.slug;
+  const trackPublicUrl = currentTrack?.publicUrl;
+
   // Load manifest when track changes
   useEffect(() => {
-    if (!currentTrack?.slug) {
+    if (!trackSlug) {
       setManifest(null);
       return;
     }
@@ -64,7 +67,7 @@ export const PlayerShell: React.FC = () => {
       setIsLoading(true);
       try {
         // Pass publicUrl (S3) if available, otherwise fallback to VPS path
-        const manifestData = await loadManifest(currentTrack.slug, currentTrack.publicUrl);
+        const manifestData = await loadManifest(trackSlug, trackPublicUrl);
         setManifest(manifestData);
         setDuration(manifestData.duration);
       } catch (err) {
@@ -77,7 +80,7 @@ export const PlayerShell: React.FC = () => {
     };
 
     fetchManifest();
-  }, [currentTrack?.slug, setManifest, setDuration]);
+  }, [trackSlug, trackPublicUrl, setManifest, setDuration]);
 
   // Handle Time Updates - sync store with video time
   const handleTimeUpdate = useCallback(() => {

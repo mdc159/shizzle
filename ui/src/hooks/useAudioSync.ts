@@ -1,16 +1,17 @@
 /**
- * useAudioSync Hook
+ * useAudioSync Hook — thin React adapter over the PlaybackEngine.
  *
- * Manages synchronization between video playback and audio stems.
- * - Loads stems when manifest changes
- * - Syncs play/pause between video and audioManager
- * - Applies stem gains from store to audioManager
- * - Handles periodic drift correction
+ * Responsibilities (all heavy lifting lives in the engine):
+ * - Load stems into the engine when the manifest changes
+ * - Forward play/pause/seek between video element, store, and engine
+ * - Forward stem gain/mute/solo and master volume from the store
+ * - Surface engine stall bailouts as store state + a toast
  */
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { useStore } from '@/stores/useStore';
-import { audioManager, StemAudioManager } from '@/lib/audio';
+import { playbackEngine } from '@/lib/playback/mediaElementEngine';
+import { linearToDb } from '@/lib/playback/db';
 import { toast } from 'sonner';
 import type { StemId } from '@/types/karaoke';
 
@@ -30,6 +31,7 @@ export function useAudioSync({ videoRef }: UseAudioSyncOptions): UseAudioSyncRet
     manifest,
     currentTrack,
     playing,
+    volume,
     stemGains,
     stemMutes,
     stemSolos,
@@ -37,72 +39,13 @@ export function useAudioSync({ videoRef }: UseAudioSyncOptions): UseAudioSyncRet
   } = useStore();
 
   const [isReady, setIsReady] = useState(false);
-  const syncIntervalRef = useRef<number | null>(null);
-  const lastVideoTimeRef = useRef(0);
-  const stalledTicksRef = useRef(0);
-  const STALL_TICKS_THRESHOLD = 3;
-  const SOFT_DRIFT_SEC = 0.05;
-  const HARD_DRIFT_SEC = 0.25;
+  const trackSlug = currentTrack?.slug;
+  const trackPublicUrl = currentTrack?.publicUrl;
 
-  const stopSyncInterval = useCallback(() => {
-    if (syncIntervalRef.current) {
-      clearInterval(syncIntervalRef.current);
-      syncIntervalRef.current = null;
-    }
-  }, []);
-
-  // Periodic sync to handle drift
-  const startSyncInterval = useCallback(() => {
-    stopSyncInterval();
-    syncIntervalRef.current = window.setInterval(() => {
-      const video = videoRef.current;
-      if (!video || !isReady || !playing) return;
-
-      const currentVideoTime = video.currentTime;
-      const advanced = currentVideoTime > lastVideoTimeRef.current + 0.02;
-      lastVideoTimeRef.current = currentVideoTime;
-
-      // If video is not advancing while we think we're playing, avoid repeated rewinds.
-      if (!advanced) {
-        stalledTicksRef.current += 1;
-        if (stalledTicksRef.current >= STALL_TICKS_THRESHOLD) {
-          audioManager.pause();
-          audioManager.setPlaybackRate(1);
-          setPlaying(false);
-          toast.error('Video playback stalled. Press play to resume.');
-          stalledTicksRef.current = 0;
-        }
-        return;
-      }
-      stalledTicksRef.current = 0;
-
-      const audioTime = audioManager.getAverageCurrentTime();
-      const drift = audioTime - currentVideoTime;
-      const absDrift = Math.abs(drift);
-
-      if (absDrift < SOFT_DRIFT_SEC) {
-        audioManager.setPlaybackRate(1);
-        return;
-      }
-
-      if (absDrift < HARD_DRIFT_SEC) {
-        // Gentle correction: slightly speed up / slow down stems to converge.
-        const nudge = Math.max(-0.005, Math.min(0.005, -drift * 0.03));
-        audioManager.setPlaybackRate(1 + nudge);
-        return;
-      }
-
-      // Severe drift: single hard correction, then continue with soft mode.
-      audioManager.syncToVideoTime(currentVideoTime, HARD_DRIFT_SEC);
-      audioManager.setPlaybackRate(1);
-    }, 1000);
-  }, [videoRef, isReady, playing, setPlaying, stopSyncInterval]);
-
-  // Load stems when manifest changes
+  // Load stems into the engine when manifest changes
   useEffect(() => {
-    if (!manifest || !currentTrack) {
-      // Deliberate reset when the track/manifest goes away; restructuring this
-      // hook is deferred to the Phase 1.3 PlaybackEngine extraction.
+    if (!manifest || !trackSlug) {
+      // Deliberate reset when the track/manifest goes away.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsReady(false);
       return;
@@ -110,8 +53,8 @@ export function useAudioSync({ videoRef }: UseAudioSyncOptions): UseAudioSyncRet
 
     const loadStems = async () => {
       try {
-        const basePath = currentTrack.publicUrl || `/videos/${currentTrack.slug}`;
-        await audioManager.loadStems(basePath, manifest.stems);
+        const basePath = trackPublicUrl || `/videos/${trackSlug}`;
+        await playbackEngine.load(manifest, basePath);
         setIsReady(true);
       } catch (err) {
         console.error('Failed to load stems:', err);
@@ -123,73 +66,79 @@ export function useAudioSync({ videoRef }: UseAudioSyncOptions): UseAudioSyncRet
     loadStems();
 
     return () => {
-      audioManager.cleanup();
+      playbackEngine.unload();
       setIsReady(false);
     };
-  }, [manifest, currentTrack?.slug]);
+  }, [manifest, trackSlug, trackPublicUrl]);
 
-  // Sync play/pause state — controls BOTH video and audio
+  // Surface engine stall bailouts (video not advancing) to the UI
+  useEffect(() => {
+    playbackEngine.onStallBailout(() => {
+      setPlaying(false);
+      toast.error('Video playback stalled. Press play to resume.');
+    });
+    return () => {
+      playbackEngine.onStallBailout(null);
+    };
+  }, [setPlaying]);
+
+  // Sync play/pause state — controls BOTH video and engine
   useEffect(() => {
     if (!isReady) return;
 
     const video = videoRef.current;
+    playbackEngine.attachVideo(video ?? null);
 
     if (playing) {
-      if (video) {
-        audioManager.syncToVideoTime(video.currentTime, HARD_DRIFT_SEC);
-        lastVideoTimeRef.current = video.currentTime;
-      }
-      Promise.all([video?.play(), audioManager.play()].filter(Boolean)).catch((err) => {
+      Promise.all([video?.play(), playbackEngine.play()].filter(Boolean)).catch((err) => {
         console.error('Playback failed:', err);
         setPlaying(false);
         toast.error('Playback failed. Try again.');
       });
-      startSyncInterval();
     } else {
       video?.pause();
-      audioManager.pause();
-      audioManager.setPlaybackRate(1);
-      stopSyncInterval();
+      playbackEngine.pause();
     }
-  }, [playing, isReady, videoRef, startSyncInterval, stopSyncInterval, setPlaying]);
+  }, [playing, isReady, videoRef, setPlaying]);
 
-  // Apply gain changes from store to audio engine (includes mute/solo logic)
+  // Forward stem gains/mutes/solos from store to engine
   useEffect(() => {
     if (!isReady) return;
 
-    const anySoloed = Object.values(stemSolos).some(Boolean);
-
-    Object.entries(stemGains).forEach(([stem, dbValue]) => {
-      const stemId = stem as StemId;
-      const isMuted = stemMutes[stemId];
-      const isSoloed = stemSolos[stemId];
-
-      // Muted, or another stem is soloed and this one isn't → silence
-      const shouldSilence = isMuted || (anySoloed && !isSoloed);
-      const linearGain = shouldSilence ? 0 : StemAudioManager.dbToLinear(dbValue);
-      audioManager.setGain(stemId, linearGain);
+    (Object.keys(stemGains) as StemId[]).forEach((stemId) => {
+      playbackEngine.setStemGainDb(stemId, stemGains[stemId]);
+      playbackEngine.setStemMute(stemId, stemMutes[stemId]);
+      playbackEngine.setStemSolo(stemId, stemSolos[stemId]);
     });
   }, [stemGains, stemMutes, stemSolos, isReady]);
+
+  // Master volume: slider is linear 0..1, engine wants dB (headroom is the
+  // engine's own concern). volume=1 -> 0 dB user gain.
+  useEffect(() => {
+    playbackEngine.setMasterGainDb(volume <= 0 ? -Infinity : linearToDb(volume));
+  }, [volume]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopSyncInterval();
-      audioManager.cleanup();
+      playbackEngine.unload();
     };
-  }, [stopSyncInterval]);
+  }, []);
 
-  // Seek handler - syncs both video and audio
-  const handleSeek = useCallback((time: number) => {
-    if (videoRef.current) {
-      videoRef.current.currentTime = time;
-    }
-    if (isReady) {
-      audioManager.seek(time);
-    }
-  }, [videoRef, isReady]);
+  // Seek handler - syncs both video and engine
+  const handleSeek = useCallback(
+    (time: number) => {
+      if (videoRef.current) {
+        videoRef.current.currentTime = time;
+      }
+      if (isReady) {
+        playbackEngine.seek(time);
+      }
+    },
+    [videoRef, isReady],
+  );
 
-  // Play/pause handlers — just toggle state, Effect 2 does the work
+  // Play/pause handlers — just toggle state, the play/pause effect does the work
   const handlePlay = useCallback(() => setPlaying(true), [setPlaying]);
   const handlePause = useCallback(() => setPlaying(false), [setPlaying]);
 

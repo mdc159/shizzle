@@ -10,7 +10,6 @@ import {
 import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
 import { RotateCcw } from 'lucide-react';
-import { audioManager, StemAudioManager } from '@/lib/audio';
 import type { StemId } from '@/types/karaoke';
 
 export const MixerDrawer: React.FC = () => {
@@ -24,11 +23,9 @@ export const MixerDrawer: React.FC = () => {
 
   const stems = Object.keys(stemGains) as StemId[];
 
-  // Update both store and audio engine
+  // Store is the single source of truth; useAudioSync forwards to the engine.
   const handleGainChange = (stem: StemId, dbValue: number) => {
     setStemGain(stem, dbValue);
-    const linearGain = StemAudioManager.dbToLinear(dbValue);
-    audioManager.setGain(stem, linearGain);
   };
 
   const handleReset = () => {
@@ -36,7 +33,6 @@ export const MixerDrawer: React.FC = () => {
       setStemGain(stem, 0);
       if (stemMutes[stem]) toggleStemMute(stem);
       if (stemSolos[stem]) toggleStemSolo(stem);
-      audioManager.setGain(stem, 1.0);
     });
   };
 

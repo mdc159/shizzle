@@ -1,9 +1,10 @@
-import React from 'react';
-import { Play, Pause, Maximize, Loader2, ListMusic, AudioWaveform } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Play, Pause, Maximize, ListMusic, AudioWaveform } from 'lucide-react';
 import { useStore } from '@/stores/useStore';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
+import { playbackEngine } from '@/lib/playback/mediaElementEngine';
 
 export const TransportControls: React.FC = () => {
   const {
@@ -14,12 +15,24 @@ export const TransportControls: React.FC = () => {
     setCurrentTime,
     volume,
     setVolume,
-    buffering,
     controlsVisible,
     currentTrack,
     activeDrawer,
     setActiveDrawer
   } = useStore();
+
+  // Master-limiter activity indicator: poll engine metrics while playing.
+  const [limiterActive, setLimiterActive] = useState(false);
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(() => {
+      setLimiterActive(playbackEngine.getMetrics().limiter.active);
+    }, 250);
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [playing]);
+  const showLimiter = playing && limiterActive;
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -78,9 +91,7 @@ export const TransportControls: React.FC = () => {
               className="h-12 w-12 rounded-full border-zinc-700 bg-black/50 hover:bg-white hover:text-black transition-all"
               onClick={togglePlay}
             >
-              {buffering ? (
-                <Loader2 className="h-6 w-6 animate-spin" />
-              ) : playing ? (
+              {playing ? (
                 <Pause className="h-6 w-6 fill-current" />
               ) : (
                 <Play className="h-6 w-6 fill-current ml-1" />
@@ -107,6 +118,16 @@ export const TransportControls: React.FC = () => {
                 step={0.01}
                 onValueChange={(vals) => setVolume(vals[0])}
                 className="w-24"
+              />
+
+              {/* Master limiter activity (amber = gain reduction > 0.5 dB) */}
+              <span
+                title="Master limiter active"
+                aria-label={showLimiter ? 'Master limiter active' : 'Master limiter idle'}
+                className={cn(
+                  'h-1.5 w-1.5 shrink-0 rounded-full transition-colors',
+                  showLimiter ? 'bg-amber-400' : 'bg-zinc-800'
+                )}
               />
             </div>
 

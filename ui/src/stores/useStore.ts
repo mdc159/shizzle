@@ -8,7 +8,6 @@ export type { Track };
 interface KaraokeState {
     // Player State
     playing: boolean;
-    buffering: boolean;
     currentTime: number;
     duration: number;
 
@@ -46,7 +45,6 @@ export const useStore = create<KaraokeState>()(
         (set) => ({
             // Player Defaults
             playing: false,
-            buffering: false,
             currentTime: 0,
             duration: 0,
 

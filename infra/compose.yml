@@ -1,0 +1,36 @@
+# Shizzle infra — compose profiles.
+#
+# `local` profile: the GPU reference pipeline on this machine (RTX 4070).
+#   docker compose -f infra/compose.yml --profile local up -d --build
+#   docker compose -f infra/compose.yml --profile local down
+#
+# The UI dev server is NOT containerized. Run it on the host:
+#   npm --prefix ui run dev
+# ui/vite.config.ts already proxies /api -> http://localhost:8001, so the
+# browser talks to Vite on :5173 and Vite forwards API calls to this container.
+#
+# GPU reservation / port / data mount mirror the proven nextgen
+# docker-compose.yml (k25-nextgen-rewrite); processed tracks land in ../data
+# (repo root data/, gitignored).
+
+name: shizzle
+
+services:
+  local-server:
+    profiles: ["local"]
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    container_name: shizzle-local-server
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
