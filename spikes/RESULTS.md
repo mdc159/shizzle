@@ -29,3 +29,9 @@ Date: 2026-08-02. Detail files: [RESULTS-0.1.md](RESULTS-0.1.md), [RESULTS-0.2.m
 | VPS + cookies | Untested; optional upgrade. Chrome app-bound cookie encryption on Windows may complicate export. |
 
 Verdict: ingest NOT blocked - home-helper tier proven (local fetch + existing upload path). Cookies tier deferred as optimization.
+
+### YouTube ingest — cloud-only escalation (tested to exhaustion, 2026-08-02)
+
+VPS retest with deno 2.9.4 + bgutil PO-token provider (container, engaged per verbose log) + tv/mweb client variants: STILL bot-checked. Conclusion: Hostinger IP range is hard-blocked by YouTube regardless of tokens.
+
+Remaining options for PC-off URL ingest: (1) residential proxy for yt-dlp only, ~$1-5/mo, reliable - AWAITING MIKE GO (purchase); (2) cookies on VPS - free but likely still challenged on blocked IP + account-flag risk; (3) home helper - works, PC-on dependency, interim only. Upload path is unaffected and fully cloud today. VPS keeps: deno, /opt/ytdlp venv, bgutil-pot container (restart unless-stopped).
