@@ -1,0 +1,16 @@
+# Probe Caddyfile.
+# - :80 catch-all keeps the outside-in IP probe working (http://72.60.173.171/).
+# - The shizzle.systems block gets automatic HTTPS (Let's Encrypt). Caddy
+#   retries ACME issuance on a backoff schedule until public DNS resolves to
+#   this box — expected to converge on its own once the .systems registry
+#   publishes the zone's NS records.
+# NOTE: because an explicit :80 server exists, http://shizzle.systems answers
+# from the catch-all (no auto redirect to https). Fine for the probe; the real
+# stack drops the :80 catch-all so Caddy adds the standard HTTP->HTTPS redirect.
+:80 {
+	respond "shizzle vps ok" 200
+}
+
+shizzle.systems, www.shizzle.systems {
+	respond "shizzle vps ok" 200
+}

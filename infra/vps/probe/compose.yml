@@ -1,0 +1,39 @@
+# shizzle VPS probe stack — proves the plumbing, not the product.
+# Lives at /opt/shizzle/ on the VPS. Postgres with a named volume + Caddy
+# serving a placeholder on :80 (outside-in liveness proof through ufw).
+name: shizzle-probe
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shizzle
+      POSTGRES_DB: shizzle
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shizzle -d shizzle"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # NOT published to the host on purpose — app containers reach it on the
+    # compose network; nothing outside the box should see 5432.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # ACME certs/account — MUST persist across recreates
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
