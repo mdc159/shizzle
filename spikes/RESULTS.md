@@ -19,3 +19,13 @@ Date: 2026-08-02. Detail files: [RESULTS-0.1.md](RESULTS-0.1.md), [RESULTS-0.2.m
 
 1. **iPad Safari + Samsung projector skew runs** — `skew-probe/README.md` has the LAN steps; fills the two pending rows in RESULTS-0.1.md.
 2. **Blind codec listen** — `aac-abx/LISTEN.md`; decides the AAC bitrate default.
+
+## YouTube ingest checkout (2026-08-02, verified live)
+
+| Tier | Result |
+|---|---|
+| VPS bare (72.60.173.171, yt-dlp 2026.07.04) | FAIL: "Sign in to confirm you are not a bot" (datacenter IP). Also: install deno on VPS for full extraction support. |
+| This PC bare (residential IP) | PASS: test clip downloaded, no cookies. |
+| VPS + cookies | Untested; optional upgrade. Chrome app-bound cookie encryption on Windows may complicate export. |
+
+Verdict: ingest NOT blocked - home-helper tier proven (local fetch + existing upload path). Cookies tier deferred as optimization.
