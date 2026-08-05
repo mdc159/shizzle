@@ -33,6 +33,18 @@ const MASTER_HEADROOM_DB = -3;
 const LIMITER_ACTIVE_DB = 0.5;
 
 const GAIN_SMOOTHING_SEC = 0.05;
+/**
+ * Streaming load gate (design spec §5: streaming, not full preload).
+ *
+ * A stem is "loaded" as soon as it CAN begin playing (`canplay`,
+ * readyState >= HAVE_FUTURE_DATA) — never when the browser has buffered the
+ * whole file (`canplaythrough`), which on a large or slow object may simply
+ * never happen and wedged the entire player. Buffering continues via CDN
+ * Range requests while playback runs; the drift/stall policy handles hiccups.
+ */
+/** Proceed-while-buffering safety valve: after this long, any decoded data is enough to start. */
+const STEM_START_SAFETY_MS = 8000;
+/** Hard failure: nothing usable arrived at all within this window. */
 const STEM_LOAD_TIMEOUT_MS = 15000;
 
 interface StemChannel {
@@ -134,28 +146,45 @@ class MediaElementEngine implements PlaybackEngine {
       });
       this.channels.set(stem.id, channel);
 
-      // Wait for the element to be playable (15 s timeout, as salvaged).
+      // Wait until the element CAN begin playing — NOT until it has buffered
+      // the entire file. `canplaythrough` was the old gate and it wedged the
+      // whole player on any large/slow stem (573 MB of WAV never finishes
+      // buffering); `canplay` fires at HAVE_FUTURE_DATA and the element keeps
+      // streaming via Range requests while playback runs.
       await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          reject(new Error(`Stem load timeout: ${stem.file}`));
-        }, STEM_LOAD_TIMEOUT_MS);
-        el.addEventListener(
-          'canplaythrough',
-          () => {
-            window.clearTimeout(timeout);
-            resolve();
-          },
-          { once: true },
+        let settled = false;
+        const timers: number[] = [];
+        const finish = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          for (const t of timers) window.clearTimeout(t);
+          el.removeEventListener('canplay', onCanPlay);
+          el.removeEventListener('error', onError);
+          if (err) reject(err);
+          else resolve();
+        };
+        const onCanPlay = () => finish();
+        const onError = () => finish(new Error(`Stem failed to load: ${stem.file}`));
+
+        // Safety valve: a stem that is trickling in (has decoded *something*
+        // but hasn't reached canplay yet) must not wedge the whole load —
+        // start anyway and let it keep buffering.
+        timers.push(
+          window.setTimeout(() => {
+            if (el.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish();
+          }, STEM_START_SAFETY_MS),
         );
-        el.addEventListener(
-          'error',
-          () => {
-            window.clearTimeout(timeout);
-            reject(new Error(`Stem failed to load: ${stem.file}`));
-          },
-          { once: true },
+        // Hard timeout: nothing usable arrived at all — a real load failure.
+        timers.push(
+          window.setTimeout(() => {
+            finish(new Error(`Stem load timeout: ${stem.file}`));
+          }, STEM_LOAD_TIMEOUT_MS),
         );
+
+        el.addEventListener('canplay', onCanPlay);
+        el.addEventListener('error', onError);
         el.load();
+        if (el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) finish();
       });
     });
 
