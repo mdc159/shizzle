@@ -64,6 +64,7 @@ from shizzle_server.publish import (  # noqa: E402
     Publisher,
     generation_prefix,
     manifest_key,
+    validate_stem_object,
 )
 
 logger = logging.getLogger("import_legacy")
@@ -366,6 +367,22 @@ async def import_folder(
     )
 
     label = f"[{index}/{total}] {folder.name} {title[:48]!r}"
+
+    # Stem format guard (shared with the publisher): raw WAV or oversized
+    # stems must never enter the library — "The Pot" (2026-08-04) was imported
+    # with 6 × 95 MiB WAVs and froze the player. No bypass flag on purpose;
+    # transcode the source to .m4a instead.
+    invalid = [
+        f"{stem['file']}: {reason}"
+        for stem in manifest["stems"]
+        if (reason := validate_stem_object(stem["file"], folder.objects.get(stem["file"])))
+        is not None
+    ]
+    if invalid:
+        outcome.status = "skipped-invalid-stems"
+        outcome.reason = "; ".join(invalid[:4])
+        logger.error("%s SKIPPED (invalid stems): %s", label, outcome.reason)
+        return outcome
 
     if folder.degraded and not args.include_degraded:
         outcome.status = "skipped-degraded"

@@ -148,6 +148,63 @@ class PromotionFailed(PublishError):
     code = ErrorCode.S3_UPLOAD_FAILED
 
 
+class InvalidStemObject(PublishError):
+    """A stem object is not library-grade (wrong format or absurd size).
+
+    Not retryable: re-running the publisher against the same staged objects
+    hits the same rejection. The job must be re-split / re-encoded.
+    """
+
+    code = ErrorCode.PUBLISH_FAILED
+    retryable = False
+
+
+# --- stem format guard --------------------------------------------------------
+
+#: Stems must be compressed AAC in an .m4a container — never raw PCM. One
+#: mistakenly-imported track with 6 × 95 MiB WAV stems ("The Pot", found
+#: 2026-08-04) froze playback for good; this guard makes that class of object
+#: impossible to publish or import again.
+ALLOWED_STEM_SUFFIXES = (".m4a",)
+#: Sane per-stem cap. A 320k AAC stem of a ~8 minute track is ~19 MiB; raw
+#: WAV of the same track is ~95 MiB.
+MAX_STEM_BYTES = 20 * 1024**2
+_STEM_DIR = "stems/"
+
+
+def validate_stem_object(file: str, size_bytes: int | None) -> str | None:
+    """Return a rejection reason when a stem may not enter the library, else None.
+
+    ``file`` is the manifest-relative path (e.g. ``stems/vocals.m4a``);
+    non-stem objects (video, multitrack, manifest) are never rejected here.
+    """
+    if not file.startswith(_STEM_DIR):
+        return None
+    suffix = file[file.rfind(".") :].lower() if "." in file else ""
+    if suffix not in ALLOWED_STEM_SUFFIXES:
+        allowed = "/".join(ALLOWED_STEM_SUFFIXES)
+        return f"stem format {suffix or '(none)'} not allowed (must be {allowed})"
+    if size_bytes is not None and size_bytes > MAX_STEM_BYTES:
+        return (
+            f"stem is {size_bytes / 1024**2:.1f} MiB, over the "
+            f"{MAX_STEM_BYTES / 1024**2:.0f} MiB cap (raw/uncompressed audio?)"
+        )
+    return None
+
+
+def validate_stem_objects(objects: Iterable[tuple[str, int | None]]) -> None:
+    """Raise :class:`InvalidStemObject` when any stem fails the format guard."""
+    problems = [
+        f"{file}: {reason}"
+        for file, size in objects
+        if (reason := validate_stem_object(file, size)) is not None
+    ]
+    if problems:
+        raise InvalidStemObject(
+            f"{len(problems)} stem object(s) rejected: " + "; ".join(problems[:6])
+        )
+
+
 # --- verification model -------------------------------------------------------
 
 
@@ -540,6 +597,13 @@ class Publisher:
                 already_published=True,
                 elapsed_s=round(time.monotonic() - started, 3),
             )
+
+        reported = list(reported)
+        # Format guard before anything else: a raw-PCM or absurdly large stem
+        # must never be promoted into the library (see validate_stem_object).
+        validate_stem_objects(
+            (o.file, o.size_bytes if o.size_bytes >= 0 else None) for o in reported
+        )
 
         report = self.verify_staging(track_id, generation, reported)
         copied, total = self.promote(track_id, generation, report)

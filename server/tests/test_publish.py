@@ -24,8 +24,10 @@ from shizzle_server.db.repository import track_id_for_job
 from shizzle_server.errors import ErrorCode
 from shizzle_server.publish import (
     MANIFEST_NAME,
+    MAX_STEM_BYTES,
     ChecksumMismatch,
     ChecksumPolicy,
+    InvalidStemObject,
     ObjectVerification,
     Publisher,
     PublishError,
@@ -35,6 +37,8 @@ from shizzle_server.publish import (
     manifest_key,
     publish_job,
     staging_prefix,
+    validate_stem_object,
+    validate_stem_objects,
 )
 
 BUCKET = "shizzle-test-bucket"
@@ -537,3 +541,82 @@ def test_object_verification_as_dict_carries_failure_reason():
     )
     assert ov.as_dict()["ok"] is False
     assert ov.as_dict()["reason"] == "missing from staging prefix"
+
+
+# --- stem format guard --------------------------------------------------------
+# Regression guard for "The Pot" (2026-08-04): one track was imported with
+# 6 x 95 MiB raw WAV stems and froze the player. Raw/uncompressed or absurdly
+# large stems must never be publishable or importable again.
+
+
+def test_validate_stem_object_accepts_normal_m4a():
+    assert validate_stem_object("stems/vocals.m4a", 12 * 1024**2) is None
+
+
+def test_validate_stem_object_rejects_wav():
+    reason = validate_stem_object("stems/vocals.wav", 1024)
+    assert reason is not None and ".wav" in reason
+
+
+def test_validate_stem_object_rejects_oversized_m4a():
+    reason = validate_stem_object("stems/drums.m4a", MAX_STEM_BYTES + 1)
+    assert reason is not None and "cap" in reason
+
+
+def test_validate_stem_object_ignores_non_stem_objects():
+    # Video/multitrack/manifest are not stems; the WAV-era 573 MB failure mode
+    # was specifically per-stem audio.
+    assert validate_stem_object("video.mp4", 500 * 1024**2) is None
+    assert validate_stem_object("multi-track.mp4", 500 * 1024**2) is None
+    assert validate_stem_object(MANIFEST_NAME, 1024) is None
+
+
+def test_validate_stem_object_handles_unknown_size():
+    # Size unknown: format still enforced, cap cannot be.
+    assert validate_stem_object("stems/bass.m4a", None) is None
+    assert validate_stem_object("stems/bass.wav", None) is not None
+
+
+def test_validate_stem_objects_raises_with_every_problem_listed():
+    with pytest.raises(InvalidStemObject) as exc:
+        validate_stem_objects(
+            [
+                ("stems/vocals.wav", 100 * 1024**2),
+                ("stems/drums.m4a", MAX_STEM_BYTES + 1),
+                ("video.mp4", 500 * 1024**2),
+            ]
+        )
+    message = str(exc.value)
+    assert "2 stem object(s) rejected" in message
+    assert "stems/vocals.wav" in message and "stems/drums.m4a" in message
+    assert exc.value.retryable is False
+
+
+def test_publish_refuses_wav_stems_and_promotes_nothing(s3):
+    files = dict(STAGED_FILES)
+    files["stems/vocals.wav"] = b"RIFF" + b"\x00" * 128
+    reported = _stage(s3, files)
+
+    rec = RecordingS3(s3)
+    with pytest.raises(InvalidStemObject):
+        Publisher(rec, BUCKET).publish(TRACK_ID, GENERATION, reported)
+
+    # Nothing was promoted: no copies happened and the destination manifest
+    # (the generation-complete marker) does not exist.
+    assert rec.copied_keys() == []
+    assert Publisher(s3, BUCKET).is_published(TRACK_ID, GENERATION) is False
+
+
+def test_publish_refuses_oversized_stem(s3):
+    reported = _stage(s3)
+    # The worker reports a stem whose size is over the cap (moto holds the
+    # small placeholder bytes; the guard trusts the reported size).
+    reported = [
+        StagedObject(file=o.file, size_bytes=MAX_STEM_BYTES + 1, sha256=o.sha256)
+        if o.file == "stems/drums.m4a"
+        else o
+        for o in reported
+    ]
+    with pytest.raises(InvalidStemObject):
+        Publisher(s3, BUCKET).publish(TRACK_ID, GENERATION, reported)
+    assert Publisher(s3, BUCKET).is_published(TRACK_ID, GENERATION) is False
