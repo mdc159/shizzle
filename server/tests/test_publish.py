@@ -33,6 +33,7 @@ from shizzle_server.publish import (
     PublishError,
     StagedObject,
     StagedObjectMissing,
+    _stored_sha256,
     generation_prefix,
     manifest_key,
     publish_job,
@@ -175,6 +176,19 @@ def test_verify_uses_stored_checksum_without_downloading(s3):
     assert report.ok
     assert {o.sha256_source for o in report.objects} == {"s3-checksum"}
     assert "get_object" not in rec.names(), "stored checksum path must not download bytes"
+
+
+def test_composite_multipart_sha256_is_not_compared_as_a_full_object_digest():
+    assert (
+        _stored_sha256(
+            {
+                "ChecksumType": "COMPOSITE",
+                "ChecksumSHA256": "xEwkeB/modQiZz65/Pg9C80AfgO5Y/udK3ak90iOBRQ=-11",
+            }
+        )
+        is None
+    )
+    assert _stored_sha256({"ChecksumType": "FULL_OBJECT", "ChecksumSHA256": "YWJj"}) == "616263"
 
 
 def test_verify_missing_object_raises_checksum_mismatch(s3):

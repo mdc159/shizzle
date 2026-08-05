@@ -1,18 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { Play, Pause, Maximize, ListMusic, AudioWaveform } from 'lucide-react';
+import { Play, Pause, Maximize, ListMusic, AudioWaveform, Loader2 } from 'lucide-react';
 import { useStore } from '@/stores/useStore';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
 import { playbackEngine } from '@/lib/playback/mediaElementEngine';
 
-export const TransportControls: React.FC = () => {
+interface TransportControlsProps {
+  ready: boolean;
+  onPlay: () => Promise<void>;
+  onPause: () => void;
+  onSeek: (time: number) => void;
+}
+
+export const TransportControls: React.FC<TransportControlsProps> = ({ ready, onPlay, onPause, onSeek }) => {
   const {
     playing,
-    togglePlay,
     currentTime,
     duration,
-    setCurrentTime,
     volume,
     setVolume,
     controlsVisible,
@@ -50,10 +55,11 @@ export const TransportControls: React.FC = () => {
         <div className="flex items-center gap-3 text-sm font-mono text-zinc-300">
           <span>{formatTime(currentTime)}</span>
           <Slider
+            aria-label="Seek"
             value={[currentTime]}
             max={duration || 100}
             step={1}
-            onValueChange={(vals) => setCurrentTime(vals[0])}
+            onValueChange={(vals) => onSeek(vals[0])}
             className="cursor-pointer"
           />
           <span>{formatTime(duration)}</span>
@@ -67,6 +73,7 @@ export const TransportControls: React.FC = () => {
               size="icon"
               className={cn(activeDrawer === 'library' && "bg-accent text-accent-foreground")}
               onClick={() => setActiveDrawer(activeDrawer === 'library' ? 'none' : 'library')}
+              aria-label="Library"
             >
               <ListMusic className="h-5 w-5" />
             </Button>
@@ -89,9 +96,16 @@ export const TransportControls: React.FC = () => {
               size="icon"
               variant="outline"
               className="h-12 w-12 rounded-full border-zinc-700 bg-black/50 hover:bg-white hover:text-black transition-all"
-              onClick={togglePlay}
+              onClick={() => {
+                if (playing) onPause();
+                else void onPlay();
+              }}
+              disabled={!currentTrack || !ready}
+              aria-label={!ready && currentTrack ? 'Loading stems' : playing ? 'Pause' : 'Play'}
             >
-              {playing ? (
+              {!ready && currentTrack ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : playing ? (
                 <Pause className="h-6 w-6 fill-current" />
               ) : (
                 <Play className="h-6 w-6 fill-current ml-1" />
@@ -107,12 +121,14 @@ export const TransportControls: React.FC = () => {
                 size="icon"
                 className={cn(activeDrawer === 'mixer' && "bg-accent text-accent-foreground")}
                 onClick={() => setActiveDrawer(activeDrawer === 'mixer' ? 'none' : 'mixer')}
+                aria-label="Mixer"
               >
                 <AudioWaveform className="h-5 w-5" />
               </Button>
 
               {/* Volume Slider - visible on group hover or always? Let's keep it visible for now */}
               <Slider
+                aria-label="Master volume"
                 value={[volume]}
                 max={1}
                 step={0.01}
@@ -131,7 +147,7 @@ export const TransportControls: React.FC = () => {
               />
             </div>
 
-            <Button variant="ghost" size="icon" onClick={() => {
+            <Button aria-label="Fullscreen" variant="ghost" size="icon" onClick={() => {
               if (!document.fullscreenElement) {
                 document.documentElement.requestFullscreen();
               } else {

@@ -1,18 +1,51 @@
 """
-Configuration and input validation for Runpod Demucs handler.
+Configuration and input validation for the Shizzle GPU worker.
 
-Validates job inputs and provides typed configuration.
+Validates job inputs and provides typed configuration. Staging semantics:
+outputs land under tracks/{track_id}/{generation}/staging/ and the publisher
+(VPS) later verifies + promotes them into the immutable generation prefix.
 """
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-# S3 path validation patterns
-# Allows alphanumeric, underscores, hyphens in job IDs (Supabase record IDs)
-ALLOWED_INPUT_PATTERN = re.compile(r'^karaoke/in/[a-zA-Z0-9_-]+/source\.mp4$')
-ALLOWED_OUTPUT_PATTERN = re.compile(r'^karaoke/out/[a-zA-Z0-9_-]+/$')
+# S3 path validation patterns (staging layout per design spec section 3).
+# track_id / generation: alphanumeric, underscores, hyphens.
+ALLOWED_INPUT_PATTERN = re.compile(
+    r"^tracks/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/staging/source\.mp4$"
+)
+ALLOWED_OUTPUT_PATTERN = re.compile(
+    r"^tracks/(?P<track_id>[a-zA-Z0-9_-]+)/(?P<generation>[a-zA-Z0-9_-]+)/staging/$"
+)
+
+BITRATE_PATTERN = re.compile(r"^\d{2,4}k$")
+
+# Browser delivery profile target. Existing passing AAC is preserved; this
+# default applies only to new encodes derived from lossless stems.
+DEFAULT_AAC_BITRATE = "256k"
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean env var ("true"/"1"/"yes" vs "false"/"0"/"no")."""
+    v = os.getenv(name)
+    if v is None or v == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def stem_aac_bitrate() -> str:
+    """The AAC stem bitrate knob (STEM_AAC_BITRATE env, default 256k)."""
+    v = os.getenv("STEM_AAC_BITRATE", DEFAULT_AAC_BITRATE).strip()
+    if not BITRATE_PATTERN.match(v):
+        raise InputValidationError(f"Invalid STEM_AAC_BITRATE: {v!r} (expected e.g. '320k')")
+    return v
+
+
+def create_multitrack_default() -> bool:
+    """CREATE_MULTITRACK_MP4 env flag (default true — Mike's archival format)."""
+    return _env_flag("CREATE_MULTITRACK_MP4", True)
 
 
 @dataclass
@@ -42,7 +75,11 @@ class JobConfig:
     output_prefix: str
     model: str
     metadata: JobMetadata
-    create_canonical_mp4: bool = True
+    track_id: str = ""
+    generation: str = ""
+    create_multitrack_mp4: bool = True
+    aac_bitrate: str = DEFAULT_AAC_BITRATE
+    metadata_dict: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         # Normalize output_prefix to always end with /
@@ -54,59 +91,59 @@ class InputValidationError(ValueError):
     pass
 
 
-def _env(name: str) -> str:
-    """Get required environment variable."""
-    v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing env var: {name}")
-    return v
-
-
-def validate_s3_paths(input_key: str, output_prefix: str) -> None:
+def validate_s3_paths(input_key: str, output_prefix: str) -> tuple[str, str]:
     """
-    Validate S3 paths to prevent path traversal and ensure expected format.
+    Validate S3 paths to prevent path traversal and enforce the staging layout.
 
     Args:
-        input_key: S3 key for input file (e.g., karaoke/in/recXXX/source.mp4)
-        output_prefix: S3 prefix for outputs (e.g., karaoke/out/recXXX/)
+        input_key: e.g. tracks/<track_id>/<generation>/staging/source.mp4
+        output_prefix: e.g. tracks/<track_id>/<generation>/staging/
+
+    Returns:
+        (track_id, generation) parsed from the output prefix.
 
     Raises:
-        InputValidationError: If paths are invalid or potentially malicious
+        InputValidationError: If paths are invalid or potentially malicious.
     """
     # Check for directory traversal
     if ".." in input_key or ".." in output_prefix:
         raise InputValidationError("Path traversal detected in S3 paths")
 
-    # Validate input_key format
     if not ALLOWED_INPUT_PATTERN.match(input_key):
         raise InputValidationError(
             f"Invalid input_key format: {input_key}. "
-            f"Expected: karaoke/in/<job_id>/source.mp4"
+            f"Expected: tracks/<track_id>/<generation>/staging/source.mp4"
         )
 
-    # Validate output_prefix format
     normalized_prefix = output_prefix.rstrip("/") + "/"
-    if not ALLOWED_OUTPUT_PATTERN.match(normalized_prefix):
+    m = ALLOWED_OUTPUT_PATTERN.match(normalized_prefix)
+    if not m:
         raise InputValidationError(
             f"Invalid output_prefix format: {output_prefix}. "
-            f"Expected: karaoke/out/<job_id>/"
+            f"Expected: tracks/<track_id>/<generation>/staging/"
         )
+    return m.group("track_id"), m.group("generation")
 
 
 def validate_input(job_input: dict[str, Any]) -> JobConfig:
     """
     Validate and parse job input into typed configuration.
 
-    Args:
-        job_input: Raw job input dictionary
-
-    Returns:
-        JobConfig with validated and typed fields
+    Expected shape:
+    {
+      "job_id": "...",
+      "bucket": "...",                                   # optional (env default)
+      "input_key": "tracks/<id>/<gen>/staging/source.mp4",
+      "output_prefix": "tracks/<id>/<gen>/staging/",
+      "model": "htdemucs_6s",                            # optional
+      "create_multitrack_mp4": true,                     # optional (env default)
+      "aac_bitrate": "256k",                             # optional (env default)
+      "metadata": {"title": ..., "artist": ..., "sourceUrl": ..., "videoId": ...}
+    }
 
     Raises:
-        InputValidationError: If required fields missing or validation fails
+        InputValidationError: If required fields missing or validation fails.
     """
-    # Required fields
     job_id = job_input.get("job_id")
     if not job_id:
         raise InputValidationError("Missing required field: job_id")
@@ -119,15 +156,22 @@ def validate_input(job_input: dict[str, Any]) -> JobConfig:
     if not output_prefix:
         raise InputValidationError("Missing required field: output_prefix")
 
-    # Validate S3 paths
-    validate_s3_paths(input_key, output_prefix)
+    track_id, generation = validate_s3_paths(input_key, output_prefix)
 
-    # Optional fields with defaults
-    bucket = job_input.get("bucket") or os.getenv("AWS_S3_BUCKET", "karaoke-pimpshizzle")
+    bucket = job_input.get("bucket") or os.getenv("AWS_S3_BUCKET")
+    if not bucket:
+        raise InputValidationError("Missing bucket (input field or AWS_S3_BUCKET env)")
+
     model = job_input.get("model") or "htdemucs_6s"
-    create_canonical_mp4 = job_input.get("create_canonical_mp4", True)
 
-    # Parse metadata
+    create_multitrack = job_input.get("create_multitrack_mp4")
+    if create_multitrack is None:
+        create_multitrack = create_multitrack_default()
+
+    bitrate = job_input.get("aac_bitrate") or stem_aac_bitrate()
+    if not BITRATE_PATTERN.match(bitrate):
+        raise InputValidationError(f"Invalid aac_bitrate: {bitrate!r} (expected e.g. '320k')")
+
     metadata_dict = job_input.get("metadata", {})
     metadata = JobMetadata.from_dict(metadata_dict)
 
@@ -138,5 +182,9 @@ def validate_input(job_input: dict[str, Any]) -> JobConfig:
         output_prefix=output_prefix,
         model=model,
         metadata=metadata,
-        create_canonical_mp4=create_canonical_mp4,
+        track_id=track_id,
+        generation=generation,
+        create_multitrack_mp4=bool(create_multitrack),
+        aac_bitrate=bitrate,
+        metadata_dict=metadata_dict,
     )

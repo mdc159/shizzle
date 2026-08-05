@@ -11,6 +11,9 @@ export interface Stem {
 
 export interface StemsManifest {
   version?: number;
+  track_id?: string;
+  generation?: number;
+  delivery_profile?: string;
   title: string;
   artist: string;
   duration: number;

@@ -1,0 +1,25 @@
+
+Running 1 test using 1 worker
+
+[1A[2K[1/1] e2e\playback\production-playback.spec.ts:323:1 › production cloud playback acceptance
+[1A[2K  1) e2e\playback\production-playback.spec.ts:323:1 › production cloud playback acceptance ─────────
+
+    TimeoutError: page.waitForFunction: Timeout 522962.99999999994ms exceeded.
+
+      290 |   const seek = page.locator('[aria-label="Seek"]');
+      291 |   const box = await seek.boundingBox();
+    > 292 |   if (!box) throw new Error('seek control is unavailable');
+          |              ^
+      293 |   await page.mouse.click(box.x + box.width * fraction, box.y + box.height / 2);
+      294 | }
+      295 |
+        at naturalEndAndReplay (X:\GitHub\shizzle\ui\e2e\playback\production-playback.spec.ts:292:14)
+        at X:\GitHub\shizzle\ui\e2e\playback\production-playback.spec.ts:350:9
+
+    Error Context: test-results\playback-production-playba-f2ae9-n-cloud-playback-acceptance\error-context.md
+
+
+[1A[2K  Slow test file: e2e\playback\production-playback.spec.ts (28.6m)
+  Consider running tests from slow files in parallel. See: https://playwright.dev/docs/test-parallel
+  1 failed
+    e2e\playback\production-playback.spec.ts:323:1 › production cloud playback acceptance ──────────

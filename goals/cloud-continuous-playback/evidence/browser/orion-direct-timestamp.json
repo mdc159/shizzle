@@ -1,0 +1,331 @@
+{
+  "status": "failed",
+  "seed": 1511464998,
+  "mode": "stress",
+  "tracks": [
+    {
+      "track": {
+        "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+        "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+        "artist": "",
+        "slug": "22f0177d-d464-50bb-8c24-1eb92b101276",
+        "duration": 579.663,
+        "publicUrl": "/api/tracks/22f0177d-d464-50bb-8c24-1eb92b101276",
+        "status": "ready"
+      },
+      "mode": "stress",
+      "build": "/assets/index-DsOJZuXS.js",
+      "startedAt": "2026-08-05T09:46:14.852Z",
+      "manifest": {
+        "version": 3,
+        "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+        "artist": "",
+        "duration": 579.663,
+        "video": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "60000/1001",
+          "duration": 579.663
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/vocals.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/drums.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/bass.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/guitar.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/piano.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "/cdn/tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/stems/shizzle.m4a",
+            "default_gain_db": 0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 6648296 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/video.mp4",
+              "source_sha256": "152aa4b951b2652c741ec799f5b4ecf8fb549d9040fb6f359b53ac7665601812",
+              "sha256": "23bd9ccdbbfbedc7f3cc013f4cb385eefae6b1b003fd91760ee0c49be84fcbc0",
+              "bytes": 84151358
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/vocals.m4a",
+              "source_sha256": "df21b305615801013f7043cded4ed362dd4be0b21753bbf43e8a4870da1b8315",
+              "sha256": "df21b305615801013f7043cded4ed362dd4be0b21753bbf43e8a4870da1b8315",
+              "bytes": 13314485
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/drums.m4a",
+              "source_sha256": "1e6916929c6bc206fae818f316e702a478bc8dc9cc8ef1958aa42b37b6da68ad",
+              "sha256": "1e6916929c6bc206fae818f316e702a478bc8dc9cc8ef1958aa42b37b6da68ad",
+              "bytes": 13938224
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/bass.m4a",
+              "source_sha256": "7f1dc887ea4b26f2c440f8bbe93976d997606e4147d34724ba3d538d60ed31f1",
+              "sha256": "7f1dc887ea4b26f2c440f8bbe93976d997606e4147d34724ba3d538d60ed31f1",
+              "bytes": 13965865
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/guitar.m4a",
+              "source_sha256": "21a1b162fd66b9e43a9b7a638cc13d0c59930184ad530adebd259f95f8410146",
+              "sha256": "21a1b162fd66b9e43a9b7a638cc13d0c59930184ad530adebd259f95f8410146",
+              "bytes": 13696330
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/piano.m4a",
+              "source_sha256": "deeeaa06b53a1383b7e493e3c9633d9fe45b629b7b36bf9541e7b299d44c6bd4",
+              "sha256": "deeeaa06b53a1383b7e493e3c9633d9fe45b629b7b36bf9541e7b299d44c6bd4",
+              "bytes": 13815860
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/other.m4a",
+              "source_sha256": "4fca71afea5e886c49d57d58d9843615fddaf117a5f363d036096a5530d79cf3",
+              "sha256": "4fca71afea5e886c49d57d58d9843615fddaf117a5f363d036096a5530d79cf3",
+              "bytes": 13252641
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/c14d436cf159"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 579663,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "status": "failed",
+      "error": "direct healthy timestamp after seek fraction 0.09093269794735422\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThanOrEqual\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: >= \u001b[32m1785923179742\u001b[39m\nReceived:    \u001b[31m1785923179701\u001b[39m",
+      "finalMetrics": {
+        "stems": {
+          "vocals": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 18.413212,
+            "errorCode": null
+          },
+          "drums": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 15.247212000000005,
+            "errorCode": null
+          },
+          "bass": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 2.2365449999999996,
+            "errorCode": null
+          },
+          "guitar": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 10.936211999999998,
+            "errorCode": null
+          },
+          "piano": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 11.790211999999997,
+            "errorCode": null
+          },
+          "shizzle": {
+            "skewMs": -5,
+            "readyState": 4,
+            "waitingEvents": 7,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 5,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 2,
+            "bufferedAheadSec": 2.2365449999999996,
+            "errorCode": null
+          }
+        },
+        "nudgeTicks": 0,
+        "stallBailouts": 0,
+        "masterGainDb": 0,
+        "masterHeadroomDb": -3,
+        "limiter": {
+          "active": false,
+          "reductionDb": 0.0012740734964609146,
+          "peakReductionDb": 13.141977310180664
+        },
+        "desiredPlaying": true,
+        "health": {
+          "status": "healthy",
+          "recoveryAttempts": 2,
+          "recoverySuccesses": 2,
+          "lastHealthyAtMs": 1785923179701
+        },
+        "output": {
+          "contextState": "running",
+          "rmsDbfs": -33.34872947115163,
+          "peakDbfs": -25.302274429096094,
+          "silentForMs": 0
+        },
+        "video": {
+          "currentTime": 53.213804,
+          "paused": false,
+          "readyState": 4,
+          "networkState": 2,
+          "bufferedAheadSec": 0.3861959999999982,
+          "errorCode": null
+        },
+        "incidents": [
+          {
+            "sequence": 1,
+            "atMs": 1785923177681,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 2,
+            "atMs": 1785923178249,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 3,
+            "atMs": 1785923178265,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 4,
+            "atMs": 1785923178441,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 5,
+            "atMs": 1785923179584,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 6,
+            "atMs": 1785923179600,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          }
+        ]
+      },
+      "failedAt": "2026-08-05T09:46:19.802Z"
+    }
+  ]
+}

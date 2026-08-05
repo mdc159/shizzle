@@ -14,6 +14,12 @@ if (import.meta.env.DEV) {
   }
 }
 
+// Production-safe observability for browser control and field diagnosis. This
+// exposes no credentials and no mutating controls—only direct engine metrics.
+(window as unknown as { __shizzlePlaybackHealth?: unknown }).__shizzlePlaybackHealth = Object.freeze({
+  getMetrics: () => playbackEngine.getMetrics(),
+})
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

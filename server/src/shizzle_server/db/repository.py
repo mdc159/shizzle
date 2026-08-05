@@ -24,14 +24,32 @@ from .models import (
     JobEvent,
     JobStage,
     OrchestratorHeartbeat,
+    PlaybackEvent,
+    PlaybackSession,
     SourceType,
     Track,
+    TrackGenerationEvent,
     utcnow,
 )
 
 # Namespace for deriving a deterministic track id from a job id, so a crashed
 # and re-run publishing stage converges on the same row (idempotency).
 _TRACK_NS = uuid.UUID("6f6b3c1e-9a34-4c86-a0f5-1d2ff0a15a55")
+
+PLAYBACK_INCIDENT_EVENTS = frozenset(
+    {
+        "play-rejected",
+        "stem-media-error",
+        "stem-clock-stalled",
+        "video-media-error",
+        "video-buffering",
+        "video-clock-stalled",
+        "audio-context-not-running",
+        "render-silence",
+        "recovery-failed",
+        "fatal",
+    }
+)
 
 
 def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
@@ -60,6 +78,16 @@ class InvalidTransition(Exception):
         super().__init__(f"job {job_id}: illegal transition {current} -> {target}")
         self.current = current
         self.target = target
+
+
+class TrackGenerationConflict(Exception):
+    """The active generation changed after a migration read its baseline."""
+
+    def __init__(self, track_id: uuid.UUID, expected: int, actual: int) -> None:
+        super().__init__(f"track {track_id}: expected active generation {expected}, found {actual}")
+        self.track_id = track_id
+        self.expected = expected
+        self.actual = actual
 
 
 class JobRepository:
@@ -173,9 +201,7 @@ class JobRepository:
                 )
             return job
 
-    async def renew_lease(
-        self, job_id: uuid.UUID, *, worker_id: str, lease_seconds: float
-    ) -> bool:
+    async def renew_lease(self, job_id: uuid.UUID, *, worker_id: str, lease_seconds: float) -> bool:
         """Extend the lease; returns False if this worker no longer owns it."""
         now = utcnow()
         async with self._sf() as session, session.begin():
@@ -498,6 +524,65 @@ class TrackRepository:
             track.deleted_at = None
             return track, created
 
+    async def activate_generation(
+        self,
+        track_id: uuid.UUID,
+        *,
+        expected_generation: int,
+        generation: int,
+        s3_prefix: str,
+        manifest_key: str,
+        integrity: dict[str, Any],
+        event: str = "activated",
+        detail: dict[str, Any] | None = None,
+    ) -> Track:
+        """Atomically switch a track only if its baseline is still current.
+
+        The compare-and-swap prevents a slow batch migration from overwriting a
+        concurrent repair. The activation event is committed in the same
+        transaction, so there can be no pointer change without a rollback
+        ledger entry.
+        """
+        if generation == expected_generation:
+            raise ValueError("new generation must differ from expected generation")
+        if event not in {"activated", "rollback"}:
+            raise ValueError("event must be 'activated' or 'rollback'")
+        async with self._sf() as session, session.begin():
+            track = await session.get(Track, track_id, with_for_update=True)
+            if track is None:
+                raise LookupError(f"track {track_id} does not exist")
+            if track.generation != expected_generation:
+                raise TrackGenerationConflict(track_id, expected_generation, track.generation)
+            prior = {
+                "s3_prefix": track.s3_prefix,
+                "manifest_key": track.manifest_key,
+                "integrity": track.integrity,
+            }
+            track.generation = generation
+            track.s3_prefix = s3_prefix.rstrip("/")
+            track.manifest_key = manifest_key
+            track.integrity = integrity
+            session.add(
+                TrackGenerationEvent(
+                    track_id=track_id,
+                    event=event,
+                    from_generation=expected_generation,
+                    to_generation=generation,
+                    detail={"prior": prior, **(detail or {})},
+                )
+            )
+            await session.flush()
+            return track
+
+    async def list_generation_events(self, track_id: uuid.UUID) -> list[TrackGenerationEvent]:
+        async with self._sf() as session:
+            result = await session.execute(
+                select(TrackGenerationEvent)
+                .where(TrackGenerationEvent.track_id == track_id)
+                .order_by(TrackGenerationEvent.id)
+            )
+            return list(result.scalars().all())
+
     async def soft_delete(self, track_id: uuid.UUID) -> bool:
         """Mark deleted (design: no silent retention deletion; manual only)."""
         async with self._sf() as session, session.begin():
@@ -506,6 +591,107 @@ class TrackRepository:
                 return False
             track.deleted_at = utcnow()
             return True
+
+
+class PlaybackTelemetryRepository:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    async def ingest(
+        self,
+        *,
+        session_id: uuid.UUID,
+        track_id: uuid.UUID,
+        generation: int,
+        sequence: int,
+        event: str,
+        client_at_ms: int,
+        app_build: str,
+        browser: str,
+        detail: dict[str, Any] | None,
+    ) -> bool:
+        """Insert an event once and update its session summary atomically."""
+        async with self._sf() as session, session.begin():
+            playback = await session.get(PlaybackSession, session_id, with_for_update=True)
+            if playback is None:
+                playback = PlaybackSession(
+                    id=session_id,
+                    track_id=track_id,
+                    generation=generation,
+                    app_build=app_build,
+                    browser=browser,
+                )
+                session.add(playback)
+                await session.flush()
+            elif playback.track_id != track_id or playback.generation != generation:
+                raise ValueError("playback session cannot change track or generation")
+
+            existing = await session.scalar(
+                select(PlaybackEvent.id).where(
+                    PlaybackEvent.session_id == session_id,
+                    PlaybackEvent.sequence == sequence,
+                )
+            )
+            if existing is not None:
+                return False
+            if sequence <= playback.last_sequence:
+                raise ValueError(
+                    f"event sequence {sequence} is behind last sequence {playback.last_sequence}"
+                )
+            now = utcnow()
+            playback.last_sequence = sequence
+            playback.updated_at = now
+            if event == "heartbeat":
+                playback.last_heartbeat_at = now
+            if event in {"ended", "fatal", "session-ended"}:
+                playback.status = event
+                playback.ended_at = now
+            elif event in PLAYBACK_INCIDENT_EVENTS:
+                playback.status = "incident"
+            elif event in {"playing", "recovery-succeeded", "replay"}:
+                playback.status = "playing"
+            session.add(
+                PlaybackEvent(
+                    session_id=session_id,
+                    track_id=track_id,
+                    generation=generation,
+                    sequence=sequence,
+                    event=event,
+                    client_at_ms=client_at_ms,
+                    detail=detail,
+                )
+            )
+            return True
+
+    async def list_events(self, session_id: uuid.UUID) -> list[PlaybackEvent]:
+        async with self._sf() as session:
+            result = await session.execute(
+                select(PlaybackEvent)
+                .where(PlaybackEvent.session_id == session_id)
+                .order_by(PlaybackEvent.sequence)
+            )
+            return list(result.scalars().all())
+
+    async def get_session(self, session_id: uuid.UUID) -> PlaybackSession | None:
+        async with self._sf() as session:
+            return await session.get(PlaybackSession, session_id)
+
+    async def recent_incidents(
+        self, *, since: datetime, limit: int = 100
+    ) -> list[tuple[PlaybackEvent, str]]:
+        """Return directly observed incidents with their human track title."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(PlaybackEvent, Track.title)
+                .join(Track, Track.id == PlaybackEvent.track_id)
+                .where(
+                    PlaybackEvent.received_at >= since,
+                    PlaybackEvent.event.in_(PLAYBACK_INCIDENT_EVENTS),
+                )
+                .order_by(PlaybackEvent.received_at.desc(), PlaybackEvent.id.desc())
+                .limit(limit)
+            )
+            return [(event, title) for event, title in result.all()]
 
 
 class HeartbeatRepository:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import json
+from urllib.parse import parse_qs, urlparse
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -94,6 +97,51 @@ def test_signed_cookies_shape(tmp_path):
     assert b"/tracks/*" in base64.b64decode(restored)
 
 
+def test_signed_url_is_file_scoped(tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_path = tmp_path / "cf-url.pem"
+    key_path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    s = _s(
+        cloudfront_domain="d2488k8kjndpsy.cloudfront.net",
+        cloudfront_key_pair_id="KEY123",
+        cloudfront_private_key_path=str(key_path),
+    )
+    result = cloudfront.signed_url(
+        s, "tracks/abc/2/video.mp4", expires_epoch=9999999999
+    )
+    parsed = urlparse(result)
+    query = parse_qs(parsed.query)
+    assert parsed.path == "/tracks/abc/2/video.mp4"
+    assert set(query) == {"Policy", "Signature", "Key-Pair-Id"}
+    assert query["Key-Pair-Id"] == ["KEY123"]
+    encoded_policy = (
+        query["Policy"][0].replace("-", "+").replace("_", "=").replace("~", "/")
+    )
+    policy = json.loads(base64.b64decode(encoded_policy))
+    assert policy["Statement"][0]["Resource"] == (
+        "https://d2488k8kjndpsy.cloudfront.net/tracks/abc/2/video.mp4"
+    )
+
+
+def test_signed_url_rejects_non_track_key(tmp_path):
+    settings = _s(
+        cloudfront_domain="cdn.example",
+        cloudfront_key_pair_id="KEY",
+        cloudfront_private_key_path=str(tmp_path / "missing.pem"),
+    )
+    with pytest.raises(ValueError, match="under tracks"):
+        cloudfront.signed_url(settings, "other/video.mp4", expires_epoch=9999999999)
+
+
 # --- manifest rewrite --------------------------------------------------------
 
 
@@ -112,6 +160,28 @@ def test_rewrite_cloud_manifest_to_cdn_paths():
     assert out["stems"][0]["file"] == "/cdn/tracks/abc/1/stems/vocals.m4a"
     # Original untouched.
     assert raw["video"] == "video.mp4"
+
+
+def test_rewrite_cloud_manifest_to_direct_signed_urls(monkeypatch):
+    s = _s(
+        cloudfront_domain="cdn.example",
+        cloudfront_key_pair_id="KEY",
+        cloudfront_private_key_path="key.pem",
+    )
+    monkeypatch.setattr(
+        cloudfront,
+        "signed_url",
+        lambda _settings, key: f"https://cdn.example/{key}?signed=yes",
+    )
+    raw = {
+        "video": "video.mp4",
+        "stems": [{"id": "vocals", "file": "stems/vocals.m4a"}],
+    }
+    out = media.rewrite_cloud_manifest(s, raw, "tracks/abc/2")
+    assert out["video"] == "https://cdn.example/tracks/abc/2/video.mp4?signed=yes"
+    assert out["stems"][0]["file"] == (
+        "https://cdn.example/tracks/abc/2/stems/vocals.m4a?signed=yes"
+    )
 
 
 # --- gate behaviour through the ASGI app -------------------------------------

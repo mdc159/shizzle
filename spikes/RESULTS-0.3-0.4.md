@@ -1,11 +1,14 @@
 # Spike results: 0.3 Demucs gain/null behavior, 0.4 AAC renditions
 
+> Troubleshooting experiment for separation gain, reconstruction, clipping, and
+> delivery-codec questions. It is not current completion work.
+
 Date: 2026-08-02. Executed on the local RTX 4070 (Laptop GPU) via the
 `k25-nextgen-rewrite-local-server:latest` Docker image (demucs 4.0.1, torch CUDA,
 ffmpeg 4.4.2). GPU use confirmed in demucs/torch logs both runs.
 
 **Song:** `X:\GitHub\k25\data\47bae048e13c\source.mp4` — shortest completed k25
-job (3:19.7; other jobs 3:40–9:17). Canonical WAV extracted exactly as
+job (3:19.7; other jobs 3:40–9:17). Reference WAV extracted exactly as
 k25-nextgen `processing.extract_audio` (pcm_s16le, 48 kHz, stereo). Demucs
 consumes it via its own ffmpeg decode at 44 100 Hz; the null-test reference was
 produced through that identical ffmpeg path (`-ar 44100 -c:a pcm_f32le`), so

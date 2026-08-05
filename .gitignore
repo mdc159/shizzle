@@ -36,3 +36,9 @@ Thumbs.db
 
 # Spike scratch output (results docs ARE committed; raw dumps are not)
 spikes/**/out/
+
+# Local agent/browser state and generated run output
+.claude/
+.playwright-cli/
+.jobid.tmp
+output/

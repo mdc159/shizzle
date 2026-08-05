@@ -686,7 +686,15 @@ async def publish_job(
 
 
 def _stored_sha256(head: dict[str, Any]) -> str | None:
-    """AWS returns ChecksumSHA256 base64-encoded; normalize to hex."""
+    """Return only a full-object AWS SHA-256, normalized from base64 to hex.
+
+    Multipart uploads commonly expose ``ChecksumType=COMPOSITE`` and a value
+    such as ``<base64>-11``. That checksum covers part digests, not the object
+    bytes, and cannot be compared to the worker's ordinary file SHA-256.
+    ``AUTO`` therefore streams the object when this helper returns ``None``.
+    """
+    if str(head.get("ChecksumType", "")).upper() == "COMPOSITE":
+        return None
     raw = head.get("ChecksumSHA256")
     if not raw:
         return None

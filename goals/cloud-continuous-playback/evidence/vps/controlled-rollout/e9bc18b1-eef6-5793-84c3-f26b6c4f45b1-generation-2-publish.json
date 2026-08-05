@@ -1,0 +1,247 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T08:31:32.638353+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+      "title": "AC DC - Walk All Over You (Official Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "published",
+      "manifest": {
+        "version": 3,
+        "title": "AC DC - Walk All Over You (Official Video)",
+        "artist": "",
+        "duration": 310.077,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "30000/1001",
+          "duration": 310.077
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "copy",
+          "video_action_reason": "existing video passes compatibility profile and bitrate budget",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/video.mp4",
+              "source_sha256": "1577caba329b81619ff4b1dcbe670dda51a758e244e13abf04e4bb66ed012b5f",
+              "sha256": "1577caba329b81619ff4b1dcbe670dda51a758e244e13abf04e4bb66ed012b5f",
+              "bytes": 28677160
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/vocals.m4a",
+              "source_sha256": "7be86610ea1b137566d670c3122b99babd104bb7bdec3d59220a262dc2ce4187",
+              "sha256": "7be86610ea1b137566d670c3122b99babd104bb7bdec3d59220a262dc2ce4187",
+              "bytes": 6987136
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/drums.m4a",
+              "source_sha256": "af62b97487a78e4b8d579d042c8f03df72a80a611879059000b280def74c30b5",
+              "sha256": "af62b97487a78e4b8d579d042c8f03df72a80a611879059000b280def74c30b5",
+              "bytes": 7492888
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/bass.m4a",
+              "source_sha256": "a51ad7d177202f8070a714f10bbbfc0a152d1f825ee6c5858526a2067728f2ca",
+              "sha256": "a51ad7d177202f8070a714f10bbbfc0a152d1f825ee6c5858526a2067728f2ca",
+              "bytes": 7300479
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/guitar.m4a",
+              "source_sha256": "8177c81d6e7883b9f3df6067005984f7bfe56f9118c2f4f62c0c3699d477310f",
+              "sha256": "8177c81d6e7883b9f3df6067005984f7bfe56f9118c2f4f62c0c3699d477310f",
+              "bytes": 7514679
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/piano.m4a",
+              "source_sha256": "09b08ed5effadc077eac4070002af9c730c0a5ccbe1827ecb8877f0ee7ff9678",
+              "sha256": "09b08ed5effadc077eac4070002af9c730c0a5ccbe1827ecb8877f0ee7ff9678",
+              "bytes": 7291799
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/1/stems/other.m4a",
+              "source_sha256": "601c8dbb15b9b89f802674d56553f4714e302edfb038784ff78bf0cde25b9d38",
+              "sha256": "601c8dbb15b9b89f802674d56553f4714e302edfb038784ff78bf0cde25b9d38",
+              "bytes": 6864438
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/2261bb77c5c4"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 310077,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "manifest_sha256": "90d8b6fa8a3834e617e0103ec75bb9a7974a10c770af713a28e282312eafc0fb",
+      "publication": {
+        "s3_prefix": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/2",
+        "manifest_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/2/manifest.json",
+        "bytes_copied": 72133521,
+        "verification": {
+          "source": "publisher",
+          "policy": "auto",
+          "object_count": 8,
+          "total_bytes": 72133521,
+          "sha256_verified": 8,
+          "sha256_unverified": 0,
+          "objects": [
+            {
+              "file": "video.mp4",
+              "size_bytes": 28677160,
+              "sha256": "1577caba329b81619ff4b1dcbe670dda51a758e244e13abf04e4bb66ed012b5f",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "size_bytes": 6987136,
+              "sha256": "7be86610ea1b137566d670c3122b99babd104bb7bdec3d59220a262dc2ce4187",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/drums.m4a",
+              "size_bytes": 7492888,
+              "sha256": "af62b97487a78e4b8d579d042c8f03df72a80a611879059000b280def74c30b5",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/bass.m4a",
+              "size_bytes": 7300479,
+              "sha256": "a51ad7d177202f8070a714f10bbbfc0a152d1f825ee6c5858526a2067728f2ca",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "size_bytes": 7514679,
+              "sha256": "8177c81d6e7883b9f3df6067005984f7bfe56f9118c2f4f62c0c3699d477310f",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/piano.m4a",
+              "size_bytes": 7291799,
+              "sha256": "09b08ed5effadc077eac4070002af9c730c0a5ccbe1827ecb8877f0ee7ff9678",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "size_bytes": 6864438,
+              "sha256": "601c8dbb15b9b89f802674d56553f4714e302edfb038784ff78bf0cde25b9d38",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "manifest.json",
+              "size_bytes": 4942,
+              "sha256": "90d8b6fa8a3834e617e0103ec75bb9a7974a10c770af713a28e282312eafc0fb",
+              "sha256_source": "s3-checksum",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,6 +1,11 @@
 # Spike 0.1 results — six-stem skew probe
 
-Probe: `spikes/skew-probe/` (see its README for run instructions per device).
+> Troubleshooting experiment. Device-specific pending rows below are not current
+> acceptance work. Use this procedure only when investigating a real timing or
+> synchronization issue; the finished system uses one capability-based browser
+> contract.
+
+Probe: `spikes/skew-probe/` (see its README for the original experiment).
 Track: `X:\GitHub\k25\data\47bae048e13c` — "acdc-flick", 199.7 s, six AAC
 `.m4a` stems + muted `video.mp4`, served locally with Range (206) support.
 

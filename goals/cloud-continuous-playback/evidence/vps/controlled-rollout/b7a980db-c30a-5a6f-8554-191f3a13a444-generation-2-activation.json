@@ -1,0 +1,175 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T08:09:05.045751+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": true,
+  "outcomes": [
+    {
+      "id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+      "title": "Sweet Child O' Mine",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "activated",
+      "manifest": {
+        "version": 3,
+        "title": "Sweet Child O' Mine",
+        "artist": "",
+        "duration": 356.08,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "25/1",
+          "duration": 356.08
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "copy",
+          "video_action_reason": "existing video passes compatibility profile and bitrate budget",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/video.mp4",
+              "source_sha256": "48828e39bd08bf6d88271ff8702c052813b6021084ef7d891a1d44c2ae3d7dcc",
+              "sha256": "48828e39bd08bf6d88271ff8702c052813b6021084ef7d891a1d44c2ae3d7dcc",
+              "bytes": 16028032
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/vocals.m4a",
+              "source_sha256": "bf37e2bd3d1dc5cb9e6666ad1d55fcc8e2f061bf2ce483f0c559e84a3b2b4b45",
+              "sha256": "bf37e2bd3d1dc5cb9e6666ad1d55fcc8e2f061bf2ce483f0c559e84a3b2b4b45",
+              "bytes": 8129432
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/drums.m4a",
+              "source_sha256": "48b31876235f22dfea16c521a057a25d51f90c3226fe8109308e205274272014",
+              "sha256": "48b31876235f22dfea16c521a057a25d51f90c3226fe8109308e205274272014",
+              "bytes": 8543282
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/bass.m4a",
+              "source_sha256": "7304e2e00755e3bfbb685eb39cd91e74e110b30b7977060843d8746bbf65059a",
+              "sha256": "7304e2e00755e3bfbb685eb39cd91e74e110b30b7977060843d8746bbf65059a",
+              "bytes": 8437595
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/guitar.m4a",
+              "source_sha256": "031299ab4beb73cc1d7d25681d16eaf13c14f4168db4c6a2eee7720a253fbe01",
+              "sha256": "031299ab4beb73cc1d7d25681d16eaf13c14f4168db4c6a2eee7720a253fbe01",
+              "bytes": 8567908
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/piano.m4a",
+              "source_sha256": "10eb87234afefee2e9e0feaed4d1675c6d7afda9e34f4d686b25a0657f6e1b6a",
+              "sha256": "10eb87234afefee2e9e0feaed4d1675c6d7afda9e34f4d686b25a0657f6e1b6a",
+              "bytes": 8499233
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/1/stems/other.m4a",
+              "source_sha256": "f8c7a82250a3f5d6e1e01c14aec4b0ae70aab374d0c8f00353cf781ff63d3f8e",
+              "sha256": "f8c7a82250a3f5d6e1e01c14aec4b0ae70aab374d0c8f00353cf781ff63d3f8e",
+              "bytes": 8177490
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/5d85aab23da8"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 356080,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      }
+    }
+  ]
+}

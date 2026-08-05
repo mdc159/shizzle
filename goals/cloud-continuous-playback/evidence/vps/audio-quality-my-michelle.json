@@ -1,0 +1,40 @@
+{
+  "schema": "shizzle-audio-quality-v1",
+  "started_at": "2026-08-05T08:20:50.253068+00:00",
+  "status": "complete",
+  "track_count": 1,
+  "tracks": [
+    {
+      "id": "7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d",
+      "title": "My Michelle",
+      "generation": 2,
+      "manifest_key": "tracks/7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d/2/manifest.json",
+      "s3_prefix": "tracks/7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.8,
+        "loudness_range_lu": 6.1,
+        "true_peak_dbtp": -1.8,
+        "sample_peak_dbfs": -1.799584,
+        "min_sample": -0.810104,
+        "max_sample": 0.812869,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    }
+  ],
+  "updated_at": "2026-08-05T08:21:00.463271+00:00",
+  "passed_pre_limiter_count": 1,
+  "completed_at": "2026-08-05T08:21:00.463860+00:00"
+}

@@ -1,560 +1,106 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Plan: Shizzle — Cloud Karaoke Stem Mixer</title>
-<style>
-  :root {
-    --bg: #14151a;
-    --surface: #1d1f27;
-    --surface-2: #242732;
-    --ink: #e8e6e1;
-    --ink-dim: #9a99a3;
-    --accent: #f5a623;        /* fader amber */
-    --accent-2: #3ec9a7;      /* meter teal */
-    --danger: #e05252;
-    --border: #33364a;
-    --mono: "Cascadia Code", "Consolas", monospace;
-    --sans: "Segoe UI", system-ui, sans-serif;
-  }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.6; margin: 0; }
-  main { max-width: 960px; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
-  h1 { font-size: 1.9rem; border-bottom: 3px solid var(--accent); padding-bottom: .4rem; }
-  h2 { font-size: 1.4rem; color: var(--accent); margin-top: 2.5rem; border-bottom: 1px solid var(--border); padding-bottom: .3rem; }
-  h3 { font-size: 1.15rem; color: var(--accent-2); }
-  h4 { margin-bottom: .3rem; }
-  code { font-family: var(--mono); background: var(--surface-2); padding: .1em .35em; border-radius: 4px; font-size: .9em; }
-  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; }
-  pre code { background: none; padding: 0; }
-  figure { margin: 1.5rem 0; text-align: center; }
-  figure img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
-  figcaption { color: var(--ink-dim); font-size: .85rem; margin-top: .5rem; }
-  details.meta { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: .6rem 1rem; font-size: .85rem; }
-  details.meta dl { display: grid; grid-template-columns: 8rem 1fr; gap: .2rem .8rem; margin: .5rem 0 0; }
-  details.meta dt { color: var(--ink-dim); }
-  details.meta dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
-  .tag { font-size: .7rem; padding: .1em .5em; border-radius: 999px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-  .tag.existing { background: #2b3a4e; color: #7fb4e8; }
-  .tag.new { background: #2e4038; color: #7fe8b4; }
-  ul.checklist { list-style: none; padding-left: .5rem; }
-  ul.checklist li { margin: .35rem 0; }
-  code.status { color: var(--accent); min-width: 3.2em; display: inline-block; text-align: center; }
-  .phase { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent-2); border-radius: 8px; padding: 1rem 1.5rem; margin: 1.5rem 0; }
-  .loop { background: var(--surface-2); border: 1px dashed var(--accent); border-radius: 8px; padding: .8rem 1rem; margin-top: 1rem; font-size: .9rem; }
-  .files li { margin: .4rem 0; }
-  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-  th, td { border: 1px solid var(--border); padding: .45rem .7rem; text-align: left; font-size: .9rem; }
-  th { background: var(--surface-2); color: var(--accent-2); }
-  .callout { background: var(--surface-2); border-left: 4px solid var(--accent); padding: .8rem 1rem; border-radius: 0 8px 8px 0; margin: 1rem 0; }
-  .qa-answer { color: var(--ink-dim); }
-  a { color: var(--accent-2); }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shizzle — Current Implementation Flow</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101116;
+      --panel: #191b23;
+      --text: #f4f4f6;
+      --muted: #aaaebb;
+      --done: #57d48b;
+      --next: #ffbd59;
+      --line: #343846;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 17px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 48px 24px 80px; }
+    h1 { font-size: clamp(2rem, 6vw, 4rem); line-height: 1.05; margin: 0 0 14px; }
+    h2 { margin-top: 44px; }
+    p { max-width: 760px; }
+    .lede { color: var(--muted); font-size: 1.2rem; }
+    .flow { display: grid; gap: 12px; margin: 32px 0; }
+    .step {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px 20px;
+      display: grid;
+      grid-template-columns: 118px 1fr;
+      gap: 16px;
+      align-items: center;
+    }
+    .status { font-weight: 800; letter-spacing: .06em; font-size: .82rem; }
+    .next .status { color: var(--next); }
+    .done .status { color: var(--done); }
+    .arrow { color: var(--muted); text-align: center; font-size: 1.5rem; }
+    .boundary {
+      border: 2px solid var(--done);
+      border-radius: 14px;
+      padding: 18px 20px;
+      color: var(--done);
+      font-weight: 750;
+      text-align: center;
+    }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+    ul, ol { padding-left: 1.3rem; }
+    code { background: #242733; padding: .1em .35em; border-radius: 5px; }
+    a { color: #8ac7ff; }
+  </style>
 </head>
 <body>
 <main>
+  <h1>Shizzle</h1>
+  <p class="lede">One simple cloud workflow. The downstream delivery and playback portion is finished; upstream ingestion is next.</p>
 
-  <!-- ===== HEADER + UPDATABLE METADATA ===== -->
-  <header>
-    <h1>Plan: Shizzle — Cloud Karaoke Stem Mixer</h1>
-    <details class="meta">
-      <summary>Metadata</summary>
-      <dl>
-        <dt>created</dt>      <dd>2026-08-02T00:00:00-05:00</dd>
-        <dt>modified</dt>     <dd>2026-08-02T00:00:00-05:00, 2026-08-02T17:00:00-05:00</dd>
-        <dt>commits</dt>      <dd>dd0877b</dd>
-        <dt>agent name</dt>   <dd>claude-fable-5</dd>
-        <dt>session id</dt>   <dd>9740130b-ecce-4b74-9a15-afa832282a0d</dd>
-        <dt>back refs</dt>    <dd>docs/superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md, review-01.md</dd>
-        <dt>forward refs</dt> <dd>docs/provenance.md (created in Phase 1), spikes/RESULTS.md (created in Phase 0)</dd>
-      </dl>
-    </details>
-  </header>
-
-  <figure>
-    <img src="shizzle-cloud-karaoke-implementation/hero-chatgpt.png" alt="Stage-lit mixing console: six glowing faders fed from a cloud, projector screen behind, titled SHIZZLE">
-    <figcaption>Six stems, split in the cloud, mixed live from any screen. <em>(Image: Mike, ChatGPT)</em></figcaption>
-  </figure>
-
-  <!-- ===== PURPOSE / PROBLEM / SOLUTION ===== -->
-  <section id="purpose">
-    <h2>Purpose</h2>
-    <p>Build the all-cloud version of the k25 karaoke stem mixer: paste a YouTube URL, a serverless GPU splits the song into six stems, S3 + CloudFront serve it anywhere, any browser plays the video with live per-stem faders, and an iPad pairs by QR code as a pure touch mixing surface. Private tool for Mike and a couple of musician friends. <strong>Done means:</strong> from any location, URL → minutes later the song plays on the projector while stems are mixed live from an iPad, sounding as good and staying as tight as the best local prototype.</p>
-    <figure>
-      <img src="shizzle-cloud-karaoke-implementation/party.png" alt="Living room practice night: projected music video, a friend singing, a guitarist playing along, iPad mixer on the couch">
-      <figcaption>Done, illustrated: practice night. <em>(Image: Mike, ChatGPT)</em></figcaption>
-    </figure>
+  <section class="flow" aria-label="Shizzle process flow">
+    <div class="step next"><div class="status">NEXT</div><div><strong>URL or upload</strong><br>Acquire and validate the source entirely in cloud infrastructure.</div></div>
+    <div class="arrow">↓</div>
+    <div class="step next"><div class="status">NEXT</div><div><strong>Cloud GPU separation</strong><br>Produce six clean aligned lossless stems.</div></div>
+    <div class="arrow">↓</div>
+    <div class="boundary">Finished boundary: six clean lossless stems</div>
+    <div class="arrow">↓</div>
+    <div class="step done"><div class="status">DONE</div><div><strong>Encode and verify</strong><br>Create <code>shizzle-browser-v1</code> stems and video, then run the fixed artifact checks.</div></div>
+    <div class="arrow">↓</div>
+    <div class="step done"><div class="status">DONE</div><div><strong>Publish</strong><br>Write an immutable cloud generation, manifest last, then activate one database pointer.</div></div>
+    <div class="arrow">↓</div>
+    <div class="step done"><div class="status">DONE</div><div><strong>Browser playback</strong><br>Stream, seek, mix, recover, end, replay, and report direct health.</div></div>
   </section>
 
-  <section id="problem">
-    <h2>Problem</h2>
-    <p>Three prior repos hold one working local MVP (nextgen-rewrite is the only committed baseline) plus an abandoned cloud pipeline in an archive. The local tool works but is chained to one PC with a 4070. Prior cloud/heavy attempts failed on: full-file Opus decoding blowing up RAM (one song max), terrible mouse-driven mixing UX, and sync bugs ("broken record" hard-seek loops). An external review (review-01.md) added five hard constraints: six media elements do <em>not</em> share a timeline (sync must be measured, not assumed), CloudFront signed cookies don't flow cross-origin with the current player code, media processing belongs on the GPU worker not the 2-vCPU VPS, job state needs a durable orchestrator not just persisted statuses, and Demucs <code>--clip-mode rescale</code> can poison a unity-sum null test.</p>
-    <figure>
-      <img src="shizzle-cloud-karaoke-implementation/problem.png" alt="A PC chained to a heavy GPU beside broken sync waves and an overheating RAM stick">
-      <figcaption>The local MVP works — but only on one PC, and every heavier attempt broke on RAM, sync, or UX.</figcaption>
-    </figure>
-  </section>
+  <h2>What is finished</h2>
+  <div class="cards">
+    <article class="card"><strong>27 accepted tracks</strong><p>Every active generation passes the frozen delivery profile.</p></article>
+    <article class="card"><strong>Cloud delivery</strong><p>Private S3, signed CloudFront URLs, Range-streamed stems, and one bounded video Blob.</p></article>
+    <article class="card"><strong>Reliable player</strong><p>Transport, random seeking, six-stem mixing, fault recovery, natural end, and replay.</p></article>
+    <article class="card"><strong>Direct observability</strong><p>Clocks, buffers, decoder state, Web Audio state, rendered PCM, limiter state, and telemetry.</p></article>
+  </div>
 
-  <section id="solution">
-    <h2>Solution</h2>
-    <p>A modular monolith on one small VPS (API + durable Postgres-backed orchestrator), one disposable RunPod GPU worker (modernized from <code>k25/archive/runpod/</code>) that does <em>all</em> heavy media where the files are, immutable artifacts on private S3 served through a single same-origin CloudFront hostname (assets, media, API, WebSocket), a streaming six-stem player behind a <code>PlaybackEngine</code> interface with real skew instrumentation, and a QR-paired controls-only remote page. Risk spikes run first: prove projector/iPad playback, signed-cookie media, Demucs gain behavior, and AAC bitrate by ear — before building the cloud machinery around them.</p>
-    <figure>
-      <img src="shizzle-cloud-karaoke-implementation/solution.png" alt="Architecture: browsers entering one CDN doorway; behind it a small server, storage bucket, and detachable GPU chip">
-      <figcaption>One public origin; heavy work on a disposable GPU; the VPS only orchestrates.</figcaption>
-    </figure>
-  </section>
+  <h2>How future tracks work</h2>
+  <p>Once a new source produces six clean lossless stems, it enters the existing delivery pipeline. It runs the routine checks once and joins the library if it passes. The current 27-track baseline is not reprocessed or put through another development campaign. Only an actual observed issue reopens affected work.</p>
 
-  <!-- ===== RELEVANT FILES ===== -->
-  <section id="files" class="files">
-    <h2>Relevant Files</h2>
+  <h2>Next implementation</h2>
+  <ol>
+    <li>Bake <code>htdemucs_6s</code> weights into the worker image.</li>
+    <li>Re-enable bounded RunPod capacity.</li>
+    <li>Prove one golden source reaches <code>COMPLETED</code> with verified S3 outputs.</li>
+    <li>Connect production ingestion and reconciliation to the cloud worker.</li>
+    <li>Make URL acquisition cloud-reliable while retaining direct upload.</li>
+    <li>Hand passing lossless stems to the finished pipeline unchanged.</li>
+  </ol>
 
-    <h3>Existing Files (salvage sources — copied in, never git-merged)</h3>
-    <ul>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\shizzle\docs\superpowers\specs\2026-08-02-shizzle-cloud-karaoke-design.md</code> — approved design spec v2; the authority this plan implements</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\shizzle\review-01.md</code> — external review; its five critical items are folded into phases 0–6</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25-nextgen-rewrite\local-server\src\local_server\processing.py</code> — tuned ffmpeg/Demucs pure functions; basis of the worker's media stages</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25-nextgen-rewrite\local-server\src\local_server\routes.py</code> — upload safety (chunked cap, ffprobe gate, traversal guard); basis of server ingest endpoints</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25-nextgen-rewrite\ui\</code> — React 19/Vite/Tailwind player, mixer, library, upload stepper; trunk of the new <code>ui/</code></li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25-nextgen-rewrite\ui\src\hooks\useAudioSync.ts</code> — tiered drift policy + stall detection; ported into the media-element engine</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25-nextgen-rewrite\docs\global-stem-playback-spec.md</code> — manifest v2 / drift / CDN blueprint; segment-scheduler contingency source</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\ui\src\components\mixer\MixerDrawer.tsx</code> + <code>useStore.ts</code> (uncommitted working tree) — mute/solo buttons, −60…+12 dB range; cherry-picked by hand</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\archive\runpod\</code> (handler.py, audio_processing.py, s3_ops.py, manifest.py, callbacks.py, Dockerfile) — proven S3-in → Demucs → mux → S3-out worker; foundation of <code>worker/</code></li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\archive\agent\src\karaoke_agent\s3_multipart.py</code> — tested resumable multipart uploader</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\archive\agent\utils\circuit_breaker.py</code> — tested CLOSED/OPEN/HALF_OPEN breaker for RunPod calls</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\archive\agent\pyproject.toml</code> — ruff + mypy-strict + pytest config; quality baseline for all Python packages</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\archive\docs\aws\s3-naming-spec.md</code>, <code>cloudfront.md</code> — S3 layout + CDN security posture references</li>
-      <li><span class="tag existing">existing</span> <code>X:\GitHub\k25\data\</code> (6 processed tracks) — ready-made fixture stems for Phase 0 skew spike</li>
-    </ul>
+  <h2>Architecture boundary</h2>
+  <p>All services, processing, storage, publication, media delivery, and monitoring are cloud-hosted. Browsers consume one standards-based media contract.</p>
 
-    <h3>New Files (target monorepo layout)</h3>
-    <ul>
-      <li><span class="tag new">new</span> <code>spikes/skew-probe/index.html</code> + <code>probe.ts</code> — instrumented 6-stem playback page; per-stem skew logger</li>
-      <li><span class="tag new">new</span> <code>spikes/signed-cookie-proof/</code> — minimal CloudFront + private S3 + cookie-issuing endpoint proof</li>
-      <li><span class="tag new">new</span> <code>spikes/demucs-gain/run.py</code> — clip-mode/float/common-gain null-behavior experiment</li>
-      <li><span class="tag new">new</span> <code>spikes/aac-abx/make_renditions.py</code> — 256k/320k/ALAC renditions for blinded listening</li>
-      <li><span class="tag new">new</span> <code>spikes/RESULTS.md</code> — recorded gate outcomes; forward-referenced by later phases</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/main.py</code> — FastAPI app factory (evolved from nextgen main.py)</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/api/routes.py</code> — auth, ingest, jobs, library, tracks endpoints (DB-backed)</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/auth.py</code> — passcode → hashed opaque tokens, auth-version, signed-cookie issuance</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/db/models.py</code> + <code>alembic/</code> — jobs, job_events, tracks schema + migrations</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/orchestrator/loop.py</code> — durable lease-based job loop (separate process)</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/orchestrator/runpod_client.py</code> — dispatch, webhook receiver, polling reconciler, circuit breaker</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/ingest/ytdlp.py</code> — cookie-authed download, YouTube-domain validation</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/publish.py</code> — checksum verification, manifest-last publication, immutable generations</li>
-      <li><span class="tag new">new</span> <code>server/src/shizzle_server/ws/sessions.py</code> — pairing sessions, envelope protocol, revision-stamped state relay</li>
-      <li><span class="tag new">new</span> <code>worker/handler.py</code> + <code>audio_processing.py</code> + <code>integrity.py</code> + <code>encode.py</code> + <code>Dockerfile</code> — modernized RunPod worker (float-preserving Demucs, common gain, dual residual checks, AAC knob, optional multi-track.mp4, staging uploads)</li>
-      <li><span class="tag new">new</span> <code>ui/src/lib/playback/PlaybackEngine.ts</code> — engine interface (load, play, pause, seek, setStemGainDb, metrics)</li>
-      <li><span class="tag new">new</span> <code>ui/src/lib/playback/mediaElementEngine.ts</code> — salvaged six-element approach + drift policy + instrumentation, behind the interface</li>
-      <li><span class="tag new">new</span> <code>ui/src/lib/playback/metrics.ts</code> — per-stem skew, buffer state, correction counters (never average-only)</li>
-      <li><span class="tag new">new</span> <code>ui/src/remote/RemotePage.tsx</code> — controls-only touch surface (faders, mute/solo, master, transport, library)</li>
-      <li><span class="tag new">new</span> <code>infra/compose.yml</code> — api, orchestrator, postgres, caddy (+ local-gpu profile for dev)</li>
-      <li><span class="tag new">new</span> <code>infra/cloudfront/</code> — distribution config as code (origins, behaviors, OAC, WebSocket forwarding, lifecycle rules)</li>
-      <li><span class="tag new">new</span> <code>docs/provenance.md</code> — per-unit salvage ledger: source repo, commit, path, changes, tests</li>
-      <li><span class="tag new">new</span> <code>fixtures/golden-30s.mp4</code> — small rights-safe test clip bundled for CI and e2e</li>
-    </ul>
-  </section>
-
-  <!-- ===== IMPLEMENTATION PHASES ===== -->
-  <section id="phases">
-    <h2>Implementation Phases</h2>
-    <p><strong>IMPORTANT:</strong> Execute every phase and task step by step, in order, top to bottom.</p>
-    <p>Status markers: <code>[]</code> idle · <code>[wip]</code> in progress · <code>[x]</code> complete · <code>[f]</code> failed. All start as <code>[]</code>; the Build Plan workflow updates them as it works.</p>
-
-    <div class="phase">
-      <h3><code class="status">[wip]</code> Phase 0: Risk Spikes — prove the hard assumptions first</h3>
-      <p>Cheap, isolated experiments that decide the design's riskiest bets before structural work. Every spike writes its outcome (numbers, verdict, decision) to <code>spikes/RESULTS.md</code>. Blocked-on-credentials spikes (0.2) may run concurrently with Phase 1 but must complete before Phase 3.</p>
-
-      <h4>0.1 Stem-skew playback probe (decides PlaybackEngine path)</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> Build <code>spikes/skew-probe/</code>: static page loading a full processed track from <code>X:\GitHub\k25\data\</code> (video + 6 m4a) via six <code>&lt;audio&gt;</code> + gain nodes</li>
-        <li><code class="status">[x]</code> Instrument: sample every 250 ms — each stem's <code>currentTime</code> delta vs video (min/max/per-stem, never average-only), <code>readyState</code>/stalled flags, correction events; dump JSON report on song end</li>
-        <li><code class="status">[wip]</code> Run a full song on: Chromium laptop (HDMI reference) <strong>✔ 3 ms corrected / 6 ms raw — PASS</strong>; iPad Safari + Samsung projector Tizen browser pending human runs</li>
-        <li><code class="status">[]</code> Record verdict in <code>spikes/RESULTS.md</code>: max skew per device vs 50 ms threshold; Tizen supported/opportunistic/unsupported; segment-scheduler contingency triggered or not</li>
-      </ul>
-
-      <h4>0.2 Signed-cookie media proof (needs fresh AWS creds)</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> Audit surviving infra first: <code>aws s3 ls s3://karaoke-pimpshizzle</code>, RunPod dashboard check — inventory anything reusable into <code>spikes/RESULTS.md</code></li>
-        <li><code class="status">[x]</code> Stand up minimal proof: private S3 + OAC + one CloudFront distro with <code>/media/*</code> and a stub <code>/api/cookie</code> origin issuing signed cookies</li>
-        <li><code class="status">[x]</code> Prove: same-origin <code>&lt;audio&gt;</code> streams a stem with Range requests through signed cookies on Chromium + iPad Safari</li>
-      </ul>
-
-      <h4>0.3 Demucs gain/null behavior</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> <code>spikes/demucs-gain/run.py</code>: split the golden track twice on the 4070 — current flags vs float-preserving output (no per-stem rescale), measure unity-sum RMS/peak residual for both</li>
-        <li><code class="status">[x]</code> Decide and record: gain policy (float or common attenuation factor), acceptable residual thresholds for the two integrity gates</li>
-      </ul>
-
-      <h4>0.4 Blinded AAC bitrate comparison</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> <code>spikes/aac-abx/make_renditions.py</code>: from one golden track's float stems, produce 256k AAC / 320k AAC / ALAC remixes, randomized filenames + answer key</li>
-        <li><code class="status">[]</code> Mike listens blind on the real rig (projector + main speakers); record chosen default bitrate in <code>spikes/RESULTS.md</code></li>
-      </ul>
-
-      <h4>0.5 Testing Strategy</h4>
-      <p>The spikes <em>are</em> the tests — each produces a measured artifact, not an opinion. Validation is the existence and completeness of recorded results.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>type spikes\RESULTS.md</code> — contains a filled verdict block for each of 0.1–0.4 (skew table per device, cookie proof pass/fail, residual numbers + thresholds, chosen bitrate)</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[wip]</code> Phase 1: Repo Assembly + Local Golden Pipeline</h3>
-      <p>Fresh monorepo, salvage copied in with provenance, strict tooling from day one, and the local pipeline running on the 4070 as the reference implementation. No cloud dependencies yet.</p>
-      <figure>
-        <img src="shizzle-cloud-karaoke-implementation/phase1.png" alt="Three old repositories funneling selected blocks into one clean repository with a provenance ledger">
-        <figcaption>Salvage flows in with provenance; 3.5 GB of git history stays behind.</figcaption>
-      </figure>
-
-      <h4>1.1 Scaffold and tooling</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> Create monorepo layout: <code>server/</code>, <code>worker/</code>, <code>ui/</code>, <code>infra/</code>, <code>spikes/</code>, <code>fixtures/</code>, <code>docs/</code>; root README</li>
-        <li><code class="status">[x]</code> Python: uv workspaces for <code>server/</code> and <code>worker/</code>; copy ruff + mypy-strict + pytest config from <code>archive/agent/pyproject.toml</code> into both</li>
-        <li><code class="status">[x]</code> UI: copy nextgen <code>ui/</code> wholesale; keep ESLint flat config + knip; wire <code>npm run lint &amp;&amp; npm run typecheck &amp;&amp; npm run knip</code> as one <code>check</code> script</li>
-        <li><code class="status">[x]</code> <code>.gitignore</code> from nextgen (data/, media, env) — never from k25</li>
-        <li><code class="status">[x]</code> Create <code>fixtures/golden-30s.mp4</code>: 30 s rights-safe clip (generate tones+video with ffmpeg) for CI; full-length personal golden track stays local-only, path via env var</li>
-      </ul>
-
-      <h4>1.2 Salvage copy-in with provenance</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> Copy server trunk from nextgen <code>local-server/</code> → <code>server/</code>, renamed <code>shizzle_server</code>; delete stale docs, dead env files, orphan configs listed in the spec's "not carried" table</li>
-        <li><code class="status">[x]</code> Copy <code>archive/runpod/</code> → <code>worker/</code>; <code>s3_multipart.py</code> + <code>circuit_breaker.py</code> (with their tests) → <code>server/src/shizzle_server/lib/</code></li>
-        <li><code class="status">[x]</code> Hand-port mute/solo + −60…+12 dB from k25's uncommitted <code>MixerDrawer.tsx</code>/<code>useStore.ts</code></li>
-        <li><code class="status">[x]</code> Write <code>docs/provenance.md</code>: one row per salvaged unit — source repo, commit or "uncommitted working tree 2026-08-02", path, intentional changes, tests carried</li>
-      </ul>
-
-      <h4>1.3 Contract and audio-graph corrections (spec §5)</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> Rename <code>default_gain</code> → <code>default_gain_db</code> in manifest writer, Pydantic models, TS types; apply via <code>dbToLinear()</code> at load (kills the latent 0-dB-is-silence bug)</li>
-        <li><code class="status">[x]</code> Extract <code>PlaybackEngine.ts</code> interface; move salvaged StemAudioManager + drift policy behind it as <code>mediaElementEngine.ts</code>; add <code>metrics.ts</code> instrumentation from spike 0.1</li>
-        <li><code class="status">[]</code> Add master gain bus + conservative limiter node + clip indicator; wire the (previously dead) volume slider through it; delete dead code (<code>syncToTime</code>, <code>buffering</code> flag) — knip must pass</li>
-      </ul>
-
-      <h4>1.4 Local golden-track run</h4>
-      <ul class="checklist">
-        <li><code class="status">[x]</code> <code>infra/compose.yml</code> local profile: the nextgen GPU container + Vite dev server (docker compose, 4070)</li>
-        <li><code class="status">[x]</code> Process the golden clip end-to-end locally; play it in the browser with mute/solo, master bus, and instrumentation overlay working</li>
-      </ul>
-
-      <h4>1.5 Testing Strategy</h4>
-      <p>Deterministic unit tests for pure logic (pytest + vitest); real ffmpeg integration on the bundled fixture; lint/type/dead-code gates enforced from the first commit.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>uv run --directory server ruff check . ; uv run --directory server mypy .</code> — Python quality baseline holds</li>
-        <li><code class="status">[x]</code> <code>uv run --directory server pytest -q</code> — salvaged lib tests (multipart, breaker) + new manifest/drift-math units pass</li>
-        <li><code class="status">[x]</code> <code>npm --prefix ui run check</code> — ESLint + tsc + knip all clean (dead code gone)</li>
-        <li><code class="status">[x]</code> <code>docker compose --profile local up</code> then process + play <code>fixtures/golden-30s.mp4</code> — local reference pipeline works on the 4070</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 2: Job Model + Durable Orchestrator</h3>
-      <p>Replace the in-memory dict with Postgres and a restart-safe orchestrator process. Pure control-plane work — testable entirely locally with fault injection, no cloud accounts needed.</p>
-
-      <h4>2.1 Schema and models</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Alembic migration: <code>jobs</code> (id, source, status, runpod_job_id, attempt, idempotency_key, lease_owner, lease_expires_at, next_retry_at, profile_version, input_checksum, output_checksums, error_code, timings), append-only <code>job_events</code>, <code>tracks</code> (id, title, duration, s3_prefix, generation, manifest_key, integrity results)</li>
-        <li><code class="status">[]</code> SQLAlchemy models + typed repository layer; structured error codes enum (<code>YTDLP_BLOCKED</code>, <code>DEMUCS_FAILED</code>, <code>S3_UPLOAD_FAILED</code>, …)</li>
-      </ul>
-
-      <h4>2.2 Orchestrator process</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>orchestrator/loop.py</code>: lease-claim loop (SELECT … FOR UPDATE SKIP LOCKED), stage execution, retry with backoff via <code>next_retry_at</code>, idempotent stage handlers, lease expiry recovery</li>
-        <li><code class="status">[]</code> Compose gets 4 services: <code>api</code>, <code>orchestrator</code>, <code>postgres</code>, <code>caddy</code>; orchestrator restarts resume cleanly</li>
-      </ul>
-
-      <h4>2.3 API on the database</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Rewrite endpoints on DB: submit URL/upload → job row; job status (+ SSE or poll); library from <code>tracks</code>; manual delete; job-history listing</li>
-        <li><code class="status">[]</code> Carry over upload safety verbatim (chunked cap, ffprobe gate, traversal guard) — provenance row updated</li>
-      </ul>
-
-      <h4>2.4 Testing Strategy</h4>
-      <p>Contract + fault-injection tests (Mike's rule: fault injection only where reality can't be provoked on demand — restarts and duplicates qualify). Real Postgres via compose, no mocked DB.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>uv run --directory server pytest tests/orchestrator -q</code> — kill-and-restart mid-stage resumes the job exactly once (idempotency); expired lease is reclaimed; duplicate completion event is a no-op; retry schedule honored</li>
-        <li><code class="status">[]</code> <code>docker compose up -d ; docker compose restart orchestrator</code> — in-flight fixture job completes after restart; <code>job_events</code> shows an unbroken history</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 3: RunPod Worker + S3 Staging/Publish Contract</h3>
-      <p>The cloud pipeline: modernized GPU worker owns all heavy media; VPS orchestrates, verifies, and publishes. Requires fresh AWS + RunPod credentials and the spike 0.2/0.3 results.</p>
-      <figure>
-        <img src="shizzle-cloud-karaoke-implementation/phase3.png" alt="Pipeline: URL to server to GPU to staging bucket to verification shield, manifest written last">
-        <figcaption>Ingest on the VPS, heavy media on the disposable GPU, manifest written last.</figcaption>
-      </figure>
-
-      <h4>3.1 Modernize the worker</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Update <code>worker/</code> from archive: htdemucs_6s + tuned flags from nextgen <code>processing.py</code>; gain policy + thresholds from spike 0.3 (float-preserving, one common gain, never per-stem normalization)</li>
-        <li><code class="status">[]</code> <code>integrity.py</code>: PCM reconstruction residual (pre-encode) + decoded-AAC residual (post-encode); sample count, offset, RMS, peak, profile version — recorded into the staging manifest</li>
-        <li><code class="status">[]</code> <code>encode.py</code>: AAC bitrate knob (default from spike 0.4); browser-safe H.264 video re-encode; optional <code>multi-track.mp4</code> behind the existing config flag</li>
-        <li><code class="status">[]</code> Staging uploads with checksums to <code>tracks/{track_id}/{generation}/staging/</code> via salvaged multipart uploader; new CUDA base image; local smoke run of the container on the 4070 before any RunPod deploy</li>
-      </ul>
-
-      <h4>3.2 RunPod integration</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Create/verify serverless endpoint pinned to <strong>1 worker / 1 concurrent job</strong> (defaults are higher); reuse surviving endpoint if the 0.2 audit found one</li>
-        <li><code class="status">[]</code> <code>runpod_client.py</code>: dispatch with idempotency key; webhook receiver (fast path) + polling reconciler (recovery path — RunPod retains results only ~30 min, retries webhooks only twice); circuit breaker wrapped</li>
-      </ul>
-
-      <h4>3.3 Ingest</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>ingest/ytdlp.py</code>: YouTube-domain-validated URLs only, browser-cookie auth, structured <code>YTDLP_BLOCKED</code> failure; direct upload path reuses Phase 2 endpoint</li>
-        <li><code class="status">[]</code> Empirically test yt-dlp from the VPS IP; record the working tier (cookies / home-helper needed / upload-only) in <code>spikes/RESULTS.md</code></li>
-      </ul>
-
-      <h4>3.4 Publisher</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>publish.py</code>: verify staged sizes/checksums against worker report; promote staging → <code>tracks/{track_id}/{generation}/</code>; write immutable manifest <em>last</em>; flip track ready in DB</li>
-        <li><code class="status">[]</code> S3 lifecycle rules as code: expire staging prefixes, failed attempts, <code>AbortIncompleteMultipartUpload</code></li>
-      </ul>
-
-      <h4>3.5 Testing Strategy</h4>
-      <p>Real-boundary smoke tests against actual AWS + RunPod (small fixture = cheap GPU seconds); fault injection for the webhook/reconciler seams.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>uv run --directory worker pytest -q</code> — integrity math units + handler contract tests pass</li>
-        <li><code class="status">[]</code> <code>uv run --directory server pytest tests/runpod_contract -q</code> — duplicate webhook, late webhook after reconciler, missing result (&gt;30 min) all converge to correct terminal state</li>
-        <li><code class="status">[]</code> End-to-end: submit a YouTube URL on the VPS → track published with both integrity residuals within spike-0.3 thresholds; verify manifest is the last object written</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 4: Same-Origin CloudFront + Auth</h3>
-      <p>One public hostname for everything; passcode auth with revocable tokens and signed-cookie media. Production deploy to the Hostinger KVM 2.</p>
-
-      <h4>4.1 Distribution as code</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>infra/cloudfront/</code>: behaviors <code>/assets/*</code> → UI bucket (OAC), <code>/media/*</code> → private media bucket (OAC + signed cookies), <code>/api/*</code> + <code>/ws/*</code> → VPS origin with WebSocket upgrade forwarding; growing from the spike-0.2 proof distro</li>
-        <li><code class="status">[]</code> UI build deployed to the assets bucket; player fetches manifest + media by same-origin relative paths (no VITE_ base URLs)</li>
-      </ul>
-
-      <h4>4.2 Auth</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>auth.py</code>: passcode (rate-limited) → hashed opaque device token with expiry + auth-version; every request checks version — rotating the passcode bumps the version and revokes all tokens</li>
-        <li><code class="status">[]</code> Token-gated signed-cookie issuance for <code>/media/*</code>; cookie refresh before expiry during long sessions</li>
-      </ul>
-
-      <h4>4.3 Production deploy</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Hostinger KVM 2 provisioned (Mike); compose production profile up (api, orchestrator, postgres, caddy); Caddy TLS at origin; CloudFront in front</li>
-      </ul>
-
-      <h4>4.4 Testing Strategy</h4>
-      <p>Real-network proof from outside the LAN — the whole point of the cloud build.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> From a remote network (phone hotspot): passcode login → full-song playback streams via CDN with Range requests; no CORS errors in console</li>
-        <li><code class="status">[]</code> Rotate passcode → previously-authed device is rejected on next request; media cookies stop being issued</li>
-        <li><code class="status">[]</code> <code>curl -I https://&lt;host&gt;/media/&lt;stem&gt;</code> without cookies — 403 (bucket never public)</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 5: Playback Hardening + Device Matrix</h3>
-      <p>The media-element engine proves itself (or triggers the contingency) on real hardware, over the real CDN.</p>
-      <figure>
-        <img src="shizzle-cloud-karaoke-implementation/phase5.png" alt="Projector, tablet, and laptop each showing a sync gauge inside the safe zone">
-        <figcaption>Sync is measured on every device class — never assumed.</figcaption>
-      </figure>
-
-      <h4>5.1 Engine instrumentation in production</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Metrics overlay (dev toggle): per-stem skew, buffer/stall states, correction + underrun counters; session summary exportable</li>
-        <li><code class="status">[]</code> Drift thresholds + stall bailout confirmed against CDN latency (not just LAN)</li>
-      </ul>
-
-      <h4>5.2 Device acceptance matrix</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Full-song runs: Chromium-over-HDMI (reference), iPad Safari, projector Tizen (opportunistic); record matrix in docs</li>
-        <li><code class="status">[]</code> Mix-bus verification: six stems at +12 dB — limiter engages, clip indicator lights, no audible breakup</li>
-      </ul>
-
-      <h4>5.3 Contingency (only if matrix fails thresholds)</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Implement aligned segment scheduler per <code>global-stem-playback-spec.md</code> (decode + schedule against <code>AudioContext.currentTime</code>) behind the same <code>PlaybackEngine</code> interface; re-run matrix</li>
-      </ul>
-
-      <h4>5.4 Testing Strategy</h4>
-      <p>Acceptance is empirical: full songs on real devices with recorded metrics.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>npm --prefix ui run test:e2e</code> — Playwright on bundled fixture: load, play to end, zero hard-seeks steady-state, master/mute/solo effective (asserted via engine metrics API)</li>
-        <li><code class="status">[]</code> Matrix doc updated: every device row has skew numbers and a pass/opportunistic/fail verdict — no blank rows</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 6: Remote Surface (QR pairing)</h3>
-      <p>The iPad becomes the mixing desk: revisioned WebSocket protocol, session-scoped QR credentials, controls-only page.</p>
-      <figure>
-        <img src="shizzle-cloud-karaoke-implementation/phase6-chatgpt.png" alt="Big screen with music video and QR code; hand-held tablet showing six touch faders with per-stem avatars and solo buttons">
-        <figcaption>Scan the QR on the big screen; the faders appear in your hand. <em>(Image: Mike, ChatGPT — doubles as the RemotePage design reference: six labeled faders, per-stem color identity, solo buttons.)</em></figcaption>
-      </figure>
-
-      <h4>6.1 Session protocol</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>ws/sessions.py</code>: player registers → session + high-entropy short-lived code; envelope on every message (<code>version</code>, <code>clientId</code>, <code>commandId</code>) and server-assigned <code>revision</code> on state broadcasts; snapshots on join/reconnect</li>
-        <li><code class="status">[]</code> QR code exchanges for a WebSocket-only credential — no library/API access; codes expire, sessions die with the player</li>
-      </ul>
-
-      <h4>6.2 Remote page</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>RemotePage.tsx</code>: six touch faders (mute/solo, −60…+12 dB), master fader + clip indicator mirror, transport, library picker; fader messages coalesced to 20–30/s</li>
-        <li><code class="status">[]</code> Player applies intents to the engine and broadcasts authoritative state; on-screen mixer drawer and all remotes mirror live (mouse fallback retained)</li>
-      </ul>
-
-      <h4>6.3 Testing Strategy</h4>
-      <p>Deterministic protocol tests for ordering/reconnect; a real two-controller session as acceptance.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> <code>uv run --directory server pytest tests/ws -q</code> — out-of-order commandIds resolved by revision; reconnect gets a correct snapshot; expired code rejected; scope of QR credential enforced</li>
-        <li><code class="status">[]</code> <code>npm --prefix ui run test:e2e -- remote</code> — Playwright two-context test: remote fader move changes player gain; player state mirrors back</li>
-        <li><code class="status">[]</code> Party test on real hardware: projector plays, two phones/iPad mix simultaneously without fighting — logged in the matrix doc</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-
-    <div class="phase">
-      <h3><code class="status">[]</code> Phase 7: Operations + Polish</h3>
-      <p>Make it boring to own: backups, health, metrics, cost truth — then the conveniences.</p>
-
-      <h4>7.1 Operations</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Nightly Postgres dump to S3 (lifecycle-managed); restore drill documented and executed once</li>
-        <li><code class="status">[]</code> Health endpoints for api/orchestrator; uptime check; minimal metrics (jobs by status, GPU seconds, storage GB) on a status page</li>
-        <li><code class="status">[]</code> One-month cost check against the spec's $12–20 estimate; record actuals</li>
-      </ul>
-
-      <h4>7.2 Polish</h4>
-      <ul class="checklist">
-        <li><code class="status">[]</code> YouTube search via Data API key (title/thumbnail/duration → one-tap submit)</li>
-        <li><code class="status">[]</code> Job-history page with structured error codes; library management (rename, delete with confirmation)</li>
-        <li><code class="status">[]</code> README + runbook (deploy, rotate passcode, restore backup, add a device)</li>
-      </ul>
-
-      <h4>7.3 Testing Strategy</h4>
-      <p>Operational proof over unit tests here: drills and checks.</p>
-      <ul class="checklist">
-        <li><code class="status">[]</code> Restore drill: fresh Postgres from last backup → library intact, jobs history intact</li>
-        <li><code class="status">[]</code> <code>curl https://&lt;host&gt;/api/health</code> — api + orchestrator + DB all green</li>
-      </ul>
-      <div class="loop">
-        🔁 <strong>Do not exit this phase until every box above is checked.</strong>
-        If any command fails, fix the cause and re-run — loop until all pass.
-      </div>
-    </div>
-  </section>
-
-  <!-- ===== GLOBAL VALIDATION ===== -->
-  <section id="validation">
-    <h2>Validation Commands</h2>
-    <p>Execute these commands to validate the entire plan is complete:</p>
-    <ul class="checklist">
-      <li><code class="status">[]</code> <code>uv run --directory server ruff check . &amp;&amp; uv run --directory server mypy . &amp;&amp; uv run --directory server pytest -q</code> — server quality gates + full test suite</li>
-      <li><code class="status">[]</code> <code>uv run --directory worker pytest -q</code> — worker integrity + contract tests</li>
-      <li><code class="status">[]</code> <code>npm --prefix ui run check &amp;&amp; npm --prefix ui run test &amp;&amp; npm --prefix ui run test:e2e</code> — UI lint/type/dead-code + unit + e2e on bundled fixture</li>
-      <li><code class="status">[]</code> Live e2e: YouTube URL submitted from a remote network → published track with in-threshold integrity residuals → full-song CDN playback on the device matrix</li>
-      <li><code class="status">[]</code> Party test: projector + two touch controllers, full song, no fighting, no audible artifacts</li>
-      <li><code class="status">[]</code> <code>type spikes\RESULTS.md &amp;&amp; type docs\provenance.md</code> — every spike verdict recorded; every salvaged unit has a provenance row</li>
-    </ul>
-    <div class="loop">
-      🔁 <strong>The plan is not complete until every box is checked and every command passes. If for some reason a step is not possible to complete, mark it with [f] and move on if possible.</strong>
-    </div>
-  </section>
-
-  <!-- ===== NOTES ===== -->
-  <section id="notes">
-    <h2>Notes</h2>
-
-    <h3>Decisions already made (do not re-litigate)</h3>
-    <table>
-      <tr><th>Decision</th><th>Origin</th></tr>
-      <tr><td>All-cloud; AWS + VPS + RunPod kept; no n8n; database required</td><td>Mike, 2026-08-02</td></tr>
-      <tr><td>Personal tool — Mike + a few musician friends; shared passcode, no accounts</td><td>Mike, 2026-08-02</td></tr>
-      <tr><td>iPad/phone = controls-only page; big screen = video; latency on controls acceptable</td><td>Mike, 2026-08-02</td></tr>
-      <tr><td>"It's got to sound good" — quality gates + blinded bitrate choice are requirements, not polish</td><td>Mike, 2026-08-02</td></tr>
-      <tr><td>Hostinger KVM 2 (2 vCPU / 8 GB / 100 GB), US region</td><td>Mike, 2026-08-02 (agent sizing, Mike confirmed intent)</td></tr>
-      <tr><td>nextgen-rewrite = trunk; copy files, never merge 3.5 GB histories</td><td>Agent default from exploration, unchallenged</td></tr>
-      <tr><td>App domain: <code>shizzle.systems</code> (apex), registered via AWS Route 53 2026-08-02 (registration in progress; hosted zone already live in this account) — supersedes the earlier cbass.space choice. Phase 4: ACM cert + CloudFront alias records script directly against the zone</td><td>Mike, 2026-08-02 ("use this instead"). Route 53 delegation: agent working default</td></tr>
-      <tr><td><code>multi-track.mp4</code> kept (reviewer wanted deferral)</td><td>Agent, pending Mike's veto — it's his archival format</td></tr>
-    </table>
-
-    <h3>Rejected approaches</h3>
-    <ul>
-      <li><strong>Resurrect n8n/Supabase-queue distributed pipeline</strong> — five services to babysit for a hobby tool; Mike explicitly walked away from it.</li>
-      <li><strong>24/7 GPU box</strong> — pays GPU rates for idle; RunPod serverless splits a few songs a week for ~$1–2/mo.</li>
-      <li><strong>Server-side live mixing</strong> — fader round-trips through a render server would feel laggy; mixing stays client-side where it's cheap.</li>
-      <li><strong>Thin RunPod wrapper around VPS-side ffmpeg</strong> — review item 3 killed it: double transfers, 2-vCPU box as media worker, and the archive already contains a proven full worker.</li>
-    </ul>
-
-    <h3>Dependencies to add</h3>
-    <ul>
-      <li><code>server/</code>: <code>uv add sqlalchemy alembic asyncpg yt-dlp boto3 itsdangerous</code> (signed values), <code>uv add --dev pytest-asyncio</code></li>
-      <li><code>worker/</code>: pinned in Dockerfile — torch cu121, demucs, soundfile, numpy&lt;2, boto3, runpod SDK</li>
-      <li><code>ui/</code>: <code>qrcode</code> (or a ~1 kB QR component); no other additions — keep the hand-rolled primitives</li>
-    </ul>
-
-    <h3>Credentials checklist (blocking marked phases)</h3>
-    <table>
-      <tr><th>Credential</th><th>Needed by</th><th>Status</th></tr>
-      <tr><td>Fresh AWS keys (S3, CloudFront, IAM-for-OAC)</td><td>Phase 0.2</td><td>❌ current CLI creds dead (verified 2026-08-02)</td></tr>
-      <tr><td>RunPod API key + dashboard audit</td><td>Phase 3</td><td>❓ possible surviving endpoint</td></tr>
-      <tr><td>Hostinger KVM 2 SSH</td><td>Phase 4</td><td>⏳ Mike spinning up</td></tr>
-      <tr><td>YouTube browser cookies export</td><td>Phase 3.3</td><td>⏳</td></tr>
-      <tr><td>YouTube Data API key (search only — cannot download)</td><td>Phase 7.2</td><td>✅ Mike has one</td></tr>
-    </table>
-
-    <h3>Known risk ladder for YouTube ingest</h3>
-    <p>Tier 1: yt-dlp + cookies from the VPS (test empirically in 3.3). Tier 2: tiny home-helper on the PC that downloads and hands the file to the VPS. Tier 3: manual upload — works from day one because the upload path ships in Phase 2. The pipeline is source-agnostic past "video in staging," so tiers can change without touching anything downstream.</p>
-
-    <h3>Old-infrastructure audit (first cloud action)</h3>
-    <p>The archived worker names bucket <code>karaoke-pimpshizzle</code>. Before creating any new resources: inventory that bucket (possible pre-split library to inherit) and the RunPod dashboard (possible reusable endpoint + container config). Record findings in <code>spikes/RESULTS.md</code>; reuse where sane.</p>
-
-    <figure>
-      <img src="shizzle-cloud-karaoke-implementation/notes.png" alt="Three-rung descending ladder: cloud with cookies, home helper, manual upload">
-      <figcaption>Ingest degrades gracefully: cookies → home helper → manual upload.</figcaption>
-    </figure>
-
-    <h3>Branding</h3>
-    <p>App icon candidate (Mike, ChatGPT) — target favicon / iPad home-screen icon when the UI ships. Alternate API renders for the hero and phase-6 slots are kept in the images folder (<code>hero.png</code>, <code>phase6.png</code>).</p>
-    <figure>
-      <img src="shizzle-cloud-karaoke-implementation/app-icon.png" alt="App icon: dark rounded square with six amber fader caps and a teal glow" style="max-width: 320px;">
-      <figcaption>Six faders say "mixer" at any size — favicon and home-screen candidate.</figcaption>
-    </figure>
-  </section>
-
-  <!-- ===== AMENDMENTS ===== -->
-  <section id="amendments">
-    <h2>Amendments</h2>
-    <!-- Populated by the Update Plan / Update References workflows after first execution. None yet. -->
-  </section>
-
+  <p><a href="../README.md">README</a> · <a href="../docs/HANDOFF.md">Current handoff</a> · <a href="../goals/cloud-continuous-playback/encoding-profile.md">Finished delivery profile</a> · <a href="../docs/playback-troubleshooting.md">Playback troubleshooting</a></p>
 </main>
 </body>
 </html>

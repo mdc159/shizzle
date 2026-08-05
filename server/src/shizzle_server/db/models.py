@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     Enum,
     Float,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -157,6 +159,77 @@ class Track(Base):
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TrackGenerationEvent(Base):
+    """Append-only activation and rollback ledger for immutable media generations."""
+
+    __tablename__ = "track_generation_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    to_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+
+
+class PlaybackSession(Base):
+    """One browser/track/generation observation window."""
+
+    __tablename__ = "playback_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    app_build: Mapped[str] = mapped_column(String(128), nullable=False, default="unknown")
+    browser: Mapped[str] = mapped_column(String(256), nullable=False, default="unknown")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="started")
+    last_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PlaybackEvent(Base):
+    """Append-only, idempotent first-party playback incident/evidence event."""
+
+    __tablename__ = "playback_events"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_playback_events_session_sequence"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("playback_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    client_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
 
 
 class OrchestratorHeartbeat(Base):

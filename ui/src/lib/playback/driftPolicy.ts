@@ -6,14 +6,17 @@
  * seek, zero steady-state corrections). Do not "improve" the constants or the
  * tiers without re-running the skew probe.
  *
- * Tiers (drift = average stem clock - video clock):
- *   |drift| <  50 ms  -> ignore, playbackRate 1
- *   |drift| < 250 ms  -> playbackRate nudge, at most +/-0.5 %
- *   |drift| >= 250 ms -> single hard seek, then back to soft mode
+ * Tiers (drift = one stem clock - video clock):
+ *   |drift| < 30 ms -> ignore, playbackRate 1
+ *   |drift| < 40 ms -> playbackRate nudge, at most +/-0.5 %
+ *   |drift| >= 40 ms -> single hard seek, then back to soft mode
+ *
+ * A 50-100 ms nudge tier was too slow for the production contract: a measured
+ * -77 ms Pot stem remained outside the <=50 ms settled gate after 3 seconds.
  */
 
-export const SOFT_DRIFT_SEC = 0.05;
-export const HARD_DRIFT_SEC = 0.25;
+export const SOFT_DRIFT_SEC = 0.03;
+export const HARD_DRIFT_SEC = 0.04;
 export const NUDGE_MAX = 0.005;
 export const NUDGE_FACTOR = 0.03;
 export const STALL_TICKS_THRESHOLD = 3;

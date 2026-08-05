@@ -3,6 +3,9 @@
 Date: 2026-08-02 (evening PDT). Claim under test: *"cert + DNS + production
 CloudFront is scriptable against zone Z07938355FL89IEW1HFO."*
 
+> Troubleshooting record for DNS, certificate, and CDN configuration. Use
+> `../docs/HANDOFF.md` for current production status.
+
 Verdict: **mostly proven in one run.** Distribution + DNS legs are scripted
 and executed; the cert leg is written but blocked by an IAM gap (the `agent`
 key cannot call `acm:RequestCertificate`), and DNS-validated issuance would

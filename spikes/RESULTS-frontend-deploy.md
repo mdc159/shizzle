@@ -1,4 +1,8 @@
-# RESULTS — Phase 4 frontend deploy (iPad-ready Shizzle on shizzle.systems)
+# Frontend deployment troubleshooting record
+
+> Troubleshooting deployment receipt. Viewport/device language records the test
+> that was run at the time; use it only when investigating a matching deployment
+> or layout issue. Current state is in `../docs/HANDOFF.md`.
 
 Date: 2026-08-02 (VPS timestamps 2026-08-03 UTC). Builder pass.
 

@@ -1,0 +1,786 @@
+{
+  "schema": "shizzle-library-audit-v1",
+  "generated_at": "2026-08-05T07:57:18.766986+00:00",
+  "snapshot_generated_at": "2026-08-05T07:57:08.929571+00:00",
+  "profile": "shizzle-browser-v1",
+  "full_decode": true,
+  "track_count": 1,
+  "passed_count": 1,
+  "failed_count": 0,
+  "tracks": [
+    {
+      "id": "4bd3d013-4dc2-5438-9926-962bd99029c4",
+      "title": "Van Halen - You Really Got Me (Official Music Video)",
+      "generation": 2,
+      "delivery_profile": "shizzle-browser-v1",
+      "total_average_bitrate_bps": 1959113,
+      "objects": [
+        {
+          "artifact": "video.mp4",
+          "bytes": 31529427,
+          "sha256": "e44e95b4e8bace943d5f917306be0857026379195c33b24a6b408df5c90bf410",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "h264",
+                "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+                "profile": "High",
+                "codec_type": "video",
+                "codec_tag_string": "avc1",
+                "codec_tag": "0x31637661",
+                "width": 1280,
+                "height": 720,
+                "coded_width": 1280,
+                "coded_height": 720,
+                "closed_captions": 0,
+                "film_grain": 0,
+                "has_b_frames": 2,
+                "sample_aspect_ratio": "1:1",
+                "display_aspect_ratio": "16:9",
+                "pix_fmt": "yuv420p",
+                "level": 31,
+                "color_range": "tv",
+                "color_space": "bt709",
+                "color_transfer": "bt709",
+                "color_primaries": "bt709",
+                "chroma_location": "left",
+                "field_order": "progressive",
+                "refs": 1,
+                "is_avc": "true",
+                "nal_length_size": "4",
+                "id": "0x1",
+                "r_frame_rate": "30000/1001",
+                "avg_frame_rate": "30000/1001",
+                "time_base": "1/30000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 6168162,
+                "duration": "205.605400",
+                "bit_rate": "1224035",
+                "bits_per_raw_sample": "8",
+                "nb_frames": "6162",
+                "extradata_size": 46,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "VideoHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/video.mp4",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.605400",
+              "size": "31529427",
+              "bit_rate": "1226793",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "isom",
+                "minor_version": "512",
+                "compatible_brands": "isomiso2avc1mp41",
+                "title": "Van Halen - You Really Got Me (Official Music Video)",
+                "date": "2015:03:12 09:50:47",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 32,
+          "mdat_offset": 70873,
+          "fast_start": true,
+          "keyframe_count": 138,
+          "max_keyframe_interval_seconds": 1.601600000000019,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/video.mp4",
+          "content_type": "video/mp4"
+        },
+        {
+          "artifact": "stems/vocals.m4a",
+          "bytes": 3170473,
+          "sha256": "12bfdf5a468151f3eca7ce99e07597a1b292ef19ad724b5ec6ec1e67eaff4a1d",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "121810",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__vocals.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "3170473",
+              "bit_rate": "123343",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39395,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 121810 b/s is below 192000 b/s",
+              "artifact": "stems/vocals.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/vocals.m4a",
+          "content_type": "audio/mp4"
+        },
+        {
+          "artifact": "stems/drums.m4a",
+          "bytes": 4115248,
+          "sha256": "7f4c2ab14c96a31371ccf678985d58f86ca13d6a1316cb10e710c62437ca6af8",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "158564",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__drums.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "4115248",
+              "bit_rate": "160098",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39411,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 158564 b/s is below 192000 b/s",
+              "artifact": "stems/drums.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/drums.m4a",
+          "content_type": "audio/mp4"
+        },
+        {
+          "artifact": "stems/bass.m4a",
+          "bytes": 3761835,
+          "sha256": "2c3d50a324e8384eef18a1581629ebb3b31331ada16e3fc5a902a93c778771ab",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "144815",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__bass.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "3761835",
+              "bit_rate": "146349",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39411,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 144815 b/s is below 192000 b/s",
+              "artifact": "stems/bass.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/bass.m4a",
+          "content_type": "audio/mp4"
+        },
+        {
+          "artifact": "stems/guitar.m4a",
+          "bytes": 4761391,
+          "sha256": "c8f9a2f759da19138512c57c1959331abce3a19411efd84280007d0de7de6b98",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "183701",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__guitar.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "4761391",
+              "bit_rate": "185235",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39427,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 183701 b/s is below 192000 b/s",
+              "artifact": "stems/guitar.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/guitar.m4a",
+          "content_type": "audio/mp4"
+        },
+        {
+          "artifact": "stems/piano.m4a",
+          "bytes": 2226034,
+          "sha256": "713be726c8e453355119e9a29d6f86c7710a8b9d487daacdc3632cee87928948",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "85068",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__piano.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "2226034",
+              "bit_rate": "86600",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39395,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 85068 b/s is below 192000 b/s",
+              "artifact": "stems/piano.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/piano.m4a",
+          "content_type": "audio/mp4"
+        },
+        {
+          "artifact": "stems/shizzle.m4a",
+          "bytes": 1096378,
+          "sha256": "c48fe313543f2cf0d4b58056a5928a74355454ec4e603bea42218bdf01eaead8",
+          "probe": {
+            "streams": [
+              {
+                "index": 0,
+                "codec_name": "aac",
+                "codec_long_name": "AAC (Advanced Audio Coding)",
+                "profile": "LC",
+                "codec_type": "audio",
+                "codec_tag_string": "mp4a",
+                "codec_tag": "0x6134706d",
+                "sample_fmt": "fltp",
+                "sample_rate": "48000",
+                "channels": 2,
+                "channel_layout": "stereo",
+                "bits_per_sample": 0,
+                "initial_padding": 0,
+                "id": "0x1",
+                "r_frame_rate": "0/0",
+                "avg_frame_rate": "0/0",
+                "time_base": "1/48000",
+                "start_pts": 0,
+                "start_time": "0.000000",
+                "duration_ts": 9870526,
+                "duration": "205.635958",
+                "bit_rate": "41120",
+                "nb_frames": "9641",
+                "extradata_size": 5,
+                "disposition": {
+                  "default": 1,
+                  "dub": 0,
+                  "original": 0,
+                  "comment": 0,
+                  "lyrics": 0,
+                  "karaoke": 0,
+                  "forced": 0,
+                  "hearing_impaired": 0,
+                  "visual_impaired": 0,
+                  "clean_effects": 0,
+                  "attached_pic": 0,
+                  "timed_thumbnails": 0,
+                  "non_diegetic": 0,
+                  "captions": 0,
+                  "descriptions": 0,
+                  "metadata": 0,
+                  "dependent": 0,
+                  "still_image": 0,
+                  "multilayer": 0
+                },
+                "tags": {
+                  "language": "und",
+                  "handler_name": "SoundHandler",
+                  "vendor_id": "[0][0][0][0]"
+                }
+              }
+            ],
+            "format": {
+              "filename": "/tmp/shizzle-audit-fsx816wp/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems__shizzle.m4a",
+              "nb_streams": 1,
+              "nb_programs": 0,
+              "nb_stream_groups": 0,
+              "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+              "format_long_name": "QuickTime / MOV",
+              "start_time": "0.000000",
+              "duration": "205.635958",
+              "size": "1096378",
+              "bit_rate": "42653",
+              "probe_score": 100,
+              "tags": {
+                "major_brand": "M4A ",
+                "minor_version": "512",
+                "compatible_brands": "M4A isomiso2",
+                "encoder": "Lavf58.76.100"
+              }
+            }
+          },
+          "atoms": [
+            "ftyp",
+            "moov",
+            "free",
+            "mdat"
+          ],
+          "moov_offset": 28,
+          "mdat_offset": 39379,
+          "fast_start": true,
+          "full_decode": "pass",
+          "decode_detail": null,
+          "issues": [
+            {
+              "code": "audio-bitrate-low",
+              "message": "average bitrate 41120 b/s is below 192000 b/s",
+              "artifact": "stems/shizzle.m4a",
+              "severity": "warning"
+            }
+          ],
+          "passed": true,
+          "key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/stems/shizzle.m4a",
+          "content_type": "audio/mp4"
+        }
+      ],
+      "issues": [
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 121810 b/s is below 192000 b/s",
+          "artifact": "stems/vocals.m4a",
+          "severity": "warning"
+        },
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 158564 b/s is below 192000 b/s",
+          "artifact": "stems/drums.m4a",
+          "severity": "warning"
+        },
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 144815 b/s is below 192000 b/s",
+          "artifact": "stems/bass.m4a",
+          "severity": "warning"
+        },
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 183701 b/s is below 192000 b/s",
+          "artifact": "stems/guitar.m4a",
+          "severity": "warning"
+        },
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 85068 b/s is below 192000 b/s",
+          "artifact": "stems/piano.m4a",
+          "severity": "warning"
+        },
+        {
+          "code": "audio-bitrate-low",
+          "message": "average bitrate 41120 b/s is below 192000 b/s",
+          "artifact": "stems/shizzle.m4a",
+          "severity": "warning"
+        }
+      ],
+      "passed": true
+    }
+  ]
+}

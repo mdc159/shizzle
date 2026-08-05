@@ -1,0 +1,399 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T07:59:49.922284+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+      "title": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 4934155 exceeds 2500000",
+      "status": "published",
+      "video_command": [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        "/tmp/shizzle-migrate-c4072b04-008e-5f1b-985b-f12903a9cf24-lr1nm789/source-video.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "scale='min(1280,iw)':-2:force_original_aspect_ratio=decrease,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-maxrate",
+        "1200k",
+        "-bufsize",
+        "2400k",
+        "-profile:v",
+        "main",
+        "-level:v",
+        "3.1",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-movflags",
+        "+faststart",
+        "-video_track_timescale",
+        "90000",
+        "/tmp/shizzle-migrate-c4072b04-008e-5f1b-985b-f12903a9cf24-lr1nm789/video.mp4"
+      ],
+      "encoded_video_audit": {
+        "artifact": "video.mp4",
+        "bytes": 47124134,
+        "sha256": "c0267d89980dad7feeb1519b5d4713259bf5e074d756d0f6e167068f2b97988f",
+        "probe": {
+          "streams": [
+            {
+              "index": 0,
+              "codec_name": "h264",
+              "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+              "profile": "Main",
+              "codec_type": "video",
+              "codec_tag_string": "avc1",
+              "codec_tag": "0x31637661",
+              "width": 1280,
+              "height": 720,
+              "coded_width": 1280,
+              "coded_height": 720,
+              "closed_captions": 0,
+              "film_grain": 0,
+              "has_b_frames": 2,
+              "sample_aspect_ratio": "1:1",
+              "display_aspect_ratio": "16:9",
+              "pix_fmt": "yuv420p",
+              "level": 31,
+              "color_range": "tv",
+              "color_space": "bt709",
+              "color_transfer": "bt709",
+              "color_primaries": "bt709",
+              "chroma_location": "left",
+              "field_order": "progressive",
+              "refs": 1,
+              "is_avc": "true",
+              "nal_length_size": "4",
+              "id": "0x1",
+              "r_frame_rate": "30/1",
+              "avg_frame_rate": "140925/4697",
+              "time_base": "1/90000",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 28182000,
+              "duration": "313.133333",
+              "bit_rate": "1201084",
+              "bits_per_raw_sample": "8",
+              "nb_frames": "9395",
+              "extradata_size": 44,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler",
+                "vendor_id": "[0][0][0][0]",
+                "encoder": "Lavc61.19.101 libx264"
+              }
+            }
+          ],
+          "format": {
+            "filename": "/tmp/shizzle-migrate-c4072b04-008e-5f1b-985b-f12903a9cf24-lr1nm789/video.mp4",
+            "nb_streams": 1,
+            "nb_programs": 0,
+            "nb_stream_groups": 0,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+            "start_time": "0.000000",
+            "duration": "313.133333",
+            "size": "47124134",
+            "bit_rate": "1203937",
+            "probe_score": 100,
+            "tags": {
+              "major_brand": "isom",
+              "minor_version": "512",
+              "compatible_brands": "isomiso2avc1mp41",
+              "title": "AC/DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+              "date": "2021:08:23 07:16:26",
+              "encoder": "Lavf61.7.103"
+            }
+          }
+        },
+        "atoms": [
+          "ftyp",
+          "moov",
+          "free",
+          "mdat"
+        ],
+        "moov_offset": 32,
+        "mdat_offset": 111675,
+        "fast_start": true,
+        "keyframe_count": 157,
+        "max_keyframe_interval_seconds": 2.0,
+        "full_decode": "pass",
+        "decode_detail": null,
+        "issues": [],
+        "passed": true
+      },
+      "manifest": {
+        "version": 3,
+        "title": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+        "artist": "",
+        "duration": 313.16,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "25/1",
+          "duration": 313.16
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 4934155 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/video.mp4",
+              "source_sha256": "f5660bf0d125cc8daa5f26115b01d8886e847214b1b961079871ca84f9509399",
+              "sha256": "c0267d89980dad7feeb1519b5d4713259bf5e074d756d0f6e167068f2b97988f",
+              "bytes": 47124134
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/vocals.m4a",
+              "source_sha256": "7ad93a5c14ebc00bd868d4827e1ffe7030155c2aa6d91304f3a505f3f3282e8c",
+              "sha256": "7ad93a5c14ebc00bd868d4827e1ffe7030155c2aa6d91304f3a505f3f3282e8c",
+              "bytes": 7105090
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/drums.m4a",
+              "source_sha256": "e464e969979d500715d228ae966de2ddb14da667b5b16eab6ed9b2803882fbd2",
+              "sha256": "e464e969979d500715d228ae966de2ddb14da667b5b16eab6ed9b2803882fbd2",
+              "bytes": 7578408
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/bass.m4a",
+              "source_sha256": "654c16f98943dfd8ef880cecbc08e22f77628f64322681eef22d3ce801c9f2a3",
+              "sha256": "654c16f98943dfd8ef880cecbc08e22f77628f64322681eef22d3ce801c9f2a3",
+              "bytes": 7464080
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/guitar.m4a",
+              "source_sha256": "ebd094dc917a8fc1d2995d0489b2e8d6f33b748ebb1661afcab868d049eef2cc",
+              "sha256": "ebd094dc917a8fc1d2995d0489b2e8d6f33b748ebb1661afcab868d049eef2cc",
+              "bytes": 7569408
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/piano.m4a",
+              "source_sha256": "1eaeeb1bcf2b32e8cc0c5f3dd0de2301437d07e0b43860ffd97bd3381d5d8573",
+              "sha256": "1eaeeb1bcf2b32e8cc0c5f3dd0de2301437d07e0b43860ffd97bd3381d5d8573",
+              "bytes": 7550034
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/1/stems/other.m4a",
+              "source_sha256": "d9aa773698045fe523afd134b81adf086485d5468a249632a355ef31237ae455",
+              "sha256": "d9aa773698045fe523afd134b81adf086485d5468a249632a355ef31237ae455",
+              "bytes": 6905732
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/d2a352ead9db"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 313160,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "manifest_sha256": "231e92eb607844039a9176821e383d8af8c8181d3481aa4a807b593a545ec892",
+      "publication": {
+        "s3_prefix": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/2",
+        "manifest_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/2/manifest.json",
+        "bytes_copied": 91301854,
+        "verification": {
+          "source": "publisher",
+          "policy": "auto",
+          "object_count": 8,
+          "total_bytes": 91301854,
+          "sha256_verified": 8,
+          "sha256_unverified": 0,
+          "objects": [
+            {
+              "file": "video.mp4",
+              "size_bytes": 47124134,
+              "sha256": "c0267d89980dad7feeb1519b5d4713259bf5e074d756d0f6e167068f2b97988f",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "size_bytes": 7105090,
+              "sha256": "7ad93a5c14ebc00bd868d4827e1ffe7030155c2aa6d91304f3a505f3f3282e8c",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/drums.m4a",
+              "size_bytes": 7578408,
+              "sha256": "e464e969979d500715d228ae966de2ddb14da667b5b16eab6ed9b2803882fbd2",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/bass.m4a",
+              "size_bytes": 7464080,
+              "sha256": "654c16f98943dfd8ef880cecbc08e22f77628f64322681eef22d3ce801c9f2a3",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "size_bytes": 7569408,
+              "sha256": "ebd094dc917a8fc1d2995d0489b2e8d6f33b748ebb1661afcab868d049eef2cc",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/piano.m4a",
+              "size_bytes": 7550034,
+              "sha256": "1eaeeb1bcf2b32e8cc0c5f3dd0de2301437d07e0b43860ffd97bd3381d5d8573",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "size_bytes": 6905732,
+              "sha256": "d9aa773698045fe523afd134b81adf086485d5468a249632a355ef31237ae455",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "manifest.json",
+              "size_bytes": 4968,
+              "sha256": "231e92eb607844039a9176821e383d8af8c8181d3481aa4a807b593a545ec892",
+              "sha256_source": "s3-checksum",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

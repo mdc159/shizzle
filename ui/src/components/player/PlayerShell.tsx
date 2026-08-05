@@ -12,13 +12,15 @@ export const PlayerShell: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isBufferingVideo, setIsBufferingVideo] = useState(false);
+  const [bufferedVideoSrc, setBufferedVideoSrc] = useState<string | undefined>();
+  const [stagedVideoBytes, setStagedVideoBytes] = useState(0);
 
   const {
     currentTrack,
     manifest,
     setManifest,
     playing,
-    setPlaying,
     setControlsVisible,
     controlsVisible,
     currentTime,
@@ -28,7 +30,7 @@ export const PlayerShell: React.FC = () => {
   } = useStore();
 
   // Audio sync hook handles stem loading and synchronization
-  const { handleSeek } = useAudioSync({ videoRef });
+  const { isReady, handleSeek, handlePlay, handlePause } = useAudioSync({ videoRef });
 
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -66,7 +68,8 @@ export const PlayerShell: React.FC = () => {
     const fetchManifest = async () => {
       setIsLoading(true);
       try {
-        // Server resolves media refs (same-origin /cdn for cloud, relative for local).
+        // The authenticated server resolves cloud media refs to exact-object,
+        // expiring CloudFront URLs. Local manifests remain relative.
         const manifestData = await loadManifest(trackSlug);
         setManifest(manifestData);
         setDuration(manifestData.duration);
@@ -97,11 +100,71 @@ export const PlayerShell: React.FC = () => {
     }
   }, [currentTime, handleSeek]);
 
-  // Build video URL from manifest. Cloud manifests carry a same-origin /cdn
-  // path; local manifests carry a relative path joined with the track base.
+  const requestSeek = useCallback((time: number) => {
+    setCurrentTime(time);
+    handleSeek(time);
+  }, [handleSeek, setCurrentTime]);
+
+  // Build video URL from manifest. Cloud manifests carry a direct signed edge
+  // URL; local manifests carry a relative path joined with the track base.
   const videoSrc = currentTrack && manifest
     ? resolveMediaUrl(currentTrack.publicUrl || `/videos/${currentTrack.slug}`, manifest.video)
     : undefined;
+
+  // The video is the authoritative clock for seven independently decoded
+  // media streams. Natural library testing showed Chromium could deprioritize
+  // a 66 MB video Range for ~15 s even through direct CloudFront while all six
+  // audio streams remained healthy. Stage only the bounded, audio-less video
+  // as a revocable Blob before enabling Play; stems continue to stream. The
+  // current library's largest video is 80.3 MB. The ceiling prevents a future
+  // unbounded import from recreating the historic whole-file RAM failure.
+  useEffect(() => {
+    setBufferedVideoSrc(undefined);
+    setStagedVideoBytes(0);
+    if (!videoSrc || !isReady) {
+      setIsBufferingVideo(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    setIsBufferingVideo(true);
+
+    const bufferVideo = async () => {
+      try {
+        const response = await fetch(videoSrc, {
+          signal: controller.signal,
+          credentials: 'omit',
+        });
+        if (!response.ok) throw new Error(`Video download failed with HTTP ${response.status}`);
+        const declaredBytes = Number(response.headers.get('content-length') ?? 0);
+        const maxBytes = 128 * 1024 * 1024;
+        if (declaredBytes > maxBytes) {
+          throw new Error('Video exceeds the 128 MB browser-staging limit');
+        }
+        const blob = await response.blob();
+        if (blob.size > maxBytes) throw new Error('Video exceeds the 128 MB browser-staging limit');
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setStagedVideoBytes(blob.size);
+        setBufferedVideoSrc(objectUrl);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error('Failed to stage master video:', error);
+        toast.error(error instanceof Error ? error.message : 'Failed to stage master video');
+      } finally {
+        if (!controller.signal.aborted) setIsBufferingVideo(false);
+      }
+    };
+
+    void bufferVideo();
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [videoSrc, isReady]);
+
+  const mediaReady = isReady && Boolean(bufferedVideoSrc) && !isBufferingVideo;
 
   return (
     <div
@@ -113,38 +176,41 @@ export const PlayerShell: React.FC = () => {
       {/* Background Video Layer */}
       {currentTrack ? (
         <>
-          {isLoading ? (
+          <video
+            ref={videoRef}
+            className="w-full h-full object-contain"
+            src={bufferedVideoSrc}
+            data-staged-bytes={stagedVideoBytes}
+            preload="auto"
+            muted // Audio comes from stems, not video
+            onTimeUpdate={handleTimeUpdate}
+            onEnded={handlePause}
+            onError={() => {
+              handlePause();
+              toast.error('Video failed to decode. Re-process this track for browser-safe playback.');
+            }}
+            onStalled={() => {
+              // The engine's direct watchdog owns buffering recovery. Do not
+              // convert a transient decoder stall into a destructive pause.
+              console.warn('Video transport reported a stalled event');
+            }}
+            onLoadedMetadata={() => {
+              if (videoRef.current) {
+                setDuration(videoRef.current.duration);
+              }
+            }}
+            loop={false}
+            playsInline
+          />
+          {(isLoading || isBufferingVideo) && (
             <div className="absolute inset-0 flex items-center justify-center bg-zinc-950">
               <div className="text-center space-y-4">
                 <Loader2 className="h-12 w-12 animate-spin text-zinc-400 mx-auto" />
-                <p className="text-zinc-500">Loading stems...</p>
+                <p className="text-zinc-500">
+                  {isBufferingVideo ? 'Staging video for uninterrupted playback...' : 'Loading stems...'}
+                </p>
               </div>
             </div>
-          ) : (
-            <video
-              ref={videoRef}
-              className="w-full h-full object-contain"
-              src={videoSrc}
-              muted // Audio comes from stems, not video
-              onTimeUpdate={handleTimeUpdate}
-              onEnded={() => setPlaying(false)}
-              onError={() => {
-                setPlaying(false);
-                toast.error('Video failed to decode. Re-process this track for browser-safe playback.');
-              }}
-              onStalled={() => {
-                setPlaying(false);
-                toast.error('Video stalled. Press play to retry.');
-              }}
-              onLoadedMetadata={() => {
-                if (videoRef.current) {
-                  setDuration(videoRef.current.duration);
-                }
-              }}
-              loop={false}
-              playsInline
-              crossOrigin="anonymous"
-            />
           )}
         </>
       ) : (
@@ -162,7 +228,12 @@ export const PlayerShell: React.FC = () => {
         controlsVisible ? "bg-black/20" : "opacity-0"
       )} />
 
-      <TransportControls />
+      <TransportControls
+        ready={mediaReady}
+        onPlay={handlePlay}
+        onPause={handlePause}
+        onSeek={requestSeek}
+      />
     </div>
   );
 };

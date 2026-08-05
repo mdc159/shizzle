@@ -1,37 +1,40 @@
-# Phase 0 risk-spike results — index
+# Playback and infrastructure experiment index
 
-Date: 2026-08-02. Detail files: [RESULTS-0.1.md](RESULTS-0.1.md), [RESULTS-0.2.md](RESULTS-0.2.md), [RESULTS-0.3-0.4.md](RESULTS-0.3-0.4.md).
+These experiments are retained for troubleshooting. They are not unfinished
+requirements and should not be rerun as a default library campaign.
 
-| Spike | Verdict | Headline numbers |
+Current project status and next work are in `../README.md` and
+`../docs/HANDOFF.md`. For symptom-driven use, start with
+`../docs/playback-troubleshooting.md`.
+
+| Experiment | What it established | Where to use it |
 |---|---|---|
-| 0.1 Stem-skew probe | **PASS (desktop)** · iPad + projector PENDING HUMAN RUN | Max inter-stem skew 3 ms corrected / 6 ms raw vs 50 ms bar; 14 ms max mix→video drift; one startup hard-seek, zero steady-state corrections. Media-element engine sufficient on desktop; segment-scheduler contingency not triggered. |
-| 0.2 Signed-cookie media | **PASS 5/5** | 403 unauthenticated · 200 signed · 206 on both Range probes · 403 expired. OAC + signed cookies compose cleanly; Range needs zero extra config. |
-| 0.3 Demucs gain/null | **PASS — policy decided** | `rescale` shifted drums −1.24 dB (poisons balance + null test). Policy: float32 stems + one common gain (this track −1.37 dB), manifest-recorded. Float null depth 22.6 dB = model ceiling. Gate thresholds proposed (profile v1): (a) ≥15 dB null, peak ≤ −6 dBFS; (b) ≥12 dB null, peak ≤ 0 dBFS. |
-| 0.4 AAC bitrate | Built · **PENDING MIKE'S BLIND LISTEN** | 256k vs 320k objectively 0.13 dB apart (~19 dB null both); ALAC −129 dBFS sanity pass. **Finding: decoded AAC overshoots ~+1 dBFS at unity — master limiter/headroom is a hard requirement.** Blind set: `aac-abx/out/` + `LISTEN.md`. |
+| Six-stem skew probe | Independent media elements can stay within the measured synchronization limit when coordinated by the playback engine. | Investigating drift, doubled audio, or a seek that settles out of sync. |
+| Signed media and Range | Private S3, CloudFront authorization, CORS, and HTTP 206 compose correctly. | Investigating 403 responses, missing media, or seek failures. |
+| Demucs gain/reconstruction | Per-stem rescaling changes relative balance; float lossless stems plus one common gain preserve it. | Investigating gain shifts, poor reconstruction, clipping, or separation output. |
+| AAC comparison | AAC-LC is the browser delivery derivative; decoded overshoot requires master protection. | Investigating audible encoding artifacts or limiter behavior. |
+| Frontend deployment | The public HTTPS application, API, authentication, library, media, and mixer worked outside-in. | Investigating deployment, routing, or authentication regressions. |
+| VPS and domain checks | Caddy, DNS, TLS, compose, and service health were established. | Investigating application reachability or service health. |
+| RunPod endpoint checks | The worker pipeline completed on a GPU, while the cloud endpoint exposed worker-startup failures. | Investigating fresh separation or RunPod failures. |
 
-## Legacy infrastructure inventory (0.2 audit)
+## Detailed records
 
-- **Bucket `karaoke-pimpshizzle`** — `karaoke/pub/` holds **36 complete published tracks** (7.45 GB): v3 manifests, 6 AAC stems each, video.mp4, multi-track.mp4. Directly inheritable as the new app's seed library (Phase 3 import task). `in/`+`out/`: one unpublished job (636 MB).
-- **Distribution `E1TTUZICNONOHR`** (`dfpxpuycadacf.cloudfront.net`) — fronts the legacy bucket via OAC, **no trusted key groups = entire library publicly downloadable** by anyone with the domain. ⚠️ Recommend disabling once the new gated distribution serves the library (Mike's call; excluded from spike teardown).
-- **RunPod endpoint `karaoke-demucs-v2`** (`3ugymq664vud7y`) — alive, reusable; workersMax=3 must be pinned to 1 in Phase 3.
+- [`RESULTS-0.1.md`](RESULTS-0.1.md) — decoder-clock and skew experiment.
+- [`RESULTS-0.2.md`](RESULTS-0.2.md) — private signed media and Range.
+- [`RESULTS-0.3-0.4.md`](RESULTS-0.3-0.4.md) — separation gain,
+  reconstruction, and AAC derivatives.
+- [`RESULTS-frontend-deploy.md`](RESULTS-frontend-deploy.md) — early outside-in
+  deployment checks.
+- [`RESULTS-domain-cdn.md`](RESULTS-domain-cdn.md) — domain and CDN setup.
+- [`RESULTS-vps.md`](RESULTS-vps.md) — VPS service setup and health.
+- [`RESULTS-runpod-endpoint.md`](RESULTS-runpod-endpoint.md) — GPU worker and
+  endpoint diagnosis.
+- [`RESULTS-legacy-import.md`](RESULTS-legacy-import.md) — one-time seed-library
+  import and publisher behavior.
 
-## Human runs outstanding
+## Current boundary
 
-1. **iPad Safari + Samsung projector skew runs** — `skew-probe/README.md` has the LAN steps; fills the two pending rows in RESULTS-0.1.md.
-2. **Blind codec listen** — `aac-abx/LISTEN.md`; decides the AAC bitrate default.
-
-## YouTube ingest checkout (2026-08-02, verified live)
-
-| Tier | Result |
-|---|---|
-| VPS bare (72.60.173.171, yt-dlp 2026.07.04) | FAIL: "Sign in to confirm you are not a bot" (datacenter IP). Also: install deno on VPS for full extraction support. |
-| This PC bare (residential IP) | PASS: test clip downloaded, no cookies. |
-| VPS + cookies | Untested; optional upgrade. Chrome app-bound cookie encryption on Windows may complicate export. |
-
-Verdict: ingest NOT blocked - home-helper tier proven (local fetch + existing upload path). Cookies tier deferred as optimization.
-
-### YouTube ingest � cloud-only escalation (tested to exhaustion, 2026-08-02)
-
-VPS retest with deno 2.9.4 + bgutil PO-token provider (container, engaged per verbose log) + tv/mweb client variants: STILL bot-checked. Conclusion: Hostinger IP range is hard-blocked by YouTube regardless of tokens.
-
-Remaining options for PC-off URL ingest: (1) residential proxy for yt-dlp only, ~$1-5/mo, reliable - AWAITING MIKE GO (purchase); (2) cookies on VPS - free but likely still challenged on blocked IP + account-flag risk; (3) home helper - works, PC-on dependency, interim only. Upload path is unaffected and fully cloud today. VPS keeps: deno, /opt/ytdlp venv, bgutil-pot container (restart unless-stopped).
+The 27-track playback library and `shizzle-browser-v1` delivery path are
+finished. The active work is URL/upload acquisition and dependable cloud GPU
+separation into six clean lossless stems. Experiments in this directory are
+consulted only when diagnosing a matching issue.

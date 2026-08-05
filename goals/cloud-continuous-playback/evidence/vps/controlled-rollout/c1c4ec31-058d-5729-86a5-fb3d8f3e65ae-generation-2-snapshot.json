@@ -1,0 +1,282 @@
+{
+  "schema": "shizzle-library-snapshot-v1",
+  "generated_at": "2026-08-05T08:31:12.099664+00:00",
+  "profile": "shizzle-browser-v1",
+  "bucket": "karaoke-pimpshizzle",
+  "track_count": 1,
+  "media_object_count": 7,
+  "total_duration_seconds": 228.02,
+  "tracks": [
+    {
+      "id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+      "title": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction",
+      "artist": "",
+      "duration": 228.02,
+      "generation": 2,
+      "s3_prefix": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2",
+      "manifest_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/manifest.json",
+      "integrity": {
+        "gates": "not-run",
+        "source": "legacy-import",
+        "legacy_folder": "27733775ad31"
+      },
+      "manifest_sha256": "0fdc5f123034773b94660a9f36b4e3617a54de846dea2116a6f886d107f2e7ce",
+      "manifest": {
+        "version": 3,
+        "title": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction",
+        "artist": "",
+        "duration": 228.02,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "24000/1001",
+          "duration": 228.02
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 5668248 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/video.mp4",
+              "source_sha256": "04686bc499e9455b273c42c6709710680012aaa4803df861092be98fc383fb15",
+              "sha256": "1c0c6dc2c2af15c6118bb18f78ec8fea8823fc52f8bedcca7d5574742d739110",
+              "bytes": 34392938
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/vocals.m4a",
+              "source_sha256": "946711cf03259b228e9053e28c04ab7d1915d2f6505d1d4ea9250564415d2607",
+              "sha256": "946711cf03259b228e9053e28c04ab7d1915d2f6505d1d4ea9250564415d2607",
+              "bytes": 4545228
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/drums.m4a",
+              "source_sha256": "a4ddd84efde15026388f9766d0c11ad7da295d099cf516757915799655082b71",
+              "sha256": "a4ddd84efde15026388f9766d0c11ad7da295d099cf516757915799655082b71",
+              "bytes": 5347034
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/bass.m4a",
+              "source_sha256": "00f150948db9d629d9b0b87e07a92a6b5e74329fe08c71490577c98535b85194",
+              "sha256": "00f150948db9d629d9b0b87e07a92a6b5e74329fe08c71490577c98535b85194",
+              "bytes": 4389278
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/guitar.m4a",
+              "source_sha256": "398bf881af33c81fd27385b6eaa662dce066a0abc675cd308132e74033dac835",
+              "sha256": "398bf881af33c81fd27385b6eaa662dce066a0abc675cd308132e74033dac835",
+              "bytes": 5376763
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/piano.m4a",
+              "source_sha256": "e96fad134858c1121cf2dcdb37fc4c4906d74f7244a8c2a45d311d9904f595dd",
+              "sha256": "e96fad134858c1121cf2dcdb37fc4c4906d74f7244a8c2a45d311d9904f595dd",
+              "bytes": 3459355
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/1/stems/other.m4a",
+              "source_sha256": "6c2dcef5f0272af82451492deffa050c2c6681c2eb0e26252f335ca231fdbc8b",
+              "sha256": "6c2dcef5f0272af82451492deffa050c2c6681c2eb0e26252f335ca231fdbc8b",
+              "bytes": 1613100
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/27733775ad31"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 228020,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "objects": [
+        {
+          "kind": "video",
+          "role": "video",
+          "file": "video.mp4",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/video.mp4",
+          "head": {
+            "bytes": 34392938,
+            "content_type": "video/mp4",
+            "etag": "3cab3a333b5e02c8bba9b789147f7e4f",
+            "checksum_sha256": "1c0c6dc2c2af15c6118bb18f78ec8fea8823fc52f8bedcca7d5574742d739110",
+            "last_modified": "2026-08-05T08:31:11+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "vocals",
+          "source_role": "vocals",
+          "file": "stems/vocals.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/vocals.m4a",
+          "head": {
+            "bytes": 4545228,
+            "content_type": "audio/mp4",
+            "etag": "b3cb951952daef327f049cef6b9d7836",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:11+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "drums",
+          "source_role": "drums",
+          "file": "stems/drums.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/drums.m4a",
+          "head": {
+            "bytes": 5347034,
+            "content_type": "audio/mp4",
+            "etag": "d9da37b5e4c9b37e959e4ae0f1710341",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:10+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "bass",
+          "source_role": "bass",
+          "file": "stems/bass.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/bass.m4a",
+          "head": {
+            "bytes": 4389278,
+            "content_type": "audio/mp4",
+            "etag": "0ffa4c526ef7fb43dbabc1e0544428e0",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:10+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "guitar",
+          "source_role": "guitar",
+          "file": "stems/guitar.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/guitar.m4a",
+          "head": {
+            "bytes": 5376763,
+            "content_type": "audio/mp4",
+            "etag": "5eb8fecef939eef5f3f1603332898d72",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:10+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "piano",
+          "source_role": "piano",
+          "file": "stems/piano.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/piano.m4a",
+          "head": {
+            "bytes": 3459355,
+            "content_type": "audio/mp4",
+            "etag": "bb56bd1b258b895a3fc3e22918718e47",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:10+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "shizzle",
+          "source_role": "shizzle",
+          "file": "stems/shizzle.m4a",
+          "key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/stems/shizzle.m4a",
+          "head": {
+            "bytes": 1613100,
+            "content_type": "audio/mp4",
+            "etag": "e9306b77957a9959bf4697d4dc5754c5",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T08:31:11+00:00"
+          }
+        }
+      ]
+    }
+  ]
+}

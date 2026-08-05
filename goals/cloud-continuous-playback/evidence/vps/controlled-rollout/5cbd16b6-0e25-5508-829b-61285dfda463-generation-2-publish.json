@@ -1,0 +1,399 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T07:54:03.138975+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+      "title": "Pearl Jam - Black - Acústico - Unplugged - HD",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3881961 exceeds 2500000",
+      "status": "published",
+      "video_command": [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        "/tmp/shizzle-migrate-5cbd16b6-0e25-5508-829b-61285dfda463-rwpj6s69/source-video.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "scale='min(1280,iw)':-2:force_original_aspect_ratio=decrease,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-maxrate",
+        "1200k",
+        "-bufsize",
+        "2400k",
+        "-profile:v",
+        "main",
+        "-level:v",
+        "3.1",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-movflags",
+        "+faststart",
+        "-video_track_timescale",
+        "90000",
+        "/tmp/shizzle-migrate-5cbd16b6-0e25-5508-829b-61285dfda463-rwpj6s69/video.mp4"
+      ],
+      "encoded_video_audit": {
+        "artifact": "video.mp4",
+        "bytes": 48902217,
+        "sha256": "950904db3aec9f85f5d54c70cdfe9e9b8a18ebe8fdae833721330760610548da",
+        "probe": {
+          "streams": [
+            {
+              "index": 0,
+              "codec_name": "h264",
+              "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+              "profile": "Main",
+              "codec_type": "video",
+              "codec_tag_string": "avc1",
+              "codec_tag": "0x31637661",
+              "width": 1280,
+              "height": 720,
+              "coded_width": 1280,
+              "coded_height": 720,
+              "closed_captions": 0,
+              "film_grain": 0,
+              "has_b_frames": 2,
+              "sample_aspect_ratio": "1:1",
+              "display_aspect_ratio": "16:9",
+              "pix_fmt": "yuv420p",
+              "level": 31,
+              "color_range": "tv",
+              "color_space": "bt709",
+              "color_transfer": "bt709",
+              "color_primaries": "bt709",
+              "chroma_location": "left",
+              "field_order": "progressive",
+              "refs": 1,
+              "is_avc": "true",
+              "nal_length_size": "4",
+              "id": "0x1",
+              "r_frame_rate": "30/1",
+              "avg_frame_rate": "19472/649",
+              "time_base": "1/90000",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 29205000,
+              "duration": "324.500000",
+              "bit_rate": "1202735",
+              "bits_per_raw_sample": "8",
+              "nb_frames": "9736",
+              "extradata_size": 44,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler",
+                "vendor_id": "[0][0][0][0]",
+                "encoder": "Lavc61.19.101 libx264"
+              }
+            }
+          ],
+          "format": {
+            "filename": "/tmp/shizzle-migrate-5cbd16b6-0e25-5508-829b-61285dfda463-rwpj6s69/video.mp4",
+            "nb_streams": 1,
+            "nb_programs": 0,
+            "nb_stream_groups": 0,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+            "start_time": "0.000000",
+            "duration": "324.500000",
+            "size": "48902217",
+            "bit_rate": "1205601",
+            "probe_score": 100,
+            "tags": {
+              "major_brand": "isom",
+              "minor_version": "512",
+              "compatible_brands": "isomiso2avc1mp41",
+              "title": "Pearl Jam - Black - Acústico - Unplugged - HD",
+              "date": "2011:07:30 13:54:20",
+              "encoder": "Lavf61.7.103"
+            }
+          }
+        },
+        "atoms": [
+          "ftyp",
+          "moov",
+          "free",
+          "mdat"
+        ],
+        "moov_offset": 32,
+        "mdat_offset": 116236,
+        "fast_start": true,
+        "keyframe_count": 163,
+        "max_keyframe_interval_seconds": 2.0,
+        "full_decode": "pass",
+        "decode_detail": null,
+        "issues": [],
+        "passed": true
+      },
+      "manifest": {
+        "version": 3,
+        "title": "Pearl Jam - Black - Acústico - Unplugged - HD",
+        "artist": "",
+        "duration": 324.525,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "30000/1001",
+          "duration": 324.525
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 3881961 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/video.mp4",
+              "source_sha256": "c8320215cb08a823228377bfb5b1ec2fdc0353c4d99f1ffd3357ee7563b332bc",
+              "sha256": "950904db3aec9f85f5d54c70cdfe9e9b8a18ebe8fdae833721330760610548da",
+              "bytes": 48902217
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/vocals.m4a",
+              "source_sha256": "9e661a8a4db72db751081dca5617789d4558507be0050a649a656fc49038daad",
+              "sha256": "9e661a8a4db72db751081dca5617789d4558507be0050a649a656fc49038daad",
+              "bytes": 7827520
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/drums.m4a",
+              "source_sha256": "9ce627ec17937608bed8cec474a2767e250edc130a64ec21c6b09a95c742eb15",
+              "sha256": "9ce627ec17937608bed8cec474a2767e250edc130a64ec21c6b09a95c742eb15",
+              "bytes": 7889593
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/bass.m4a",
+              "source_sha256": "fefb72e975619cbf02770f053e5e9cd0e15c1dd1a24bab08a0dc3bfcc645e37b",
+              "sha256": "fefb72e975619cbf02770f053e5e9cd0e15c1dd1a24bab08a0dc3bfcc645e37b",
+              "bytes": 7738679
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/guitar.m4a",
+              "source_sha256": "154ffdead6c072b5c27a394625ad1a20247ccdfc84e5d13cee69fd65a7af140f",
+              "sha256": "154ffdead6c072b5c27a394625ad1a20247ccdfc84e5d13cee69fd65a7af140f",
+              "bytes": 7864194
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/piano.m4a",
+              "source_sha256": "a585ea6680f8fb789cf86d0ef94d89340edef2a485d4766183c11aa191526bce",
+              "sha256": "a585ea6680f8fb789cf86d0ef94d89340edef2a485d4766183c11aa191526bce",
+              "bytes": 7814141
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/1/stems/other.m4a",
+              "source_sha256": "5c60a8150577ec92fa143eef2177d60b709d48b1dd507712ac17602d11718db5",
+              "sha256": "5c60a8150577ec92fa143eef2177d60b709d48b1dd507712ac17602d11718db5",
+              "bytes": 6735401
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/ec8188086a51"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 324525,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "manifest_sha256": "66367df608d6d3e0925c23ee46cbdce2771c9f8240cb8609b15bfdda438cde7b",
+      "publication": {
+        "s3_prefix": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/2",
+        "manifest_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/2/manifest.json",
+        "bytes_copied": 94776670,
+        "verification": {
+          "source": "publisher",
+          "policy": "auto",
+          "object_count": 8,
+          "total_bytes": 94776670,
+          "sha256_verified": 8,
+          "sha256_unverified": 0,
+          "objects": [
+            {
+              "file": "video.mp4",
+              "size_bytes": 48902217,
+              "sha256": "950904db3aec9f85f5d54c70cdfe9e9b8a18ebe8fdae833721330760610548da",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "size_bytes": 7827520,
+              "sha256": "9e661a8a4db72db751081dca5617789d4558507be0050a649a656fc49038daad",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/drums.m4a",
+              "size_bytes": 7889593,
+              "sha256": "9ce627ec17937608bed8cec474a2767e250edc130a64ec21c6b09a95c742eb15",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/bass.m4a",
+              "size_bytes": 7738679,
+              "sha256": "fefb72e975619cbf02770f053e5e9cd0e15c1dd1a24bab08a0dc3bfcc645e37b",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "size_bytes": 7864194,
+              "sha256": "154ffdead6c072b5c27a394625ad1a20247ccdfc84e5d13cee69fd65a7af140f",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/piano.m4a",
+              "size_bytes": 7814141,
+              "sha256": "a585ea6680f8fb789cf86d0ef94d89340edef2a485d4766183c11aa191526bce",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "size_bytes": 6735401,
+              "sha256": "5c60a8150577ec92fa143eef2177d60b709d48b1dd507712ac17602d11718db5",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "manifest.json",
+              "size_bytes": 4925,
+              "sha256": "66367df608d6d3e0925c23ee46cbdce2771c9f8240cb8609b15bfdda438cde7b",
+              "sha256_source": "s3-checksum",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

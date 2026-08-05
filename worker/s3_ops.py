@@ -1,14 +1,26 @@
 """
-S3 operations for Runpod Demucs handler.
+S3 operations for the Shizzle GPU worker.
 
-Handles download/upload with verification.
+Handles download/upload with verification. Every uploaded object's sha256 is
+computed locally and recorded in the upload record; the publisher verifies
+staged objects server-side against these checksums before promotion.
 """
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
 
 import boto3
+
+
+def sha256_file(path: Path) -> str:
+    """Compute the sha256 hex digest of a file (streamed)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _env(name: str) -> str:
@@ -97,9 +109,9 @@ def download_source(s3: Any, bucket: str, input_key: str, local_path: Path) -> N
     verify_download(local_path)
 
 
-def upload_file(s3: Any, bucket: str, s3_key: str, local_path: Path) -> dict[str, str]:
+def upload_file(s3: Any, bucket: str, s3_key: str, local_path: Path) -> dict[str, Any]:
     """
-    Upload file to S3 with verification.
+    Upload file to S3 with verification and a recorded sha256 checksum.
 
     Args:
         s3: boto3 S3 client
@@ -108,15 +120,23 @@ def upload_file(s3: Any, bucket: str, s3_key: str, local_path: Path) -> dict[str
         local_path: Path to local file
 
     Returns:
-        Dict with file and key for tracking
+        Dict with file, key, sha256, and size_bytes for the result payload
+        (publisher verifies server-side against these before promotion)
 
     Raises:
         RuntimeError: If upload or verification fails
     """
-    print(f"Uploading {local_path} -> s3://{bucket}/{s3_key}", flush=True)
+    digest = sha256_file(local_path)
+    print(f"Uploading {local_path} -> s3://{bucket}/{s3_key} (sha256={digest[:12]}...)",
+          flush=True)
     s3.upload_file(str(local_path), bucket, s3_key)
     verify_upload(s3, bucket, s3_key, local_path)
-    return {"file": local_path.name, "key": s3_key}
+    return {
+        "file": local_path.name,
+        "key": s3_key,
+        "sha256": digest,
+        "size_bytes": local_path.stat().st_size,
+    }
 
 
 def upload_outputs(
@@ -124,18 +144,18 @@ def upload_outputs(
     bucket: str,
     output_prefix: str,
     files: list[tuple[Path, str]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """
     Upload multiple output files to S3.
 
     Args:
         s3: boto3 S3 client
         bucket: S3 bucket name
-        output_prefix: S3 prefix for outputs (e.g., karaoke/out/recXXX/)
+        output_prefix: S3 prefix for outputs (e.g. tracks/<id>/<gen>/staging/)
         files: List of (local_path, relative_key) tuples
 
     Returns:
-        List of upload records with file and key
+        List of upload records with file, key, sha256, size_bytes
 
     Raises:
         RuntimeError: If any upload fails

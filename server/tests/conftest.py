@@ -16,6 +16,7 @@ from shizzle_server.db.models import Base, SourceType
 from shizzle_server.db.repository import (
     HeartbeatRepository,
     JobRepository,
+    PlaybackTelemetryRepository,
     TrackRepository,
 )
 from shizzle_server.settings import Settings
@@ -66,6 +67,11 @@ async def track_repo(session_factory) -> TrackRepository:
 @pytest_asyncio.fixture
 async def heartbeat_repo(session_factory) -> HeartbeatRepository:
     return HeartbeatRepository(session_factory)
+
+
+@pytest_asyncio.fixture
+async def playback_telemetry_repo(session_factory) -> PlaybackTelemetryRepository:
+    return PlaybackTelemetryRepository(session_factory)
 
 
 @pytest_asyncio.fixture

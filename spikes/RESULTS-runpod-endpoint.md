@@ -1,5 +1,9 @@
 # RunPod endpoint — real state (2026-08-03)
 
+> Troubleshooting record for earlier RunPod endpoint failures. Endpoint details
+> in this file are observations from that run; use `../docs/HANDOFF.md` for the
+> current endpoint and next action.
+
 - ONE account. Fresh key in .env works.
 - The `.env` RUNPOD_ENDPOINT_ID originally held the DEAD old pod id (3ugymq664vud7y) — the only endpoint that existed when the template was written. That endpoint is gone from the console; its id still answers /health (lingering), which caused a phantom-endpoint chase. Resolved by creating a real new endpoint.
 - **New endpoint: `r370i6ad7h75m3` name "shizzle"**, template `vh76gbm3uy` (ghcr.io/mdc159/shizzle-worker), gpu [3090/A5000/L4/A4000], workersMax 3, idle 10s. Visible in console.

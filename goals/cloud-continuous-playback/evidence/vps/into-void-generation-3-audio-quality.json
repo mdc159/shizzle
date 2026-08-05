@@ -1,0 +1,40 @@
+{
+  "schema": "shizzle-audio-quality-v1",
+  "started_at": "2026-08-05T09:03:40.311147+00:00",
+  "status": "complete",
+  "track_count": 1,
+  "tracks": [
+    {
+      "id": "1f3b9397-ca05-526e-9901-2b73ab686062",
+      "title": "BLACK SABBATH -  Into The Void  (Live Video)",
+      "generation": 3,
+      "manifest_key": "tracks/1f3b9397-ca05-526e-9901-2b73ab686062/3/manifest.json",
+      "s3_prefix": "tracks/1f3b9397-ca05-526e-9901-2b73ab686062/3",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2
+      ],
+      "measurement": {
+        "integrated_lufs": -11.8,
+        "loudness_range_lu": 3.0,
+        "true_peak_dbtp": -1.0,
+        "sample_peak_dbfs": -1.065622,
+        "min_sample": -0.884543,
+        "max_sample": 0.879193,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    }
+  ],
+  "updated_at": "2026-08-05T09:03:48.838970+00:00",
+  "passed_pre_limiter_count": 1,
+  "completed_at": "2026-08-05T09:03:48.839515+00:00"
+}

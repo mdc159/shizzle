@@ -1,0 +1,16 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T07:13:32.615336+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": false,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "status": "rolled-back",
+      "from_generation": 3,
+      "generation": 2,
+      "reason": "verified production rollback drill"
+    }
+  ]
+}

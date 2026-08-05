@@ -1,0 +1,202 @@
+{
+  "schema": "shizzle-library-snapshot-v1",
+  "generated_at": "2026-08-05T06:22:39.886446+00:00",
+  "profile": "shizzle-browser-v1",
+  "bucket": "karaoke-pimpshizzle",
+  "track_count": 1,
+  "media_object_count": 7,
+  "total_duration_seconds": 378.667,
+  "tracks": [
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "title": "The Pot",
+      "artist": "TOOL",
+      "duration": 378.667,
+      "generation": 2,
+      "s3_prefix": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2",
+      "manifest_key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/manifest.json",
+      "integrity": {
+        "gates": "not-run",
+        "source": "legacy-import",
+        "video_delivery": {
+          "sha256": "63603e74bc5a981b3d34a527952b1d8e359f02072dc9ba895a68c17772ea2c07",
+          "full_decode": "pass",
+          "max_keyframe_interval_seconds": 2
+        }
+      },
+      "manifest_sha256": "d85e8080a0c0eb1b53fc3c78efafbdedd834d638558c1250eb225eab0507444b",
+      "manifest": {
+        "version": 3,
+        "title": "The Pot",
+        "artist": "TOOL",
+        "duration": 378.667,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {},
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "legacy-import",
+          "gates": "not-run",
+          "video_delivery": {
+            "full_decode": "pass",
+            "max_keyframe_interval_seconds": 2,
+            "sha256": "63603e74bc5a981b3d34a527952b1d8e359f02072dc9ba895a68c17772ea2c07"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/the-pot-2d88b7a5",
+          "video_delivery": {
+            "encoded_on": "vps",
+            "codec": "h264-main-3.1",
+            "pixel_format": "yuv420p",
+            "frame_rate_fps": 30,
+            "gop_seconds": 2,
+            "closed_gop": true,
+            "faststart": true,
+            "start_time_seconds": 0,
+            "sha256": "63603e74bc5a981b3d34a527952b1d8e359f02072dc9ba895a68c17772ea2c07"
+          }
+        },
+        "generation": 2
+      },
+      "objects": [
+        {
+          "kind": "video",
+          "role": "video",
+          "file": "video.mp4",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/video.mp4",
+          "head": {
+            "bytes": 10353930,
+            "content_type": "video/mp4",
+            "etag": "9470e6cc0ec25788379f39c19a2c2e17-2",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:54+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "vocals",
+          "source_role": "vocals",
+          "file": "stems/vocals.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/vocals.m4a",
+          "head": {
+            "bytes": 11867684,
+            "content_type": "audio/mp4",
+            "etag": "77994714156ed43bba11007c3e414c89",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:51+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "drums",
+          "source_role": "drums",
+          "file": "stems/drums.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/drums.m4a",
+          "head": {
+            "bytes": 14037630,
+            "content_type": "audio/mp4",
+            "etag": "af66afca72a652aa184822e99d041686",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:51+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "bass",
+          "source_role": "bass",
+          "file": "stems/bass.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/bass.m4a",
+          "head": {
+            "bytes": 12334946,
+            "content_type": "audio/mp4",
+            "etag": "d35a0b18db3e84bb9d5e0e792c8a4b15",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:52+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "guitar",
+          "source_role": "guitar",
+          "file": "stems/guitar.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/guitar.m4a",
+          "head": {
+            "bytes": 12368900,
+            "content_type": "audio/mp4",
+            "etag": "5c0c7062df4529bb708633c3c2ca4b13",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:52+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "piano",
+          "source_role": "piano",
+          "file": "stems/piano.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/piano.m4a",
+          "head": {
+            "bytes": 11941897,
+            "content_type": "audio/mp4",
+            "etag": "10429e409b21edc049bdf029b9f841f5",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:53+00:00"
+          }
+        },
+        {
+          "kind": "stem",
+          "role": "shizzle",
+          "source_role": "shizzle",
+          "file": "stems/shizzle.m4a",
+          "key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/2/stems/shizzle.m4a",
+          "head": {
+            "bytes": 11303667,
+            "content_type": "audio/mp4",
+            "etag": "29d8ffdbeb1e71b6d253317970c563ff",
+            "checksum_sha256": null,
+            "last_modified": "2026-08-05T04:05:53+00:00"
+          }
+        }
+      ]
+    }
+  ]
+}

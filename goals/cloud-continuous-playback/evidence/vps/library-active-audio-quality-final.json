@@ -1,0 +1,794 @@
+{
+  "schema": "shizzle-audio-quality-v1",
+  "started_at": "2026-08-05T09:04:38.716112+00:00",
+  "status": "complete",
+  "track_count": 27,
+  "tracks": [
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "title": "The Pot",
+      "generation": 3,
+      "manifest_key": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/3/manifest.json",
+      "s3_prefix": "tracks/f995371a-7d9b-5dbb-82d2-0000dc80aacf/3",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -15.7,
+        "loudness_range_lu": 5.7,
+        "true_peak_dbtp": -2.7,
+        "sample_peak_dbfs": -2.749072,
+        "min_sample": -0.711013,
+        "max_sample": 0.728696,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+      "title": "Pearl Jam - Black - Acústico - Unplugged - HD",
+      "generation": 2,
+      "manifest_key": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/2/manifest.json",
+      "s3_prefix": "tracks/5cbd16b6-0e25-5508-829b-61285dfda463/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -14.0,
+        "loudness_range_lu": 6.1,
+        "true_peak_dbtp": -2.9,
+        "sample_peak_dbfs": -2.938816,
+        "min_sample": -0.71295,
+        "max_sample": 0.702769,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "d24e81ba-28a0-520a-a766-0925f4e1e161",
+      "title": "Alice In Chains - Man in the Box (Official Video)",
+      "generation": 2,
+      "manifest_key": "tracks/d24e81ba-28a0-520a-a766-0925f4e1e161/2/manifest.json",
+      "s3_prefix": "tracks/d24e81ba-28a0-520a-a766-0925f4e1e161/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -15.8,
+        "loudness_range_lu": 4.0,
+        "true_peak_dbtp": -3.4,
+        "sample_peak_dbfs": -3.49595,
+        "min_sample": -0.668656,
+        "max_sample": 0.657153,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "4bd3d013-4dc2-5438-9926-962bd99029c4",
+      "title": "Van Halen - You Really Got Me (Official Music Video)",
+      "generation": 2,
+      "manifest_key": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2/manifest.json",
+      "s3_prefix": "tracks/4bd3d013-4dc2-5438-9926-962bd99029c4/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -27.2,
+        "loudness_range_lu": 5.4,
+        "true_peak_dbtp": -14.1,
+        "sample_peak_dbfs": -14.064081,
+        "min_sample": -0.189312,
+        "max_sample": 0.19806,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "0244dc21-af79-5797-acfd-2dd94aa09392",
+      "title": "Temple of the Dog - War Pigs (Black Sabbath cover) – Live in San Francisco",
+      "generation": 2,
+      "manifest_key": "tracks/0244dc21-af79-5797-acfd-2dd94aa09392/2/manifest.json",
+      "s3_prefix": "tracks/0244dc21-af79-5797-acfd-2dd94aa09392/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -17.5,
+        "loudness_range_lu": 1.1,
+        "true_peak_dbtp": -11.0,
+        "sample_peak_dbfs": -11.00144,
+        "min_sample": -0.281792,
+        "max_sample": 0.266547,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+      "title": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+      "generation": 2,
+      "manifest_key": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/2/manifest.json",
+      "s3_prefix": "tracks/c4072b04-008e-5f1b-985b-f12903a9cf24/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -13.6,
+        "loudness_range_lu": 3.7,
+        "true_peak_dbtp": -2.0,
+        "sample_peak_dbfs": -2.035593,
+        "min_sample": -0.734215,
+        "max_sample": 0.79108,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "297389b3-bac0-5ae6-a144-bf7a8c4b6718",
+      "title": "Stone Temple Pilots - Plush (Official Music Video)",
+      "generation": 2,
+      "manifest_key": "tracks/297389b3-bac0-5ae6-a144-bf7a8c4b6718/2/manifest.json",
+      "s3_prefix": "tracks/297389b3-bac0-5ae6-a144-bf7a8c4b6718/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -19.7,
+        "loudness_range_lu": 3.4,
+        "true_peak_dbtp": -4.5,
+        "sample_peak_dbfs": -4.608713,
+        "min_sample": -0.486469,
+        "max_sample": 0.588253,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+      "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+      "generation": 2,
+      "manifest_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/manifest.json",
+      "s3_prefix": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -15.7,
+        "loudness_range_lu": 15.7,
+        "true_peak_dbtp": -3.3,
+        "sample_peak_dbfs": -3.37635,
+        "min_sample": -0.62975,
+        "max_sample": 0.677926,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "fc51be9b-c773-52b5-9b5c-4ebaa419b196",
+      "title": "Mr. Brownstone",
+      "generation": 2,
+      "manifest_key": "tracks/fc51be9b-c773-52b5-9b5c-4ebaa419b196/2/manifest.json",
+      "s3_prefix": "tracks/fc51be9b-c773-52b5-9b5c-4ebaa419b196/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -13.5,
+        "loudness_range_lu": 3.0,
+        "true_peak_dbtp": -2.1,
+        "sample_peak_dbfs": -2.164821,
+        "min_sample": -0.779397,
+        "max_sample": 0.767974,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "ffee538e-8627-58f0-a02b-25cc60f7a29e",
+      "title": "Mother Love Bone - Star Dog Champion ( official video)",
+      "generation": 2,
+      "manifest_key": "tracks/ffee538e-8627-58f0-a02b-25cc60f7a29e/2/manifest.json",
+      "s3_prefix": "tracks/ffee538e-8627-58f0-a02b-25cc60f7a29e/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -17.8,
+        "loudness_range_lu": 5.2,
+        "true_peak_dbtp": -2.6,
+        "sample_peak_dbfs": -2.608994,
+        "min_sample": -0.72304,
+        "max_sample": 0.740543,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+      "title": "Temple Of The Dog - Hunger Strike",
+      "generation": 2,
+      "manifest_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/manifest.json",
+      "s3_prefix": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.9,
+        "loudness_range_lu": 6.6,
+        "true_peak_dbtp": -2.2,
+        "sample_peak_dbfs": -2.250063,
+        "min_sample": -0.771786,
+        "max_sample": 0.759437,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "0329507a-b933-5eb5-8088-b1cd6f8feb98",
+      "title": "Van Halen - Hot For Teacher (Official Music Video)",
+      "generation": 2,
+      "manifest_key": "tracks/0329507a-b933-5eb5-8088-b1cd6f8feb98/2/manifest.json",
+      "s3_prefix": "tracks/0329507a-b933-5eb5-8088-b1cd6f8feb98/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -18.8,
+        "loudness_range_lu": 9.2,
+        "true_peak_dbtp": -5.0,
+        "sample_peak_dbfs": -5.176243,
+        "min_sample": -0.549374,
+        "max_sample": 0.551046,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "06ce033c-2345-548b-866f-a0266348fe15",
+      "title": "Soundgarden - Spoonman",
+      "generation": 2,
+      "manifest_key": "tracks/06ce033c-2345-548b-866f-a0266348fe15/2/manifest.json",
+      "s3_prefix": "tracks/06ce033c-2345-548b-866f-a0266348fe15/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -11.5,
+        "loudness_range_lu": 5.8,
+        "true_peak_dbtp": -2.5,
+        "sample_peak_dbfs": -2.523083,
+        "min_sample": -0.737525,
+        "max_sample": 0.747904,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "4ed567d1-31ba-5ab7-994a-247fadff921b",
+      "title": "AC DC - Let's Get It Up (Official Video)",
+      "generation": 2,
+      "manifest_key": "tracks/4ed567d1-31ba-5ab7-994a-247fadff921b/2/manifest.json",
+      "s3_prefix": "tracks/4ed567d1-31ba-5ab7-994a-247fadff921b/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -14.1,
+        "loudness_range_lu": 3.0,
+        "true_peak_dbtp": -3.3,
+        "sample_peak_dbfs": -3.256414,
+        "min_sample": -0.687352,
+        "max_sample": 0.67381,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+      "title": "Sweet Child O' Mine",
+      "generation": 2,
+      "manifest_key": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/2/manifest.json",
+      "s3_prefix": "tracks/b7a980db-c30a-5a6f-8554-191f3a13a444/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -13.3,
+        "loudness_range_lu": 4.9,
+        "true_peak_dbtp": -1.7,
+        "sample_peak_dbfs": -1.69345,
+        "min_sample": -0.770219,
+        "max_sample": 0.822863,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d",
+      "title": "My Michelle",
+      "generation": 2,
+      "manifest_key": "tracks/7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d/2/manifest.json",
+      "s3_prefix": "tracks/7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.8,
+        "loudness_range_lu": 6.1,
+        "true_peak_dbtp": -1.8,
+        "sample_peak_dbfs": -1.799584,
+        "min_sample": -0.810104,
+        "max_sample": 0.812869,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+      "title": "Mother Love Bone - Stardog Champion",
+      "generation": 2,
+      "manifest_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/manifest.json",
+      "s3_prefix": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -17.0,
+        "loudness_range_lu": 3.1,
+        "true_peak_dbtp": -2.7,
+        "sample_peak_dbfs": -2.733676,
+        "min_sample": -0.695771,
+        "max_sample": 0.729989,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "9c835433-050d-5342-a02b-e2791927db92",
+      "title": "AC DC - Shoot To Thrill (Iron Man 2 Version)",
+      "generation": 2,
+      "manifest_key": "tracks/9c835433-050d-5342-a02b-e2791927db92/2/manifest.json",
+      "s3_prefix": "tracks/9c835433-050d-5342-a02b-e2791927db92/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -22.2,
+        "loudness_range_lu": 3.2,
+        "true_peak_dbtp": -8.8,
+        "sample_peak_dbfs": -8.76997,
+        "min_sample": -0.364336,
+        "max_sample": 0.350554,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "427a17cb-50da-5e2b-9312-99c2ed4a28d0",
+      "title": "Skid Row - Monkey Business (Official Music Video)",
+      "generation": 2,
+      "manifest_key": "tracks/427a17cb-50da-5e2b-9312-99c2ed4a28d0/2/manifest.json",
+      "s3_prefix": "tracks/427a17cb-50da-5e2b-9312-99c2ed4a28d0/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -22.9,
+        "loudness_range_lu": 16.0,
+        "true_peak_dbtp": -10.5,
+        "sample_peak_dbfs": -10.561892,
+        "min_sample": -0.296419,
+        "max_sample": 0.291372,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "f5b84806-25e7-5bbd-bb13-fa894a88753a",
+      "title": "AC DC - Ride On (Stade De France, Paris, June 2001)",
+      "generation": 2,
+      "manifest_key": "tracks/f5b84806-25e7-5bbd-bb13-fa894a88753a/2/manifest.json",
+      "s3_prefix": "tracks/f5b84806-25e7-5bbd-bb13-fa894a88753a/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -13.3,
+        "loudness_range_lu": 2.9,
+        "true_peak_dbtp": -2.9,
+        "sample_peak_dbfs": -2.930738,
+        "min_sample": -0.704881,
+        "max_sample": 0.713614,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "99ec0110-1990-5d3c-8d69-e8ae76cad03d",
+      "title": "Soundgarden - Outshined",
+      "generation": 2,
+      "manifest_key": "tracks/99ec0110-1990-5d3c-8d69-e8ae76cad03d/2/manifest.json",
+      "s3_prefix": "tracks/99ec0110-1990-5d3c-8d69-e8ae76cad03d/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -13.3,
+        "loudness_range_lu": 4.5,
+        "true_peak_dbtp": -2.5,
+        "sample_peak_dbfs": -2.548446,
+        "min_sample": -0.745723,
+        "max_sample": 0.722408,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "1edee1b7-0dff-5e20-922b-deb6c3ef4ce7",
+      "title": "AC DC - You Shook Me All Night Long (Official 4K Video)",
+      "generation": 2,
+      "manifest_key": "tracks/1edee1b7-0dff-5e20-922b-deb6c3ef4ce7/2/manifest.json",
+      "s3_prefix": "tracks/1edee1b7-0dff-5e20-922b-deb6c3ef4ce7/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.5,
+        "loudness_range_lu": 6.0,
+        "true_peak_dbtp": -2.1,
+        "sample_peak_dbfs": -2.144576,
+        "min_sample": -0.769144,
+        "max_sample": 0.781216,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "a54803e6-f334-5991-9112-f17ca7365a0f",
+      "title": "AC DC - Let There Be Rock (Official Video)",
+      "generation": 2,
+      "manifest_key": "tracks/a54803e6-f334-5991-9112-f17ca7365a0f/2/manifest.json",
+      "s3_prefix": "tracks/a54803e6-f334-5991-9112-f17ca7365a0f/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.3,
+        "loudness_range_lu": 6.1,
+        "true_peak_dbtp": -1.8,
+        "sample_peak_dbfs": -1.817152,
+        "min_sample": -0.784707,
+        "max_sample": 0.811227,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+      "title": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction",
+      "generation": 2,
+      "manifest_key": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2/manifest.json",
+      "s3_prefix": "tracks/c1c4ec31-058d-5729-86a5-fb3d8f3e65ae/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -26.2,
+        "loudness_range_lu": 5.2,
+        "true_peak_dbtp": -10.3,
+        "sample_peak_dbfs": -10.288123,
+        "min_sample": -0.224422,
+        "max_sample": 0.30591,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+      "title": "AC DC - Walk All Over You (Official Video)",
+      "generation": 2,
+      "manifest_key": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/2/manifest.json",
+      "s3_prefix": "tracks/e9bc18b1-eef6-5793-84c3-f26b6c4f45b1/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -12.3,
+        "loudness_range_lu": 7.1,
+        "true_peak_dbtp": -2.8,
+        "sample_peak_dbfs": -2.786276,
+        "min_sample": -0.701664,
+        "max_sample": 0.725582,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "1f3b9397-ca05-526e-9901-2b73ab686062",
+      "title": "BLACK SABBATH -  Into The Void  (Live Video)",
+      "generation": 3,
+      "manifest_key": "tracks/1f3b9397-ca05-526e-9901-2b73ab686062/3/manifest.json",
+      "s3_prefix": "tracks/1f3b9397-ca05-526e-9901-2b73ab686062/3",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2,
+        -0.2
+      ],
+      "measurement": {
+        "integrated_lufs": -11.8,
+        "loudness_range_lu": 3.0,
+        "true_peak_dbtp": -1.0,
+        "sample_peak_dbfs": -1.065622,
+        "min_sample": -0.884543,
+        "max_sample": 0.879193,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    },
+    {
+      "id": "52eb3b91-9906-5b8b-9100-1f9f4bdc0522",
+      "title": "Van Halen - (Oh) Pretty Woman (Official Music Video)",
+      "generation": 2,
+      "manifest_key": "tracks/52eb3b91-9906-5b8b-9100-1f9f4bdc0522/2/manifest.json",
+      "s3_prefix": "tracks/52eb3b91-9906-5b8b-9100-1f9f4bdc0522/2",
+      "delivery_profile": "shizzle-browser-v1",
+      "gain_dbs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "measurement": {
+        "integrated_lufs": -15.3,
+        "loudness_range_lu": 4.4,
+        "true_peak_dbtp": -2.1,
+        "sample_peak_dbfs": -2.807842,
+        "min_sample": -0.723782,
+        "max_sample": 0.71324,
+        "nan_samples": 0,
+        "infinite_samples": 0,
+        "additional_common_gain_db": 0.0,
+        "sample_clipping": false,
+        "passed_pre_limiter": true
+      }
+    }
+  ],
+  "updated_at": "2026-08-05T09:07:44.570625+00:00",
+  "passed_pre_limiter_count": 27,
+  "completed_at": "2026-08-05T09:07:44.572056+00:00"
+}

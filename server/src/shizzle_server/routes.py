@@ -13,13 +13,15 @@ import hashlib
 import json
 import logging
 import shutil
+import time
 import uuid
-from datetime import UTC, datetime
+from collections import defaultdict, deque
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 
@@ -31,7 +33,12 @@ from .auth import (
     require_auth,
 )
 from .db.models import SourceType, Track
-from .db.repository import HeartbeatRepository, JobRepository, TrackRepository
+from .db.repository import (
+    HeartbeatRepository,
+    JobRepository,
+    PlaybackTelemetryRepository,
+    TrackRepository,
+)
 from .models import (
     AuthRequest,
     AuthResponse,
@@ -40,6 +47,10 @@ from .models import (
     JobResponse,
     LibraryResponse,
     MediaSessionResponse,
+    PlaybackIncidentInfo,
+    PlaybackIncidentListResponse,
+    PlaybackTelemetryRequest,
+    PlaybackTelemetryResponse,
     SubmitUrlRequest,
     TrackInfo,
 )
@@ -93,6 +104,39 @@ def _tracks(request: Request) -> TrackRepository:
 
 def _heartbeats(request: Request) -> HeartbeatRepository:
     return request.app.state.heartbeat_repo
+
+
+def _playback_telemetry(request: Request) -> PlaybackTelemetryRepository:
+    return request.app.state.playback_telemetry_repo
+
+
+class _TelemetryRateLimiter:
+    """Small in-process abuse guard; durable events still live in Postgres.
+
+    The playback watchdog can legitimately emit roughly 200 ordered events per
+    minute during aggressive seeking (transport, buffering, recovery started,
+    recovery settled). The ceiling leaves 3x measured headroom while still
+    bounding an authenticated client's database write rate.
+    """
+
+    def __init__(self, limit: int = 600, window_seconds: float = 60.0) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._hits: dict[uuid.UUID, deque[float]] = defaultdict(deque)
+
+    def allow(self, session_id: uuid.UUID) -> bool:
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        hits = self._hits[session_id]
+        while hits and hits[0] < cutoff:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False
+        hits.append(now)
+        return True
+
+
+_telemetry_rate_limiter = _TelemetryRateLimiter()
 
 
 def _parse_job_id(job_id: str) -> uuid.UUID:
@@ -276,6 +320,66 @@ async def get_library(request: Request, _auth: None = Protected) -> LibraryRespo
     return LibraryResponse(tracks=infos, total=len(infos))
 
 
+@router.post("/playback/telemetry")
+async def ingest_playback_telemetry(
+    request: Request,
+    body: PlaybackTelemetryRequest,
+    _auth: None = Protected,
+) -> PlaybackTelemetryResponse:
+    """Persist direct browser health evidence without media URLs or credentials."""
+    if not _telemetry_rate_limiter.allow(body.sessionId):
+        raise HTTPException(
+            429,
+            "Playback telemetry rate limit exceeded",
+            headers={"Retry-After": "5"},
+        )
+    track = await _tracks(request).get(body.trackId)
+    if track is None or track.deleted_at is not None:
+        raise HTTPException(404, "Track not found")
+    try:
+        accepted = await _playback_telemetry(request).ingest(
+            session_id=body.sessionId,
+            track_id=body.trackId,
+            generation=body.generation,
+            sequence=body.sequence,
+            event=body.event,
+            client_at_ms=body.clientAtMs,
+            app_build=body.appBuild,
+            browser=body.browser,
+            detail=body.detail,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return PlaybackTelemetryResponse(accepted=accepted)
+
+
+@router.get("/playback/incidents")
+async def recent_playback_incidents(
+    request: Request,
+    minutes: int = Query(default=15, ge=1, le=1440),
+    limit: int = Query(default=100, ge=1, le=1000),
+    _auth: None = Protected,
+) -> PlaybackIncidentListResponse:
+    """Query first-party direct playback failures by track and generation."""
+    since = datetime.now(UTC) - timedelta(minutes=minutes)
+    rows = await _playback_telemetry(request).recent_incidents(since=since, limit=limit)
+    incidents = [
+        PlaybackIncidentInfo(
+            sessionId=event.session_id,
+            trackId=event.track_id,
+            trackTitle=title,
+            generation=event.generation,
+            sequence=event.sequence,
+            event=event.event,
+            clientAtMs=event.client_at_ms,
+            receivedAt=event.received_at,
+            detail=event.detail,
+        )
+        for event, title in rows
+    ]
+    return PlaybackIncidentListResponse(since=since, total=len(incidents), incidents=incidents)
+
+
 @router.delete("/tracks/{track_id}")
 async def delete_track(request: Request, track_id: str, _auth: None = Protected) -> dict:
     """Soft delete (design: manual delete only, no silent retention deletion)."""
@@ -316,7 +420,10 @@ async def get_track_manifest(
     except Exception as exc:  # noqa: BLE001 - surface as 502 with a clean message
         logger.warning("manifest fetch failed for %s: %s", track_id, exc)
         raise HTTPException(502, "Manifest unavailable") from exc
-    return media.rewrite_cloud_manifest(settings, raw, track.s3_prefix)
+    rewritten = media.rewrite_cloud_manifest(settings, raw, track.s3_prefix)
+    rewritten["track_id"] = str(track.id)
+    rewritten["generation"] = track.generation
+    return rewritten
 
 
 async def _resolve_local_track_dir(request: Request, track_id: str) -> tuple[Track, Path]:

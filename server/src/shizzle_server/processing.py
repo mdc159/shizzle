@@ -109,8 +109,19 @@ def extract_video_only(source_path: Path, output_path: Path) -> None:
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "20",
+        "-profile:v", "main",
+        "-level:v", "3.1",
         "-pix_fmt", "yuv420p",
+        # Normalize the delivery clock and make every random-access point
+        # independently decodable. Long/open legacy GOPs caused browser
+        # MEDIA_ERR_DECODE during repeated cloud Range seeks.
+        "-vf", "setpts=PTS-STARTPTS",
+        "-r", "30",
+        "-g", "60",
+        "-keyint_min", "60",
+        "-sc_threshold", "0",
         "-movflags", "+faststart",
+        "-video_track_timescale", "90000",
         str(output_path),
     ], timeout=1200)
 

@@ -9,7 +9,7 @@
  */
 
 import type { StemId, StemsManifest } from '@/types/karaoke';
-import type { PlaybackMetrics } from './metrics';
+import type { PlaybackIncident, PlaybackMetrics } from './metrics';
 
 export interface PlaybackEngine {
   /** Load all stems from a manifest. Replaces any previously loaded track. */
@@ -29,6 +29,8 @@ export interface PlaybackEngine {
   setMasterGainDb(db: number): void;
   /** Callback fired when the stall policy pauses playback (null clears). */
   onStallBailout(cb: (() => void) | null): void;
+  /** First-party playback-health incident stream (null clears). */
+  onIncident(cb: ((incident: PlaybackIncident) => void) | null): void;
   getMetrics(): PlaybackMetrics;
   /** Full teardown including the AudioContext. */
   dispose(): void;

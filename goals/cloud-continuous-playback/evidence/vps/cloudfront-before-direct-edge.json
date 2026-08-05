@@ -1,0 +1,11 @@
+{
+  "distribution_id": "ELKN8VGSX0M64",
+  "etag": "ETVPDKIKX0DER",
+  "response_headers_policy_id": null,
+  "allowed_methods": ["HEAD", "GET"],
+  "cached_methods": ["HEAD", "GET"],
+  "origin_request_policy_id": null,
+  "cache_policy_id": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+  "captured_at": "2026-08-05T11:30:00Z",
+  "reason": "Pre-change rollback record before direct signed-URL CORS response policy."
+}

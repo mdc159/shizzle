@@ -1,0 +1,399 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T08:19:25.384250+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+      "title": "Mother Love Bone - Stardog Champion",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3442699 exceeds 2500000",
+      "status": "published",
+      "video_command": [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        "/tmp/shizzle-migrate-234a7b1c-6313-53ca-8d02-b319083e25d5-a64s8qrg/source-video.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-maxrate",
+        "1200k",
+        "-bufsize",
+        "2400k",
+        "-profile:v",
+        "main",
+        "-level:v",
+        "3.1",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-movflags",
+        "+faststart",
+        "-video_track_timescale",
+        "90000",
+        "/tmp/shizzle-migrate-234a7b1c-6313-53ca-8d02-b319083e25d5-a64s8qrg/video.mp4"
+      ],
+      "encoded_video_audit": {
+        "artifact": "video.mp4",
+        "bytes": 44796883,
+        "sha256": "69d85fc0767e6ce501d2b49d424515f465e907477afbe6f2e7116838da52e1ca",
+        "probe": {
+          "streams": [
+            {
+              "index": 0,
+              "codec_name": "h264",
+              "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+              "profile": "Main",
+              "codec_type": "video",
+              "codec_tag_string": "avc1",
+              "codec_tag": "0x31637661",
+              "width": 974,
+              "height": 720,
+              "coded_width": 974,
+              "coded_height": 720,
+              "closed_captions": 0,
+              "film_grain": 0,
+              "has_b_frames": 2,
+              "sample_aspect_ratio": "1460:1461",
+              "display_aspect_ratio": "73:54",
+              "pix_fmt": "yuv420p",
+              "level": 31,
+              "color_range": "tv",
+              "color_space": "bt709",
+              "color_transfer": "bt709",
+              "color_primaries": "bt709",
+              "chroma_location": "left",
+              "field_order": "progressive",
+              "refs": 1,
+              "is_avc": "true",
+              "nal_length_size": "4",
+              "id": "0x1",
+              "r_frame_rate": "30/1",
+              "avg_frame_rate": "137025/4567",
+              "time_base": "1/90000",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 27402000,
+              "duration": "304.466667",
+              "bit_rate": "1174283",
+              "bits_per_raw_sample": "8",
+              "nb_frames": "9135",
+              "extradata_size": 49,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler",
+                "vendor_id": "[0][0][0][0]",
+                "encoder": "Lavc61.19.101 libx264"
+              }
+            }
+          ],
+          "format": {
+            "filename": "/tmp/shizzle-migrate-234a7b1c-6313-53ca-8d02-b319083e25d5-a64s8qrg/video.mp4",
+            "nb_streams": 1,
+            "nb_programs": 0,
+            "nb_stream_groups": 0,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+            "start_time": "0.000000",
+            "duration": "304.466667",
+            "size": "44796883",
+            "bit_rate": "1177058",
+            "probe_score": 100,
+            "tags": {
+              "major_brand": "isom",
+              "minor_version": "512",
+              "compatible_brands": "isomiso2avc1mp41",
+              "title": "Mother Love Bone - Stardog Champion",
+              "date": "2025:10:10 02:01:33",
+              "encoder": "Lavf61.7.103"
+            }
+          }
+        },
+        "atoms": [
+          "ftyp",
+          "moov",
+          "free",
+          "mdat"
+        ],
+        "moov_offset": 32,
+        "mdat_offset": 105586,
+        "fast_start": true,
+        "keyframe_count": 153,
+        "max_keyframe_interval_seconds": 2.0,
+        "full_decode": "pass",
+        "decode_detail": null,
+        "issues": [],
+        "passed": true
+      },
+      "manifest": {
+        "version": 3,
+        "title": "Mother Love Bone - Stardog Champion",
+        "artist": "",
+        "duration": 304.505,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "30000/1001",
+          "duration": 304.505
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 3442699 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/video.mp4",
+              "source_sha256": "f30103f2e4c6729a59fc9c0e72aadc3a9295e8a71278002844253523486fe691",
+              "sha256": "69d85fc0767e6ce501d2b49d424515f465e907477afbe6f2e7116838da52e1ca",
+              "bytes": 44796883
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/vocals.m4a",
+              "source_sha256": "4fe9f88dbd5d8ab958b7b6d69e64b65c563b6e6e765befd2869ad444ddbabf31",
+              "sha256": "4fe9f88dbd5d8ab958b7b6d69e64b65c563b6e6e765befd2869ad444ddbabf31",
+              "bytes": 7159320
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/drums.m4a",
+              "source_sha256": "9d95195e7295018fb59eb537045fc22105052c28fb952f3eaa486991c04c4e33",
+              "sha256": "9d95195e7295018fb59eb537045fc22105052c28fb952f3eaa486991c04c4e33",
+              "bytes": 7185922
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/bass.m4a",
+              "source_sha256": "460b0c6111a598e8dd94db0ff8ceb0ac7b57528e5834c9da57120112f82c1315",
+              "sha256": "460b0c6111a598e8dd94db0ff8ceb0ac7b57528e5834c9da57120112f82c1315",
+              "bytes": 7158449
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/guitar.m4a",
+              "source_sha256": "189bdfca1afc18442a16f00d803c4742ba7c19241937d4aeaefb5b09682d63d4",
+              "sha256": "189bdfca1afc18442a16f00d803c4742ba7c19241937d4aeaefb5b09682d63d4",
+              "bytes": 7199681
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/piano.m4a",
+              "source_sha256": "25a92e8055aa1f5fec1fdc051cb58c198b0046b432581d13b69ca81f16134ce1",
+              "sha256": "25a92e8055aa1f5fec1fdc051cb58c198b0046b432581d13b69ca81f16134ce1",
+              "bytes": 7192560
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/other.m4a",
+              "source_sha256": "c2be941d1868ff41be254514b9b968d6e69e9a729b2d84848fba8511bd569969",
+              "sha256": "c2be941d1868ff41be254514b9b968d6e69e9a729b2d84848fba8511bd569969",
+              "bytes": 7017405
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/59767fdc8b07"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 304505,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "manifest_sha256": "3b57c87a057f97275dcfb0607995b3d4a8690164c0a2dbd71f29301b16546a01",
+      "publication": {
+        "s3_prefix": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2",
+        "manifest_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/manifest.json",
+        "bytes_copied": 87715134,
+        "verification": {
+          "source": "publisher",
+          "policy": "auto",
+          "object_count": 8,
+          "total_bytes": 87715134,
+          "sha256_verified": 8,
+          "sha256_unverified": 0,
+          "objects": [
+            {
+              "file": "video.mp4",
+              "size_bytes": 44796883,
+              "sha256": "69d85fc0767e6ce501d2b49d424515f465e907477afbe6f2e7116838da52e1ca",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "size_bytes": 7159320,
+              "sha256": "4fe9f88dbd5d8ab958b7b6d69e64b65c563b6e6e765befd2869ad444ddbabf31",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/drums.m4a",
+              "size_bytes": 7185922,
+              "sha256": "9d95195e7295018fb59eb537045fc22105052c28fb952f3eaa486991c04c4e33",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/bass.m4a",
+              "size_bytes": 7158449,
+              "sha256": "460b0c6111a598e8dd94db0ff8ceb0ac7b57528e5834c9da57120112f82c1315",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "size_bytes": 7199681,
+              "sha256": "189bdfca1afc18442a16f00d803c4742ba7c19241937d4aeaefb5b09682d63d4",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/piano.m4a",
+              "size_bytes": 7192560,
+              "sha256": "25a92e8055aa1f5fec1fdc051cb58c198b0046b432581d13b69ca81f16134ce1",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "size_bytes": 7017405,
+              "sha256": "c2be941d1868ff41be254514b9b968d6e69e9a729b2d84848fba8511bd569969",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "manifest.json",
+              "size_bytes": 4914,
+              "sha256": "3b57c87a057f97275dcfb0607995b3d4a8690164c0a2dbd71f29301b16546a01",
+              "sha256_source": "s3-checksum",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

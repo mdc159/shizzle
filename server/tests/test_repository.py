@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from shizzle_server.db.models import JobStage, SourceType
-from shizzle_server.db.repository import track_id_for_job
+from shizzle_server.db.repository import TrackGenerationConflict, track_id_for_job
 
 
 async def test_create_and_get_job(job_repo):
@@ -112,3 +112,78 @@ async def test_heartbeat_upsert_and_latest(heartbeat_repo):
     await heartbeat_repo.beat("worker-a")  # update, not duplicate insert
     second = await heartbeat_repo.latest()
     assert second is not None and second >= first
+
+
+async def test_generation_activation_is_compare_and_swap_with_append_only_event(track_repo):
+    from shizzle_server.db.repository import track_id_for_import
+
+    track_id = track_id_for_import("activation-test")
+    await track_repo.upsert_imported(
+        track_id,
+        title="Activation Test",
+        duration_seconds=10,
+        s3_prefix=f"tracks/{track_id}/1",
+        manifest_key=f"tracks/{track_id}/1/manifest.json",
+        generation=1,
+        integrity={"source": "legacy"},
+    )
+
+    activated = await track_repo.activate_generation(
+        track_id,
+        expected_generation=1,
+        generation=2,
+        s3_prefix=f"tracks/{track_id}/2/",
+        manifest_key=f"tracks/{track_id}/2/manifest.json",
+        integrity={"source": "audited-migration", "passed": True},
+        detail={"report_id": "report-123"},
+    )
+    assert activated.generation == 2
+    assert activated.s3_prefix == f"tracks/{track_id}/2"
+    events = await track_repo.list_generation_events(track_id)
+    assert len(events) == 1
+    assert events[0].event == "activated"
+    assert events[0].from_generation == 1
+    assert events[0].to_generation == 2
+    assert events[0].detail["report_id"] == "report-123"
+    assert events[0].detail["prior"]["manifest_key"].endswith("/1/manifest.json")
+
+    with pytest.raises(TrackGenerationConflict) as exc:
+        await track_repo.activate_generation(
+            track_id,
+            expected_generation=1,
+            generation=3,
+            s3_prefix=f"tracks/{track_id}/3",
+            manifest_key=f"tracks/{track_id}/3/manifest.json",
+            integrity={"source": "stale"},
+        )
+    assert exc.value.actual == 2
+    assert len(await track_repo.list_generation_events(track_id)) == 1
+
+
+async def test_generation_rollback_uses_same_atomic_ledger(track_repo):
+    from shizzle_server.db.repository import track_id_for_import
+
+    track_id = track_id_for_import("rollback-test")
+    await track_repo.upsert_imported(
+        track_id,
+        title="Rollback Test",
+        duration_seconds=10,
+        s3_prefix=f"tracks/{track_id}/2",
+        manifest_key=f"tracks/{track_id}/2/manifest.json",
+        generation=2,
+        integrity={"source": "new"},
+    )
+    rolled_back = await track_repo.activate_generation(
+        track_id,
+        expected_generation=2,
+        generation=1,
+        s3_prefix=f"tracks/{track_id}/1",
+        manifest_key=f"tracks/{track_id}/1/manifest.json",
+        integrity={"source": "legacy"},
+        event="rollback",
+        detail={"reason": "drill"},
+    )
+    assert rolled_back.generation == 1
+    event = (await track_repo.list_generation_events(track_id))[0]
+    assert event.event == "rollback"
+    assert event.detail["reason"] == "drill"

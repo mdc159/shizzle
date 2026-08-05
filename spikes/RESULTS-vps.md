@@ -1,6 +1,9 @@
 # RESULTS — VPS early checkout (pulled forward from Phase 4)
 
 Date: 2026-08-02 (all server timestamps 2026-08-03 UTC — box is UTC, local evening).
+> Troubleshooting record for VPS reachability, TLS, compose, and service health.
+> Use `../docs/HANDOFF.md` for current status.
+
 Box: Hostinger KVM 4, `srv1875370`, `72.60.173.171`. Executed from the Windows dev
 machine over SSH (root, default ed25519 key). Everything scripted in `infra/vps/`.
 
@@ -46,7 +49,7 @@ Via `infra/vps/setup.sh` (idempotent, re-runnable, `ssh root@... 'bash -s' < set
 | /opt/shizzle | owned shizzle:shizzle, holds the probe stack |
 
 SSH survival: fresh second session opened AFTER `ufw --force enable` — connected
-fine (rules added before enable; never locked out).
+fine (firewall entries added before enable; never locked out).
 
 ## Probe stack (LEFT RUNNING — this is the liveness proof)
 

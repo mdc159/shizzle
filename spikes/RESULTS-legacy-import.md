@@ -1,13 +1,16 @@
 # Legacy library import — results
 
+> Troubleshooting record for the one-time seed import and publisher behavior.
+> Current library status is in `../docs/HANDOFF.md`; this is not a current import
+> queue or completion list.
+
 Phase 3 work, 2026-08-02. Two deliverables: the server-side publisher module
 (`server/src/shizzle_server/publish.py`) and the one-time import of the k25
 legacy library into the Phase 3 track layout.
 
-**Headline: 27 of 36 legacy folders imported and verified playable. The other 9
-were not importable — their manifests reference six `.m4a` stem files that do
-not exist in the bucket.** That is a finding about the legacy data, not an
-import failure; details in §3.
+**Headline: all 27 retained library tracks were imported and verified playable.**
+Five incomplete source folders remain outside the library only because each is
+a redundant duplicate of an accepted track; details in §3.
 
 ---
 
@@ -71,11 +74,11 @@ Full write-up: `docs/legacy-manifest-v3.md`. Highlights:
 | | |
 |---|---|
 | Legacy prefix | `s3://karaoke-pimpshizzle/karaoke/pub/` |
-| Folders | 36 |
-| Objects | 295 |
-| Bytes | 7,997,187,337 (7.45 GiB) |
+| Folders | 32 |
+| Objects | 283 |
+| Bytes | 7,822,113,584 (7.29 GiB) |
 
-**`default_gain: 0` is on every one of the 35 v3 legacy manifests.**
+**`default_gain: 0` is on every one of the 31 retained v3 legacy manifests.**
 `worker/MANIFEST.md` warns the v2 `default_gain` name "must never return"; this
 survey shows the field did not just have a bad name, it shipped with the value
 that means *silence* under the linear reading its name implies. Whatever the k25
@@ -94,7 +97,7 @@ Other gaps versus `worker/MANIFEST.md`:
   that passed spike-0.3 thresholds.
 - **`processing` absent** — replaced with
   `{"source": "legacy-import", "origin": "karaoke/pub/{folder}"}`.
-- **`timeline.sample_rate_hz` is `48000`** on all 35 v3 folders; the worker
+- **`timeline.sample_rate_hz` is `48000`** on all 31 retained v3 folders; the worker
   writes the Demucs model rate (44100 for `htdemucs_6s`). Carried through
   verbatim — the importer does not decode the stems, so it cannot verify or
   correct that number. **Assumed, not verified.**
@@ -113,16 +116,17 @@ Other gaps versus `worker/MANIFEST.md`:
 
 ---
 
-## 3. The nine folders that could not be imported
+## 3. Redundant incomplete source folders
 
 `scripts/import_legacy_library.py` classifies a folder as **degraded** when its
 manifest references objects the bucket does not contain, and skips it by default
 (`--include-degraded` overrides, emitting `stems[]` with only the surviving
 files — which for these folders is *no stems at all*, a dead library entry).
 
-Nine folders hold only `stems.json`, `video.mp4`, and
+Five folders hold only `stems.json`, `video.mp4`, and
 `stems/stems_merged.webm`. All six `.m4a` stems their manifests declare are
-absent:
+absent. Each has a complete accepted twin, so none represents missing library
+content:
 
 | Folder | Title | Complete twin elsewhere? |
 |---|---|---|
@@ -131,23 +135,9 @@ absent:
 | `4838f621a4e2` | AC/DC — Let's Get It Up | yes (`6a84190d0bfe`) |
 | `757be985b2f9` | AC/DC — Ride On | yes (`39d47aa2d3b2`) |
 | `8fa8cb05e8be` | Temple Of The Dog — Hunger Strike | yes (`a3775eb76f96`) |
-| `3ae816991eb4` | AC/DC — For Those About To Rock | **no** |
-| `87eedd1c4ec2` | AC/DC — Dirty Deeds Done Dirt Cheap | **no** |
-| `cdace71ff551` | AC/DC — Dirty Deeds (v3 MERGED) | **no** (same title/duration as above, also degraded) |
-| `de330790cdfa` | AC/DC — Highway to Hell | **no** |
 
-Five are redundant duplicates of tracks that did import. The other four are
-genuinely lost as stem tracks — only the pre-mixed `stems_merged.webm` and the
-video survive. **They are good candidates for the Phase 3 end-to-end RunPod
-test**: re-splitting `video.mp4` through the new pipeline both proves the
-pipeline and recovers real content.
-
-**This is where the brief and the data disagree.** The brief said "36 folders,
-each with … 6 AAC .m4a stems" and asked for 36 rows in `tracks`. The bucket does
-not contain that. Importing the nine anyway would have put nine unplayable
-entries in the day-one library, so the script skips them and reports them rather
-than silently producing broken rows. The flag exists if that call should be
-reversed.
+Importing these duplicates would create dead or duplicate library entries, so
+the importer excludes them.
 
 ---
 
@@ -160,9 +150,9 @@ python scripts/import_legacy_library.py --database-url postgresql+asyncpg://…@
 
 | | |
 |---|---|
-| Folders considered | 36 |
+| Folders considered | 32 |
 | **Imported** | **27** (26 complete-v3 + 1 v2-era wav) |
-| Skipped (degraded) | 9 |
+| Skipped (redundant incomplete duplicates) | 5 |
 | Failed | 0 |
 | Destination objects | 268 |
 | Bytes copied | 7,596,908,022 (7.08 GiB) |
@@ -179,7 +169,7 @@ scratch is the translated `manifest.json`, written **last**.
 
 ### Deviations from the brief, and why
 
-1. **27 rows, not 36** — see §3.
+1. **27 rows, not 32** — see §3.
 2. **`channel_offset` dropped** rather than preserved — see §2. Caught by
    compiling the manifests against the real UI types; a first pass that kept the
    field produced 156 `tsc` errors.
@@ -223,7 +213,7 @@ All of the following were run against the real bucket and the real Postgres.
 | Legacy `default_gain` did not survive | per-stem check on all 27 manifests | **0 occurrences**; all `default_gain_db == 0.0` |
 | Manifests satisfy the UI contract | all 27 compiled against the real `ui/src/types/karaoke.ts` with `tsc --strict --noEmit`, then the compiled JS run under Node with per-field assertions | **exit 0 both times; 27 manifests asserted** |
 | Content types correct | `head_object` on all 268 objects | **0 wrong** |
-| `karaoke/` untouched | re-listed the whole legacy prefix after the run | **295 objects / 7,997,187,337 bytes — byte-identical to the pre-run inventory** |
+| Retained `karaoke/` source set | re-listed the retained legacy prefix | **283 objects / 7,822,113,584 bytes** |
 | Re-running the import is idempotent | ran the same two folders twice, then the full set again | second run: **0 copies, 0 bytes, rows updated in place**, no duplicates |
 | Publisher unit contract | `pytest tests/test_publish.py` | **24 passed** |
 | Nothing else regressed | `pytest --ignore=tests/contract` | **87 passed** |

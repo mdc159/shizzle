@@ -1,43 +1,51 @@
-# shizzle-server
+# Shizzle server
 
-FastAPI control plane for Shizzle: ingest endpoints, job/library API, and (from
-Phase 2) the durable Postgres-backed orchestrator.
+FastAPI control plane for authentication, library access, ingestion, durable job
+orchestration, publication, playback telemetry, and production health.
 
-Trunk salvaged from `k25-nextgen-rewrite/local-server` (see
-`../docs/provenance.md`). Tooling:
+## Current boundary
 
-```
+- Browser delivery and playback are complete for the accepted 27-track library.
+- The active server work is upstream ingestion: submit a URL or upload, dispatch
+  a cloud GPU separation job, reconcile completion, verify lossless stems, and
+  hand them to the finished delivery pipeline.
+
+The server controls work and grants media access. It does not relay the normal
+seven-stream playback path; signed media flows from CloudFront to the browser.
+
+## Main areas
+
+- `src/shizzle_server/db/` — SQLAlchemy models and repository layer for jobs,
+  events, tracks, active generations, playback sessions, and telemetry.
+- `src/shizzle_server/orchestrator/` — durable lease loop, retry scheduling,
+  idempotent stage handling, and restart recovery.
+- `src/shizzle_server/publish.py` — staged-object verification and immutable
+  generation publication with the manifest written last.
+- `src/shizzle_server/media_audit.py` and `delivery_profile.py` — executable
+  `shizzle-browser-v1` checks.
+- `alembic/` — production Postgres migrations.
+
+## Production behavior
+
+1. Persist an ingestion job.
+2. Acquire and validate a source in cloud infrastructure.
+3. Dispatch cloud GPU separation and persist its provider job id.
+4. Reconcile by callback and polling until a terminal result exists.
+5. Verify the six lossless stems.
+6. Run the finished delivery pipeline.
+7. Publish an immutable generation and activate its database pointer.
+
+Steps 2–5 are the active implementation work. Steps 6–7 and browser playback
+are established.
+
+## Validation
+
+```text
 uv run --directory server ruff check .
 uv run --directory server pytest -q
 uv run --directory server mypy .
 ```
 
-## Phase 2 layout
-
-- `src/shizzle_server/db/` — SQLAlchemy 2.x models (`jobs`, append-only
-  `job_events`, `tracks`, `orchestrator_heartbeats`) + typed repository layer
-  (the only place SQL happens).
-- `src/shizzle_server/orchestrator/` — durable lease loop
-  (`SELECT … FOR UPDATE SKIP LOCKED`, ~120 s leases with heartbeat renewal,
-  exponential backoff via `next_retry_at`, idempotent stage handlers).
-  Run standalone: `python -m shizzle_server.orchestrator`. The single-container
-  `local` GPU profile instead runs it embedded in the API process
-  (`SHIZZLE_EMBEDDED_ORCHESTRATOR=true`, SQLite fallback).
-- `alembic/` — schema authority for Postgres (`alembic upgrade head`;
-  the stack api container runs it on start). SQLite (local profile) uses
-  `create_all` and is a throwaway cache, not a migrated store.
-
-## Tests
-
-- Unit suite (SQLite, fast): `uv run --directory server pytest -q -m "not postgres"`
-- Contract/fault-injection suite (REAL Postgres, no mocked DB):
-
-```
-docker compose -p shizzle-test -f infra/compose.yml --profile test up -d postgres
-uv run --directory server pytest tests/contract -q
-```
-
-Covers: hard-kill mid-stage + restart resumes exactly once (effect counters),
-expired-lease reclaim by a second instance, concurrent duplicate completion,
-retry schedule honored, two live orchestrators with SKIP LOCKED, structured
-`YTDLP_BLOCKED` stub failure, schema constraints.
+The Postgres contract suite covers restart recovery, expired leases, duplicate
+completion, retry timing, concurrent orchestrators, structured failures, and
+schema constraints.

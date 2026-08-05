@@ -1,0 +1,29 @@
+{
+  "schema": "shizzle-library-controlled-rollout-v1",
+  "started_at": "2026-08-05T07:50:08.297888+00:00",
+  "updated_at": "2026-08-05T07:50:20.819993+00:00",
+  "status": "complete",
+  "snapshot": "/app/data/evidence/cloud-continuous-playback/library-snapshot.json",
+  "baseline_audit": "/app/data/evidence/cloud-continuous-playback/library-full-audit.json",
+  "track_count": 1,
+  "outcomes": [
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "title": "The Pot",
+      "source_generation": 2,
+      "generation": 3,
+      "phase": "complete",
+      "status": "activated",
+      "active_generation_before": 3,
+      "publish_report": "/app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-publish.json",
+      "publish_stdout": "{\"already-published\": 1}\nreport -> /app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-publish.json\n",
+      "candidate_snapshot": "/app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-snapshot.json",
+      "candidate_audit": "/app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-audit.json",
+      "audit_stdout": "snapshot: 1 tracks, 7 media objects -> /app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-snapshot.json\naudit: 1 passed, 0 failed -> /app/data/evidence/cloud-continuous-playback/controlled-rollout/f995371a-7d9b-5dbb-82d2-0000dc80aacf-generation-3-audit.json\n",
+      "activation": "already-active",
+      "active_generation_after": 3,
+      "completed_at": "2026-08-05T07:50:20.819369+00:00"
+    }
+  ],
+  "completed_at": "2026-08-05T07:50:20.819984+00:00"
+}

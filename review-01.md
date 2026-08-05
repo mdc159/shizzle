@@ -1,4 +1,12 @@
-Overall verdict: the direction is strong and appropriately scoped for a private application. I would approve it as an architectural draft, but not begin the main implementation until five issues are resolved. The largest risks are playback synchronization, signed-cookie delivery, pipeline ownership, durable job recovery, and the Demucs/null-test interaction.
+> Historical pre-implementation review. Its projector, device-matrix, and
+> local-prototype recommendations were superseded by the finished cloud-only,
+> capability-based browser architecture. This file is design history, not a
+> current plan or requirement.
+
+Overall verdict at the time: the direction was strong and appropriately scoped
+for a private application. The largest risks identified were playback
+synchronization, signed-cookie delivery, pipeline ownership, durable job
+recovery, and the Demucs/null-test interaction.
 
 ## Critical changes
 
@@ -119,7 +127,7 @@ I recommend:
 - Passcode rotation must revoke existing device tokens. Use hashed opaque tokens with expiration/revocation, or include an authentication-version field checked on every request.
 - QR credentials should be high-entropy, short-lived, session-scoped, and exchangeable for a WebSocket-only credential—not general library access.
 - Use immutable artifact generations such as `tracks/{track_id}/{generation}/...`; never overwrite CDN-cached media in place.
-- Add lifecycle rules for staging inputs, failed attempts, and abandoned multipart uploads. AWS specifically recommends `AbortIncompleteMultipartUpload` lifecycle handling. [AWS guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html).
+- Add lifecycle settings for staging inputs, failed attempts, and abandoned multipart uploads. AWS specifically recommends `AbortIncompleteMultipartUpload` lifecycle handling. [AWS guidance](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpu-abort-incomplete-mpu-lifecycle-config.html).
 - Refine “real over mocked” to “real at boundaries, deterministic in the core.” Keep live ffmpeg, browser, AWS, and RunPod smoke tests, but also use contract tests and fault injection for duplicate callbacks, restarts, partial uploads, timeouts, and out-of-order remote commands.
 - Preserve provenance despite the fresh history: record source repository, commit, copied path, intentional changes, and relevant tests in `docs/provenance.md`.
 
@@ -132,6 +140,6 @@ I recommend:
 5. Same-origin CloudFront distribution and authenticated full-song playback.
 6. Mix-bus hardening and the real-device acceptance matrix.
 7. Revisioned remote-control protocol and two-controller party test.
-8. Operations: backups, lifecycle rules, health checks, metrics, and cost measurement.
+8. Operations: backups, lifecycle settings, health checks, metrics, and cost measurement.
 
 With those changes, this becomes a very sensible architecture: a modular monolith for control, one disposable GPU worker, immutable object storage, a CDN, and a thin synchronized remote. The design philosophy is good; the main adjustment is to prove the hard media and browser assumptions before building the surrounding cloud machinery. No files were changed.

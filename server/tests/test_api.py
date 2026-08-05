@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -49,9 +50,7 @@ async def test_upload_creates_job_row(client):
 
 async def test_upload_rejects_non_video(client):
     c, _ = client
-    resp = await c.post(
-        "/api/upload", files={"file": ("notes.txt", b"hello", "text/plain")}
-    )
+    resp = await c.post("/api/upload", files={"file": ("notes.txt", b"hello", "text/plain")})
     assert resp.status_code == 400
 
 
@@ -147,3 +146,51 @@ async def test_health_reports_db_and_orchestrator(client):
     body = (await c.get("/api/health")).json()
     assert body["orchestratorAlive"] is True
     assert body["status"] == "ok"
+
+
+async def test_playback_telemetry_route_persists_direct_evidence(client):
+    from shizzle_server.db.repository import track_id_for_import
+
+    c, app = client
+    track_id = track_id_for_import("api-telemetry")
+    await app.state.track_repo.upsert_imported(
+        track_id,
+        title="Telemetry",
+        duration_seconds=30,
+        s3_prefix=f"tracks/{track_id}/2",
+        manifest_key=f"tracks/{track_id}/2/manifest.json",
+        generation=2,
+    )
+    session_id = uuid.uuid4()
+    payload = {
+        "sessionId": str(session_id),
+        "trackId": str(track_id),
+        "generation": 2,
+        "sequence": 1,
+        "event": "stem-clock-stalled",
+        "clientAtMs": 1234,
+        "appBuild": "index-test.js",
+        "browser": "test-browser",
+        "detail": {"stems": {"bass": {"paused": True}}, "output": {"rmsDbfs": -20}},
+    }
+    response = await c.post("/api/playback/telemetry", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True}
+    duplicate = await c.post("/api/playback/telemetry", json=payload)
+    assert duplicate.status_code == 200
+    assert duplicate.json() == {"accepted": False}
+    events = await app.state.playback_telemetry_repo.list_events(session_id)
+    assert len(events) == 1
+    assert events[0].event == "stem-clock-stalled"
+    assert events[0].detail["stems"]["bass"]["paused"] is True
+
+    incidents = await c.get("/api/playback/incidents?minutes=5")
+    assert incidents.status_code == 200
+    incident_body = incidents.json()
+    assert incident_body["total"] == 1
+    assert incident_body["incidents"][0]["trackId"] == str(track_id)
+    assert incident_body["incidents"][0]["generation"] == 2
+    assert incident_body["incidents"][0]["event"] == "stem-clock-stalled"
+
+    forbidden = {**payload, "sequence": 2, "detail": {"accessToken": "secret"}}
+    assert (await c.post("/api/playback/telemetry", json=forbidden)).status_code == 422

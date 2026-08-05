@@ -47,7 +47,7 @@ export const MixerDrawer: React.FC = () => {
         <SheetHeader className="mb-8">
           <div className="flex items-center justify-between">
             <SheetTitle className="text-zinc-100">Mixer</SheetTitle>
-            <Button variant="ghost" size="icon" onClick={handleReset} title="Reset all">
+            <Button aria-label="Reset mixer" variant="ghost" size="icon" onClick={handleReset} title="Reset all">
               <RotateCcw className="h-4 w-4" />
             </Button>
           </div>
@@ -72,6 +72,7 @@ export const MixerDrawer: React.FC = () => {
                     }`}
                     onClick={() => toggleStemSolo(stem)}
                     title={stemSolos[stem] ? 'Unsolo' : 'Solo'}
+                    aria-label={`${stem} ${stemSolos[stem] ? 'unsolo' : 'solo'}`}
                   >
                     S
                   </Button>
@@ -85,6 +86,7 @@ export const MixerDrawer: React.FC = () => {
                     }`}
                     onClick={() => toggleStemMute(stem)}
                     title={stemMutes[stem] ? 'Unmute' : 'Mute'}
+                    aria-label={`${stem} ${stemMutes[stem] ? 'unmute' : 'mute'}`}
                   >
                     M
                   </Button>
@@ -94,6 +96,7 @@ export const MixerDrawer: React.FC = () => {
                 </span>
               </div>
               <Slider
+                aria-label={`${stem} gain`}
                 value={[stemGains[stem]]}
                 min={-60}
                 max={12}

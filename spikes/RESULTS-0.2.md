@@ -1,7 +1,11 @@
 # Spike 0.2 results — CloudFront signed cookies over private S3 (OAC)
 
 Date: 2026-08-02 · Region: us-east-1 · Account: 826783599575 (user/agent)
-Goal: prove end-to-end that CloudFront signed cookies can gate streaming media
+> Troubleshooting experiment for authorization, CORS, and byte-range delivery.
+> It is not current completion work; start with
+> `../docs/playback-troubleshooting.md`.
+
+Goal at the time: prove end-to-end that CloudFront signed cookies can gate streaming media
 from a private S3 bucket with Range request support. **Outcome: proven, 5/5
 checks passed.**
 

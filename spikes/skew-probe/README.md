@@ -1,5 +1,10 @@
 # Skew probe (spike 0.1)
 
+> Troubleshooting experiment instructions. Do not run these device/local-server
+> steps as current Shizzle acceptance. Use the production cloud application and
+> the targeted procedure in `../../docs/playback-troubleshooting.md` when an
+> actual synchronization issue is observed.
+
 Instrumented six-stem playback probe. Plays a track's muted video plus six
 `<audio>` stems through one `AudioContext`, samples per-stem `currentTime`
 delta vs the video every 250 ms, and reports per-stem skew, mix-to-video

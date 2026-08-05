@@ -1,0 +1,346 @@
+{
+  "status": "failed",
+  "seed": 1511464998,
+  "mode": "natural",
+  "tracks": [
+    {
+      "track": {
+        "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+        "title": "Mother Love Bone - Stardog Champion",
+        "artist": "",
+        "slug": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+        "duration": 304.505,
+        "publicUrl": "/api/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5",
+        "status": "ready"
+      },
+      "mode": "natural",
+      "build": "/assets/index-DTgWEsX7.js",
+      "startedAt": "2026-08-05T15:34:18.378Z",
+      "manifest": {
+        "version": 3,
+        "title": "Mother Love Bone - Stardog Champion",
+        "artist": "",
+        "duration": 304.505,
+        "video": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/video.mp4?signed=redacted",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "30000/1001",
+          "duration": 304.505
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/vocals.m4a?signed=redacted",
+            "default_gain_db": 0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/drums.m4a?signed=redacted",
+            "default_gain_db": 0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/bass.m4a?signed=redacted",
+            "default_gain_db": 0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/guitar.m4a?signed=redacted",
+            "default_gain_db": 0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/piano.m4a?signed=redacted",
+            "default_gain_db": 0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/stems/shizzle.m4a?signed=redacted",
+            "default_gain_db": 0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 3442699 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/video.mp4",
+              "source_sha256": "f30103f2e4c6729a59fc9c0e72aadc3a9295e8a71278002844253523486fe691",
+              "sha256": "69d85fc0767e6ce501d2b49d424515f465e907477afbe6f2e7116838da52e1ca",
+              "bytes": 44796883
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/vocals.m4a",
+              "source_sha256": "4fe9f88dbd5d8ab958b7b6d69e64b65c563b6e6e765befd2869ad444ddbabf31",
+              "sha256": "4fe9f88dbd5d8ab958b7b6d69e64b65c563b6e6e765befd2869ad444ddbabf31",
+              "bytes": 7159320
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/drums.m4a",
+              "source_sha256": "9d95195e7295018fb59eb537045fc22105052c28fb952f3eaa486991c04c4e33",
+              "sha256": "9d95195e7295018fb59eb537045fc22105052c28fb952f3eaa486991c04c4e33",
+              "bytes": 7185922
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/bass.m4a",
+              "source_sha256": "460b0c6111a598e8dd94db0ff8ceb0ac7b57528e5834c9da57120112f82c1315",
+              "sha256": "460b0c6111a598e8dd94db0ff8ceb0ac7b57528e5834c9da57120112f82c1315",
+              "bytes": 7158449
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/guitar.m4a",
+              "source_sha256": "189bdfca1afc18442a16f00d803c4742ba7c19241937d4aeaefb5b09682d63d4",
+              "sha256": "189bdfca1afc18442a16f00d803c4742ba7c19241937d4aeaefb5b09682d63d4",
+              "bytes": 7199681
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/piano.m4a",
+              "source_sha256": "25a92e8055aa1f5fec1fdc051cb58c198b0046b432581d13b69ca81f16134ce1",
+              "sha256": "25a92e8055aa1f5fec1fdc051cb58c198b0046b432581d13b69ca81f16134ce1",
+              "bytes": 7192560
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/1/stems/other.m4a",
+              "source_sha256": "c2be941d1868ff41be254514b9b968d6e69e9a729b2d84848fba8511bd569969",
+              "sha256": "c2be941d1868ff41be254514b9b968d6e69e9a729b2d84848fba8511bd569969",
+              "bytes": 7017405
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/59767fdc8b07"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 304505,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "videoStaging": {
+        "sourceScheme": "blob",
+        "stagedBytes": 44796883,
+        "readyState": 4,
+        "duration": 304.466667,
+        "resource": {
+          "name": "https://d2488k8kjndpsy.cloudfront.net/tracks/234a7b1c-6313-53ca-8d02-b319083e25d5/2/video.mp4?signed=redacted",
+          "durationMs": 16232.399999976158,
+          "transferSize": 0,
+          "encodedBodySize": 0,
+          "decodedBodySize": 0,
+          "nextHopProtocol": "",
+          "responseStatus": 200
+        }
+      },
+      "status": "failed",
+      "error": "page.waitForFunction: Timeout 3000ms exceeded.",
+      "finalMetrics": {
+        "stems": {
+          "vocals": {
+            "skewMs": 16,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.551311,
+            "errorCode": null
+          },
+          "drums": {
+            "skewMs": 16,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.55126099999995,
+            "errorCode": null
+          },
+          "bass": {
+            "skewMs": -3,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.56992199999996,
+            "errorCode": null
+          },
+          "guitar": {
+            "skewMs": 16,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.55125799999996,
+            "errorCode": null
+          },
+          "piano": {
+            "skewMs": -3,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.56991899999997,
+            "errorCode": null
+          },
+          "shizzle": {
+            "skewMs": 16,
+            "readyState": 4,
+            "waitingEvents": 3,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 2,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 301.551227,
+            "errorCode": null
+          }
+        },
+        "nudgeTicks": 1,
+        "stallBailouts": 0,
+        "masterGainDb": 0,
+        "masterHeadroomDb": -3,
+        "limiter": {
+          "active": false,
+          "reductionDb": 0.0001342038594884798,
+          "peakReductionDb": 0.0001342038594884798
+        },
+        "desiredPlaying": true,
+        "health": {
+          "status": "starting",
+          "recoveryAttempts": 2,
+          "recoverySuccesses": 2,
+          "lastHealthyAtMs": 1785944380679
+        },
+        "output": {
+          "contextState": "running",
+          "rmsDbfs": -92.45207321328368,
+          "peakDbfs": -91.74022341055175,
+          "silentForMs": 2911.0999999940395
+        },
+        "video": {
+          "currentTime": 2.962588,
+          "paused": false,
+          "readyState": 4,
+          "networkState": 1,
+          "bufferedAheadSec": 301.504079,
+          "errorCode": null
+        },
+        "incidents": [
+          {
+            "sequence": 1,
+            "atMs": 1785944081567,
+            "code": "render-silence",
+            "detail": "Post-limiter PCM below -90 dBFS"
+          },
+          {
+            "sequence": 2,
+            "atMs": 1785944081569,
+            "code": "recovery-started",
+            "detail": "render-silence"
+          },
+          {
+            "sequence": 3,
+            "atMs": 1785944081572,
+            "code": "recovery-succeeded",
+            "detail": "render-silence"
+          },
+          {
+            "sequence": 4,
+            "atMs": 1785944381175,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 5,
+            "atMs": 1785944381187,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 6,
+            "atMs": 1785944381241,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          }
+        ]
+      },
+      "failedAt": "2026-08-05T15:39:44.202Z"
+    }
+  ]
+}

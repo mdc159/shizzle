@@ -1,53 +1,53 @@
-# infra/vps — production VPS bootstrap
+# Production VPS
 
-Target: Hostinger KVM 4, `srv1875370`, Ubuntu 24.04 LTS, 4 vCPU / 16 GB / 200 GB,
-IP `72.60.173.171`. Checked out early (2026-08-02) ahead of Phase 4 — see
-`spikes/RESULTS-vps.md` for the baseline, timings, and the punch list.
+Shizzle runs on a Hostinger KVM 4 VPS:
 
-Launch architecture (Mike's decision, 2026-08-02): **DNS -> VPS -> Caddy with
-automatic Let's Encrypt** — same shape as the existing cbass.space service
-farm. NOT CloudFront aliases/ACM. Route 53 holds `shizzle.systems A ->
-72.60.173.171` and `www CNAME -> shizzle.systems`.
+- Host: `72.60.173.171`
+- Production directory: `/opt/shizzle/prod`
+- Compose project: `shizzle`
+- Public application: `https://shizzle.systems`
+- Edge TLS and routing: Caddy
 
-## Files
+## Production services
 
-| file | purpose |
-|---|---|
-| `setup.sh` | Idempotent root bootstrap: apt upgrade, unattended-upgrades, UTC, fail2ban (sshd), Docker Engine + compose plugin from the official Docker repo, ufw (22/80/443), deploy user `shizzle`, `/opt/shizzle/` |
-| `probe/compose.yml` | Minimal probe stack: postgres:16-alpine (named volume, healthcheck, not published) + caddy:2 on 80/443 |
-| `probe/Caddyfile` | `:80` catch-all (IP probe) + `shizzle.systems, www.shizzle.systems` with automatic HTTPS, both answering `shizzle vps ok` |
-| `probe/.env.example` | Template for the probe's `POSTGRES_PASSWORD` |
+- Caddy
+- FastAPI
+- Durable orchestrator
+- Postgres
 
-## Bootstrap (from this repo, Windows or anywhere with ssh)
+The VPS is the control plane. Normal browser media is delivered directly from
+CloudFront rather than relayed through the VPS.
 
-```sh
-ssh root@72.60.173.171 'bash -s' < infra/vps/setup.sh
+## Deployment and health
+
+Use the production compose project name explicitly:
+
+```text
+cd /opt/shizzle/prod
+docker compose -p shizzle ps
+docker compose -p shizzle logs --tail 200 api orchestrator
 ```
 
-Re-running is safe — every step checks before it changes. After the first run,
-open a SECOND ssh session to confirm ufw didn't cut you off before trusting it.
+Verify the public root, authenticated API, database, orchestrator heartbeat,
+telemetry endpoint, and CloudFront media Range behavior after a deployment.
 
-## Probe stack
+## Current work
 
-```sh
-scp infra/vps/probe/compose.yml infra/vps/probe/Caddyfile root@72.60.173.171:/opt/shizzle/
-ssh root@72.60.173.171 'cd /opt/shizzle && { [ -f .env ] || echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > .env; }; chmod 600 .env; docker compose up -d'
-curl http://72.60.173.171/          # IP probe through ufw  -> shizzle vps ok
-curl -sI https://shizzle.systems    # TLS proof             -> HTTP/1.1 200, Server: Caddy
-```
+Playback delivery is complete. The active infrastructure work is connecting the
+orchestrator to dependable cloud source acquisition and cloud GPU separation.
 
-TLS: Caddy self-obtains and renews Let's Encrypt certs (TLS-ALPN-01 on :443).
-Certs/account live in the `caddy_data` volume — keep that volume across
-recreates or issuance starts over (and rate limits are real).
+## Bootstrap files
 
-## Ops notes
+`setup.sh` and `probe/` record the original host bootstrap and minimal service
+probe. They are retained for recovery and troubleshooting; they are not the
+current application stack.
 
-- **Root login stays enabled** until deploys migrate to the `shizzle` user
-  (has docker group + same key); then set `PermitRootLogin no` in
-  `/etc/ssh/sshd_config` and restart sshd (marked TODO in setup.sh).
-- **Docker published ports bypass ufw** (Docker writes its own iptables NAT
-  rules). The probe's postgres publishes nothing, so it is unreachable from
-  outside; keep that pattern in the real stack — only Caddy publishes 80/443.
-- The probe's `:80` catch-all suppresses Caddy's automatic HTTP->HTTPS
-  redirect for the domain (explicit :80 server wins). The real stack should
-  drop the catch-all so the standard redirect comes back.
+## Operational cautions
+
+- Preserve the Caddy data volume across recreates.
+- Keep Postgres private; only Caddy should publish public ports.
+- Docker port publishing bypasses host firewall filtering unless explicitly
+  constrained.
+- Migrate routine deployment away from root access when a tested replacement
+  path exists.
+- Current status and next actions are in `../../docs/HANDOFF.md`.

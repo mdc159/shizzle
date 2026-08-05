@@ -1,0 +1,774 @@
+{
+  "status": "complete",
+  "seed": 1511464998,
+  "mode": "stress",
+  "tracks": [
+    {
+      "track": {
+        "id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+        "title": "Temple Of The Dog - Hunger Strike",
+        "artist": "",
+        "slug": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+        "duration": 243.577,
+        "publicUrl": "/api/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b",
+        "status": "ready"
+      },
+      "mode": "stress",
+      "build": "/assets/index-CDmZpk31.js",
+      "startedAt": "2026-08-05T09:34:24.424Z",
+      "manifest": {
+        "version": 3,
+        "title": "Temple Of The Dog - Hunger Strike",
+        "artist": "",
+        "duration": 243.577,
+        "video": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "24000/1001",
+          "duration": 243.577
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/vocals.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/drums.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/bass.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/guitar.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/piano.m4a",
+            "default_gain_db": 0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "/cdn/tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/2/stems/shizzle.m4a",
+            "default_gain_db": 0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 3368570 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/video.mp4",
+              "source_sha256": "8da35177960ffe39e5068c6601b73d14e285e64e630bf2db559fc7c1056ada47",
+              "sha256": "db899008b1cc7ed6f7c792db63661fafe3d43941a6e74f756d1cdedff09d0ed6",
+              "bytes": 35334336
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/vocals.m4a",
+              "source_sha256": "f5a801fa64c35b1bb5a39014e155a91d788c05b6d6febfb5304e6fb4b0652275",
+              "sha256": "f5a801fa64c35b1bb5a39014e155a91d788c05b6d6febfb5304e6fb4b0652275",
+              "bytes": 5565556
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/drums.m4a",
+              "source_sha256": "3bc88213991479a0a99f66cf23d50e7a54258dd961e1c55bfc70b0acbbca37db",
+              "sha256": "3bc88213991479a0a99f66cf23d50e7a54258dd961e1c55bfc70b0acbbca37db",
+              "bytes": 5753013
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/bass.m4a",
+              "source_sha256": "ec942bc55a3782907fb2cf3576224172d5891fb800cc53dca9d794c3858d5967",
+              "sha256": "ec942bc55a3782907fb2cf3576224172d5891fb800cc53dca9d794c3858d5967",
+              "bytes": 5712859
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/guitar.m4a",
+              "source_sha256": "eb39dcf3aa6a3e26ddbed19bf1c692c979aa04aa0d76652ee945e4053fc3e98a",
+              "sha256": "eb39dcf3aa6a3e26ddbed19bf1c692c979aa04aa0d76652ee945e4053fc3e98a",
+              "bytes": 5867067
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/piano.m4a",
+              "source_sha256": "4a64d3410a32c4686b576a2e84c23a1e35d24fb08890ab4d631723a043d4f538",
+              "sha256": "4a64d3410a32c4686b576a2e84c23a1e35d24fb08890ab4d631723a043d4f538",
+              "bytes": 5757950
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/20d172a7-7d83-5b64-90c9-b6dacc91764b/1/stems/other.m4a",
+              "source_sha256": "b84895e85c415523bba4078dc580071a9d582567937298851f4c206d8d62830b",
+              "sha256": "b84895e85c415523bba4078dc580071a9d582567937298851f4c206d8d62830b",
+              "bytes": 5392541
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/a3775eb76f96"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 243577,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "seeks": {
+        "seed": 1511464998,
+        "count": 20,
+        "p50Ms": 1462,
+        "p95Ms": 2353,
+        "maxMs": 2353,
+        "maxInterStemSkewMs": 10,
+        "maxStemVideoOffsetMs": 21
+      },
+      "mixer": {
+        "output": {
+          "contextState": "running",
+          "rmsDbfs": -18.95662079220331,
+          "peakDbfs": -7.43351737770052,
+          "silentForMs": 0
+        },
+        "gains": {
+          "vocals": 0.9998396039009094,
+          "drums": 1,
+          "bass": 0.9998504519462585,
+          "guitar": 0.9998504519462585,
+          "piano": 0.9998504519462585,
+          "shizzle": 0.9998504519462585
+        }
+      },
+      "stoppedStem": {
+        "latencyMs": 436,
+        "incidents": [
+          {
+            "sequence": 70,
+            "atMs": 1785922501213,
+            "code": "stem-clock-stalled",
+            "detail": "bass: paused=true noProgressMs=0 readyState=4"
+          },
+          {
+            "sequence": 71,
+            "atMs": 1785922501215,
+            "code": "recovery-started",
+            "detail": "stem-clock-stalled"
+          },
+          {
+            "sequence": 72,
+            "atMs": 1785922501226,
+            "code": "recovery-succeeded",
+            "detail": "stem-clock-stalled"
+          }
+        ]
+      },
+      "status": "passed",
+      "finalMetrics": {
+        "stems": {
+          "vocals": {
+            "skewMs": -1,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.803776,
+            "errorCode": null
+          },
+          "drums": {
+            "skewMs": -1,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.80364999999999,
+            "errorCode": null
+          },
+          "bass": {
+            "skewMs": -1,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.80362699999999,
+            "errorCode": null
+          },
+          "guitar": {
+            "skewMs": -1,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.803629,
+            "errorCode": null
+          },
+          "piano": {
+            "skewMs": 0,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.803608,
+            "errorCode": null
+          },
+          "shizzle": {
+            "skewMs": 0,
+            "readyState": 4,
+            "waitingEvents": 68,
+            "stalledEvents": 0,
+            "playbackRate": 1,
+            "hardSeeks": 49,
+            "gainLinear": 1,
+            "paused": false,
+            "networkState": 1,
+            "bufferedAheadSec": 120.80359,
+            "errorCode": null
+          }
+        },
+        "nudgeTicks": 0,
+        "stallBailouts": 0,
+        "masterGainDb": 0,
+        "masterHeadroomDb": -3,
+        "limiter": {
+          "active": false,
+          "reductionDb": 0.0001342038594884798,
+          "peakReductionDb": 12.02333927154541
+        },
+        "desiredPlaying": true,
+        "health": {
+          "status": "healthy",
+          "recoveryAttempts": 24,
+          "recoverySuccesses": 24,
+          "lastHealthyAtMs": 1785922501480
+        },
+        "output": {
+          "contextState": "running",
+          "rmsDbfs": -15.092105515622796,
+          "peakDbfs": -5.107371467583615,
+          "silentForMs": 0
+        },
+        "video": {
+          "currentTime": 122.796883,
+          "paused": false,
+          "readyState": 4,
+          "networkState": 1,
+          "bufferedAheadSec": 3.9861170000000072,
+          "errorCode": null
+        },
+        "incidents": [
+          {
+            "sequence": 1,
+            "atMs": 1785922466755,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 2,
+            "atMs": 1785922468019,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 3,
+            "atMs": 1785922468027,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 4,
+            "atMs": 1785922468365,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 5,
+            "atMs": 1785922468879,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 6,
+            "atMs": 1785922468889,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 7,
+            "atMs": 1785922469316,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 8,
+            "atMs": 1785922470630,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 9,
+            "atMs": 1785922470640,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 10,
+            "atMs": 1785922470952,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 11,
+            "atMs": 1785922471456,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 12,
+            "atMs": 1785922471463,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 13,
+            "atMs": 1785922471792,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 14,
+            "atMs": 1785922472468,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 15,
+            "atMs": 1785922472479,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 16,
+            "atMs": 1785922472791,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 17,
+            "atMs": 1785922472818,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 18,
+            "atMs": 1785922473079,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 19,
+            "atMs": 1785922473400,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 20,
+            "atMs": 1785922474991,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 21,
+            "atMs": 1785922475006,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 22,
+            "atMs": 1785922475350,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 23,
+            "atMs": 1785922477038,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 24,
+            "atMs": 1785922477056,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 25,
+            "atMs": 1785922477367,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 26,
+            "atMs": 1785922478586,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 27,
+            "atMs": 1785922478595,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 28,
+            "atMs": 1785922478916,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 29,
+            "atMs": 1785922479992,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 30,
+            "atMs": 1785922480006,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 31,
+            "atMs": 1785922480341,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 32,
+            "atMs": 1785922481222,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 33,
+            "atMs": 1785922481232,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 34,
+            "atMs": 1785922481452,
+            "code": "video-buffering",
+            "detail": "readyState=2"
+          },
+          {
+            "sequence": 35,
+            "atMs": 1785922481484,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 36,
+            "atMs": 1785922481509,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 37,
+            "atMs": 1785922481767,
+            "code": "video-buffering",
+            "detail": "readyState=2"
+          },
+          {
+            "sequence": 38,
+            "atMs": 1785922481790,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 39,
+            "atMs": 1785922481803,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 40,
+            "atMs": 1785922481849,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 41,
+            "atMs": 1785922483875,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 42,
+            "atMs": 1785922483901,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 43,
+            "atMs": 1785922484230,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 44,
+            "atMs": 1785922485719,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 45,
+            "atMs": 1785922485728,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 46,
+            "atMs": 1785922486045,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 47,
+            "atMs": 1785922486892,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 48,
+            "atMs": 1785922486912,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 49,
+            "atMs": 1785922487035,
+            "code": "video-buffering",
+            "detail": "readyState=2"
+          },
+          {
+            "sequence": 50,
+            "atMs": 1785922487080,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 51,
+            "atMs": 1785922487092,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 52,
+            "atMs": 1785922487268,
+            "code": "video-buffering",
+            "detail": "readyState=2"
+          },
+          {
+            "sequence": 53,
+            "atMs": 1785922487292,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 54,
+            "atMs": 1785922487304,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 55,
+            "atMs": 1785922487622,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 56,
+            "atMs": 1785922488905,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 57,
+            "atMs": 1785922488914,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 58,
+            "atMs": 1785922489267,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 59,
+            "atMs": 1785922490373,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 60,
+            "atMs": 1785922490389,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 61,
+            "atMs": 1785922490705,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 62,
+            "atMs": 1785922491181,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 63,
+            "atMs": 1785922491203,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 64,
+            "atMs": 1785922491532,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 65,
+            "atMs": 1785922491808,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 66,
+            "atMs": 1785922491818,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 67,
+            "atMs": 1785922492130,
+            "code": "video-buffering",
+            "detail": "readyState=1"
+          },
+          {
+            "sequence": 68,
+            "atMs": 1785922492886,
+            "code": "recovery-started",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 69,
+            "atMs": 1785922492894,
+            "code": "recovery-succeeded",
+            "detail": "video-buffering"
+          },
+          {
+            "sequence": 70,
+            "atMs": 1785922501213,
+            "code": "stem-clock-stalled",
+            "detail": "bass: paused=true noProgressMs=0 readyState=4"
+          },
+          {
+            "sequence": 71,
+            "atMs": 1785922501215,
+            "code": "recovery-started",
+            "detail": "stem-clock-stalled"
+          },
+          {
+            "sequence": 72,
+            "atMs": 1785922501226,
+            "code": "recovery-succeeded",
+            "detail": "stem-clock-stalled"
+          }
+        ]
+      },
+      "completedAt": "2026-08-05T09:35:01.553Z"
+    }
+  ]
+}

@@ -1,0 +1,252 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T06:58:29.936083+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": false,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "title": "The Pot",
+      "source_generation": 2,
+      "generation": 3,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+      "title": "Pearl Jam - Black - Acústico - Unplugged - HD",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3881961 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "d24e81ba-28a0-520a-a766-0925f4e1e161",
+      "title": "Alice In Chains - Man in the Box (Official Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3123420 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "4bd3d013-4dc2-5438-9926-962bd99029c4",
+      "title": "Van Halen - You Really Got Me (Official Music Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "0244dc21-af79-5797-acfd-2dd94aa09392",
+      "title": "Temple of the Dog - War Pigs (Black Sabbath cover) – Live in San Francisco",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 4920525 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+      "title": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 4934155 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "297389b3-bac0-5ae6-a144-bf7a8c4b6718",
+      "title": "Stone Temple Pilots - Plush (Official Music Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+      "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 6648296 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "fc51be9b-c773-52b5-9b5c-4ebaa419b196",
+      "title": "Mr. Brownstone",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "ffee538e-8627-58f0-a02b-25cc60f7a29e",
+      "title": "Mother Love Bone - Star Dog Champion ( official video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3757132 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+      "title": "Temple Of The Dog - Hunger Strike",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3368570 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "0329507a-b933-5eb5-8088-b1cd6f8feb98",
+      "title": "Van Halen - Hot For Teacher (Official Music Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "06ce033c-2345-548b-866f-a0266348fe15",
+      "title": "Soundgarden - Spoonman",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3332511 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "4ed567d1-31ba-5ab7-994a-247fadff921b",
+      "title": "AC DC - Let's Get It Up (Official Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+      "title": "Sweet Child O' Mine",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d",
+      "title": "My Michelle",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+      "title": "Mother Love Bone - Stardog Champion",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 3442699 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "9c835433-050d-5342-a02b-e2791927db92",
+      "title": "AC DC - Shoot To Thrill (Iron Man 2 Version)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 6913607 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "427a17cb-50da-5e2b-9312-99c2ed4a28d0",
+      "title": "Skid Row - Monkey Business (Official Music Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 4776150 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "f5b84806-25e7-5bbd-bb13-fa894a88753a",
+      "title": "AC DC - Ride On (Stade De France, Paris, June 2001)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "99ec0110-1990-5d3c-8d69-e8ae76cad03d",
+      "title": "Soundgarden - Outshined",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 4430420 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "1edee1b7-0dff-5e20-922b-deb6c3ef4ce7",
+      "title": "AC DC - You Shook Me All Night Long (Official 4K Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 5389775 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "a54803e6-f334-5991-9112-f17ca7365a0f",
+      "title": "AC DC - Let There Be Rock (Official Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+      "title": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 5668248 exceeds 2500000",
+      "status": "planned"
+    },
+    {
+      "id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+      "title": "AC DC - Walk All Over You (Official Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "1f3b9397-ca05-526e-9901-2b73ab686062",
+      "title": "BLACK SABBATH -  Into The Void  (Live Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    },
+    {
+      "id": "52eb3b91-9906-5b8b-9100-1f9f4bdc0522",
+      "title": "Van Halen - (Oh) Pretty Woman (Official Music Video)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "copy",
+      "reason": "existing video passes compatibility profile and bitrate budget",
+      "status": "planned"
+    }
+  ]
+}

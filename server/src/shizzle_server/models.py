@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .db.models import Job, JobStage, Track
 
@@ -67,6 +69,94 @@ class AuthResponse(BaseModel):
 class MediaSessionResponse(BaseModel):
     expiresIn: int
     cloudfront: bool
+
+
+PlaybackEventName = Literal[
+    "session-started",
+    "playing",
+    "heartbeat",
+    "seek-started",
+    "seek-settled",
+    "pause",
+    "ended",
+    "replay",
+    "visibility-hidden",
+    "visibility-visible",
+    "play-rejected",
+    "stem-media-error",
+    "stem-clock-stalled",
+    "video-media-error",
+    "video-buffering",
+    "video-clock-stalled",
+    "audio-context-not-running",
+    "render-silence",
+    "recovery-started",
+    "recovery-succeeded",
+    "recovery-failed",
+    "fatal",
+    "session-ended",
+]
+
+
+class PlaybackTelemetryRequest(BaseModel):
+    sessionId: uuid.UUID
+    trackId: uuid.UUID
+    generation: int = Field(ge=1)
+    sequence: int = Field(ge=1)
+    event: PlaybackEventName
+    clientAtMs: int = Field(ge=0)
+    appBuild: str = Field(default="unknown", min_length=1, max_length=128)
+    browser: str = Field(default="unknown", min_length=1, max_length=256)
+    detail: dict[str, Any] | None = None
+
+    @field_validator("detail")
+    @classmethod
+    def telemetry_detail_is_bounded_and_contains_no_credentials(
+        cls, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        sensitive = {"authorization", "cookie", "password", "passcode", "token", "url"}
+
+        def walk(item: Any) -> None:
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    lowered = str(key).lower()
+                    if any(fragment in lowered for fragment in sensitive):
+                        raise ValueError(f"telemetry detail contains forbidden key {key!r}")
+                    walk(child)
+            elif isinstance(item, list):
+                for child in item:
+                    walk(child)
+            elif isinstance(item, str) and len(item) > 2048:
+                raise ValueError("telemetry detail string exceeds 2048 characters")
+
+        walk(value)
+        if len(json.dumps(value, separators=(",", ":"), ensure_ascii=False)) > 32_768:
+            raise ValueError("telemetry detail exceeds 32768 bytes")
+        return value
+
+
+class PlaybackTelemetryResponse(BaseModel):
+    accepted: bool
+
+
+class PlaybackIncidentInfo(BaseModel):
+    sessionId: uuid.UUID
+    trackId: uuid.UUID
+    trackTitle: str
+    generation: int
+    sequence: int
+    event: str
+    clientAtMs: int
+    receivedAt: datetime
+    detail: dict[str, Any] | None = None
+
+
+class PlaybackIncidentListResponse(BaseModel):
+    since: datetime
+    total: int
+    incidents: list[PlaybackIncidentInfo]
 
 
 class TrackInfo(BaseModel):

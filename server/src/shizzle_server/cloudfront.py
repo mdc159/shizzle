@@ -19,6 +19,7 @@ import json
 import time
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlencode
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -70,3 +71,25 @@ def signed_cookies(settings: Settings, expires_epoch: int | None = None) -> dict
         SIGNATURE_COOKIE: _cf_b64(signature),
         KEY_PAIR_COOKIE: settings.cloudfront_key_pair_id,
     }
+
+
+def signed_url(settings: Settings, key: str, expires_epoch: int | None = None) -> str:
+    """Return a file-scoped URL for direct private-CloudFront delivery."""
+    if expires_epoch is None:
+        expires_epoch = int(time.time()) + settings.media_ttl_seconds
+    normalized_key = key.lstrip("/")
+    if not normalized_key.startswith("tracks/"):
+        raise ValueError("CloudFront media key must be under tracks/")
+    resource = f"{settings.cloudfront_resource_base}/{normalized_key}"
+    policy = _build_policy(resource, expires_epoch)
+    signature = _load_key(settings.cloudfront_private_key_path).sign(
+        policy.encode("utf-8"), padding.PKCS1v15(), hashes.SHA1()
+    )
+    query = urlencode(
+        {
+            "Policy": _cf_b64(policy.encode("utf-8")),
+            "Signature": _cf_b64(signature),
+            "Key-Pair-Id": settings.cloudfront_key_pair_id,
+        }
+    )
+    return f"{resource}?{query}"

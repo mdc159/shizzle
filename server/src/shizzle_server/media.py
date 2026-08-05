@@ -1,11 +1,9 @@
-"""Cloud-media resolution: read a track's manifest from S3 and rewrite its
-media refs to same-origin CDN paths (design spec §3, implementation Phase 4).
+"""Resolve private-S3 manifests into authenticated browser-delivery URLs.
 
-The player never talks to S3 directly. It fetches the manifest here (behind the
-passcode gate), and the manifest's ``video`` / ``stems[].file`` come back as
-same-origin paths under ``media_cookie_path`` (/cdn). Caddy reverse-proxies
-those to CloudFront, which enforces the signed-cookie gate over the private
-bucket. Range requests work natively through CloudFront (spike 0.2).
+Production manifests use file-scoped, expiring CloudFront signed URLs so seven
+concurrent Range streams go directly to the edge instead of relaying through
+the VPS. CloudFront still fronts private S3 through OAC. Environments without
+CloudFront retain the same-origin ``/cdn`` fallback.
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ from typing import Any
 
 import boto3
 
+from . import cloudfront
 from .settings import Settings
 
 
@@ -44,15 +43,18 @@ def load_s3_manifest(settings: Settings, manifest_key: str) -> dict[str, Any]:
 
 
 def _media_url(settings: Settings, s3_prefix: str, file: str) -> str:
-    """Same-origin CDN path for one media file, e.g. /cdn/tracks/<id>/1/stems/vocals.m4a."""
+    """Direct signed edge URL in production; same-origin fallback otherwise."""
     rel = file.lstrip("/")
-    return f"{settings.media_cookie_path}/{s3_prefix}/{rel}"
+    key = f"{s3_prefix}/{rel}"
+    if settings.cloudfront_enabled:
+        return cloudfront.signed_url(settings, key)
+    return f"{settings.media_cookie_path}/{key}"
 
 
 def rewrite_cloud_manifest(
     settings: Settings, manifest: dict[str, Any], s3_prefix: str
 ) -> dict[str, Any]:
-    """Return a copy of the manifest with video + stem files as /cdn paths."""
+    """Return a copy with media files rewritten for authenticated delivery."""
     out = dict(manifest)
     if out.get("video"):
         out["video"] = _media_url(settings, s3_prefix, str(out["video"]))

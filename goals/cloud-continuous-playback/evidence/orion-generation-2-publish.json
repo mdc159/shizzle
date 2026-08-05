@@ -1,0 +1,399 @@
+{
+  "schema": "shizzle-library-migration-v1",
+  "generated_at": "2026-08-05T07:25:43.785196+00:00",
+  "profile": "shizzle-browser-v1",
+  "published": true,
+  "activated": false,
+  "outcomes": [
+    {
+      "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+      "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+      "source_generation": 1,
+      "generation": 2,
+      "video_action": "encode",
+      "reason": "total bitrate 6648296 exceeds 2500000",
+      "status": "published",
+      "video_command": [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        "/tmp/shizzle-migrate-22f0177d-d464-50bb-8c24-1eb92b101276-tswfl5ab/source-video.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "scale='min(1280,iw)':-2:force_original_aspect_ratio=decrease,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-maxrate",
+        "1200k",
+        "-bufsize",
+        "2400k",
+        "-profile:v",
+        "main",
+        "-level:v",
+        "3.1",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
+        "-movflags",
+        "+faststart",
+        "-video_track_timescale",
+        "90000",
+        "/tmp/shizzle-migrate-22f0177d-d464-50bb-8c24-1eb92b101276-tswfl5ab/video.mp4"
+      ],
+      "encoded_video_audit": {
+        "artifact": "video.mp4",
+        "bytes": 84151358,
+        "sha256": "23bd9ccdbbfbedc7f3cc013f4cb385eefae6b1b003fd91760ee0c49be84fcbc0",
+        "probe": {
+          "streams": [
+            {
+              "index": 0,
+              "codec_name": "h264",
+              "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+              "profile": "Main",
+              "codec_type": "video",
+              "codec_tag_string": "avc1",
+              "codec_tag": "0x31637661",
+              "width": 1280,
+              "height": 720,
+              "coded_width": 1280,
+              "coded_height": 720,
+              "closed_captions": 0,
+              "film_grain": 0,
+              "has_b_frames": 2,
+              "sample_aspect_ratio": "1:1",
+              "display_aspect_ratio": "16:9",
+              "pix_fmt": "yuv420p",
+              "level": 31,
+              "color_range": "tv",
+              "color_space": "bt709",
+              "color_transfer": "bt709",
+              "color_primaries": "bt709",
+              "chroma_location": "left",
+              "field_order": "progressive",
+              "refs": 1,
+              "is_avc": "true",
+              "nal_length_size": "4",
+              "id": "0x1",
+              "r_frame_rate": "30/1",
+              "avg_frame_rate": "521700/17389",
+              "time_base": "1/90000",
+              "start_pts": 0,
+              "start_time": "0.000000",
+              "duration_ts": 52167000,
+              "duration": "579.633333",
+              "bit_rate": "1158568",
+              "bits_per_raw_sample": "8",
+              "nb_frames": "17390",
+              "extradata_size": 44,
+              "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+              },
+              "tags": {
+                "language": "und",
+                "handler_name": "VideoHandler",
+                "vendor_id": "[0][0][0][0]",
+                "encoder": "Lavc61.19.101 libx264"
+              }
+            }
+          ],
+          "format": {
+            "filename": "/tmp/shizzle-migrate-22f0177d-d464-50bb-8c24-1eb92b101276-tswfl5ab/video.mp4",
+            "nb_streams": 1,
+            "nb_programs": 0,
+            "nb_stream_groups": 0,
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+            "format_long_name": "QuickTime / MOV",
+            "start_time": "0.000000",
+            "duration": "579.633333",
+            "size": "84151358",
+            "bit_rate": "1161442",
+            "probe_score": 100,
+            "tags": {
+              "major_brand": "isom",
+              "minor_version": "512",
+              "compatible_brands": "isomiso2avc1mp41",
+              "title": "Metallica: Orion (Philadelphia, PA - May 23, 2025)",
+              "date": "2025:06:11 02:00:25",
+              "encoder": "Lavf61.7.103"
+            }
+          }
+        },
+        "atoms": [
+          "ftyp",
+          "moov",
+          "free",
+          "mdat"
+        ],
+        "moov_offset": 32,
+        "mdat_offset": 208236,
+        "fast_start": true,
+        "keyframe_count": 290,
+        "max_keyframe_interval_seconds": 2.0,
+        "full_decode": "pass",
+        "decode_detail": null,
+        "issues": [],
+        "passed": true
+      },
+      "manifest": {
+        "version": 3,
+        "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+        "artist": "",
+        "duration": 579.663,
+        "video": "video.mp4",
+        "sourceUrl": "",
+        "videoId": "",
+        "video_meta": {
+          "codec": "h264",
+          "profile": "High",
+          "pix_fmt": "yuv420p",
+          "avg_frame_rate": "60000/1001",
+          "duration": 579.663
+        },
+        "stems": [
+          {
+            "id": "vocals",
+            "name": "Vocals",
+            "file": "stems/vocals.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "drums",
+            "name": "Drums",
+            "file": "stems/drums.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "bass",
+            "name": "Bass",
+            "file": "stems/bass.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "guitar",
+            "name": "Guitar",
+            "file": "stems/guitar.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "piano",
+            "name": "Piano",
+            "file": "stems/piano.m4a",
+            "default_gain_db": 0.0
+          },
+          {
+            "id": "shizzle",
+            "name": "Shizzle",
+            "file": "stems/shizzle.m4a",
+            "default_gain_db": 0.0
+          }
+        ],
+        "integrity": {
+          "source": "audited-library-migration",
+          "profile": "shizzle-browser-v1",
+          "audit_sha256": "afdc08d990f945f8ff2afd70fefc416d7f7cd87b23f32c62e16af7d3cfd87755",
+          "source_generation": 1,
+          "video_action": "encode",
+          "video_action_reason": "total bitrate 6648296 exceeds 2500000",
+          "objects": [
+            {
+              "file": "video.mp4",
+              "action": "encode",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/video.mp4",
+              "source_sha256": "152aa4b951b2652c741ec799f5b4ecf8fb549d9040fb6f359b53ac7665601812",
+              "sha256": "23bd9ccdbbfbedc7f3cc013f4cb385eefae6b1b003fd91760ee0c49be84fcbc0",
+              "bytes": 84151358
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/vocals.m4a",
+              "source_sha256": "df21b305615801013f7043cded4ed362dd4be0b21753bbf43e8a4870da1b8315",
+              "sha256": "df21b305615801013f7043cded4ed362dd4be0b21753bbf43e8a4870da1b8315",
+              "bytes": 13314485
+            },
+            {
+              "file": "stems/drums.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/drums.m4a",
+              "source_sha256": "1e6916929c6bc206fae818f316e702a478bc8dc9cc8ef1958aa42b37b6da68ad",
+              "sha256": "1e6916929c6bc206fae818f316e702a478bc8dc9cc8ef1958aa42b37b6da68ad",
+              "bytes": 13938224
+            },
+            {
+              "file": "stems/bass.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/bass.m4a",
+              "source_sha256": "7f1dc887ea4b26f2c440f8bbe93976d997606e4147d34724ba3d538d60ed31f1",
+              "sha256": "7f1dc887ea4b26f2c440f8bbe93976d997606e4147d34724ba3d538d60ed31f1",
+              "bytes": 13965865
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/guitar.m4a",
+              "source_sha256": "21a1b162fd66b9e43a9b7a638cc13d0c59930184ad530adebd259f95f8410146",
+              "sha256": "21a1b162fd66b9e43a9b7a638cc13d0c59930184ad530adebd259f95f8410146",
+              "bytes": 13696330
+            },
+            {
+              "file": "stems/piano.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/piano.m4a",
+              "source_sha256": "deeeaa06b53a1383b7e493e3c9633d9fe45b629b7b36bf9541e7b299d44c6bd4",
+              "sha256": "deeeaa06b53a1383b7e493e3c9633d9fe45b629b7b36bf9541e7b299d44c6bd4",
+              "bytes": 13815860
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "action": "copy",
+              "source_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/1/stems/other.m4a",
+              "source_sha256": "4fca71afea5e886c49d57d58d9843615fddaf117a5f363d036096a5530d79cf3",
+              "sha256": "4fca71afea5e886c49d57d58d9843615fddaf117a5f363d036096a5530d79cf3",
+              "bytes": 13252641
+            }
+          ],
+          "previous_integrity": {
+            "source": "legacy-import",
+            "gates": "not-run"
+          }
+        },
+        "processing": {
+          "source": "legacy-import",
+          "origin": "karaoke/pub/c14d436cf159"
+        },
+        "timeline": {
+          "start_ms": 0,
+          "duration_ms": 579663,
+          "sample_rate_hz": 48000
+        },
+        "multitrack": "multi-track.mp4",
+        "merged_audio": "stems/stems_merged.webm",
+        "track_id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+        "generation": 2,
+        "delivery_profile": "shizzle-browser-v1",
+        "delivery_profile_details": {
+          "id": "shizzle-browser-v1",
+          "version": 1,
+          "audio": {
+            "codec": "AAC-LC",
+            "container": "M4A",
+            "channels": 2,
+            "sample_rate_hz": 44100,
+            "target_bitrate_bps": 256000,
+            "minimum_bitrate_bps": 192000
+          },
+          "video": {
+            "codec": "H.264",
+            "profile": "Main",
+            "pixel_format": "yuv420p",
+            "frame_rate": 30.0,
+            "max_keyframe_interval_seconds": 2.05
+          }
+        }
+      },
+      "manifest_sha256": "c40ed74a5c068f87b4c77abe888b27421f33ef22c3a8cd32dcf8942bdbdca2bc",
+      "publication": {
+        "s3_prefix": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2",
+        "manifest_key": "tracks/22f0177d-d464-50bb-8c24-1eb92b101276/2/manifest.json",
+        "bytes_copied": 166139697,
+        "verification": {
+          "source": "publisher",
+          "policy": "auto",
+          "object_count": 8,
+          "total_bytes": 166139697,
+          "sha256_verified": 8,
+          "sha256_unverified": 0,
+          "objects": [
+            {
+              "file": "video.mp4",
+              "size_bytes": 84151358,
+              "sha256": "23bd9ccdbbfbedc7f3cc013f4cb385eefae6b1b003fd91760ee0c49be84fcbc0",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/vocals.m4a",
+              "size_bytes": 13314485,
+              "sha256": "df21b305615801013f7043cded4ed362dd4be0b21753bbf43e8a4870da1b8315",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/drums.m4a",
+              "size_bytes": 13938224,
+              "sha256": "1e6916929c6bc206fae818f316e702a478bc8dc9cc8ef1958aa42b37b6da68ad",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/bass.m4a",
+              "size_bytes": 13965865,
+              "sha256": "7f1dc887ea4b26f2c440f8bbe93976d997606e4147d34724ba3d538d60ed31f1",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/guitar.m4a",
+              "size_bytes": 13696330,
+              "sha256": "21a1b162fd66b9e43a9b7a638cc13d0c59930184ad530adebd259f95f8410146",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/piano.m4a",
+              "size_bytes": 13815860,
+              "sha256": "deeeaa06b53a1383b7e493e3c9633d9fe45b629b7b36bf9541e7b299d44c6bd4",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "stems/shizzle.m4a",
+              "size_bytes": 13252641,
+              "sha256": "4fca71afea5e886c49d57d58d9843615fddaf117a5f363d036096a5530d79cf3",
+              "sha256_source": "streamed",
+              "ok": true
+            },
+            {
+              "file": "manifest.json",
+              "size_bytes": 4934,
+              "sha256": "c40ed74a5c068f87b4c77abe888b27421f33ef22c3a8cd32dcf8942bdbdca2bc",
+              "sha256_source": "s3-checksum",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
