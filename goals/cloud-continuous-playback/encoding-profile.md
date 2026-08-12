@@ -12,14 +12,19 @@ This record separates three things that must not be conflated:
 
 Passing an FFmpeg probe is necessary, but it is not proof that a song sounds good or plays continuously in a real browser.
 
+The input to this finished delivery profile is the defined
+[`lossless-stem-v1`](../../docs/lossless-stem-handoff.md) package: six stereo,
+44.1 kHz IEEE float32 WAV stems with one shared timeline. RunPod produces that
+package. The VPS performs every delivery step described below.
+
 ## Decisions
 
 | Concern | Decision | Reason |
 |---|---|---|
-| Processing/archive stems | Preserve lossless float WAV or FLAC | Separation, reconstruction, gain analysis, and future re-encoding need lossless data. FLAC is preferred for retained storage when tool compatibility permits; WAV is acceptable as transient worker scratch. |
+| RunPod handoff stems | Six stereo 44.1 kHz IEEE float32 WAV files | This preserves the separator output without lossy encoding or integer quantization and gives the VPS one exact input format. |
 | Browser stems | M4A containing AAC-LC, stereo | This is the practical cross-browser delivery format for six simultaneous seekable streams. It is much smaller than WAV/FLAC and is supported by the target browsers. |
 | Sample rate | Use one rate for all stems in a track; `44.1 kHz` is the new-encode target; preserve passing aligned `48 kHz` AAC | The full audit found 156 aligned legacy stems at 48 kHz and six Pot stems at 44.1 kHz. Resampling passing lossy AAC would add loss without improving playback. Never mix rates within a track. |
-| New stem bitrate | `256 kb/s` target per stereo stem; `192 kb/s` hard floor | Six 256 kb/s streams are a reasonable quality/bandwidth tradeoff. Lower rates require a listening-backed profile revision. |
+| New stem bitrate | `256 kb/s` encoder target for every stereo stem | AAC output is content-dependent, so measured average bitrate may be lower on low-information stems. The encoder setting does not vary by song. |
 | Existing lossy stems | Preserve passing AAC bit-for-bit | Transcoding an existing 192-295 kb/s AAC file to 256 kb/s does not restore information; it adds generational loss. Re-encode only from a lossless source or when a file fails a delivery gate. |
 | Audio fast start | Require `moov` before `mdat` | The browser can begin metadata parsing and range-based playback without downloading the complete object. |
 | New/repaired video | Audio-less 720p MP4, H.264 Main Level 3.1, `yuv420p`, 30 fps, CRF 20, `1200k` max rate | This removes an unused competing audio track, bounds aggregate delivery bandwidth, and targets broad hardware decoding. CRF controls quality while max-rate bounds pathological sources. |
@@ -52,7 +57,7 @@ tracks/<track-uuid>/<generation>/
 
 The database stores the active integer generation. The manifest declares the common timeline, delivery-profile id/details, the six required roles, common default gain, source generation, per-object copy/derive action and reason, source/output hashes, byte counts, and the audit hash. Media objects are uploaded and verified first; `manifest.json` is published last; the database pointer changes only after the complete candidate passes. The authenticated API rewrites those relative paths to expiring, file-scoped CloudFront URLs. The six AAC elements issue Range requests directly to the edge. After stem readiness, the browser fetches the one bounded audio-less video directly from the edge and gives the video element a revocable Blob URL, eliminating network starvation from the master clock and making scrubbing deterministic. Query credentials are never copied into telemetry or durable browser evidence. The runtime and media path are entirely cloud-hosted.
 
-Lossless separation/processing material is upstream source material, not part of this seven-stream browser directory. Keeping FLAC or working WAV separate prevents a browser client from accidentally selecting a many-hundred-megabyte processing artifact and lets a future generation be re-derived without mutating the active delivery set.
+The `lossless-stem-v1` float32 WAV package is upstream source material, not part of this seven-stream browser directory. Keeping the processing package separate prevents a browser client from selecting multi-gigabyte lossless material and lets a future generation be re-derived without mutating the active delivery set.
 
 ## Full-library measurements that fixed the contract
 
@@ -60,7 +65,15 @@ The frozen 27-track audit downloaded, hashed, probed, keyframe-inspected, and co
 
 The 27 source videos comprised one H.264 Main and 26 H.264 High objects at 23.976, 24, 25, 29.97, 30, or 59.94 fps. All 189 objects fully decoded. Fourteen tracks exceeded the 2.5 Mb/s aggregate budget and therefore require bounded video re-derivation; 13 videos pass the compatibility/bandwidth gates and are copied bit-for-bit. These measurements changed the initial blanket-transcode proposal into a compatibility-preservation policy.
 
-The 139 `audio-bitrate-low` findings are warnings on existing variable-rate AAC, not evidence that up-transcoding will improve it. A nominal bitrate is an encoder input target, not proof of retained musical information. Existing AAC is accepted by codec, alignment, decode, fast-start, reconstruction/listening, and browser behavior; the 192 kb/s floor is enforced for newly derived delivery stems.
+The 139 `audio-bitrate-low` findings are warnings on existing variable-rate AAC, not evidence that up-transcoding will improve it. A nominal bitrate is an encoder input target, not proof of retained musical information. Existing AAC is accepted by codec, alignment, decode, fast-start, reconstruction/listening, and browser behavior. Every new lossless-derived stem uses the same 256 kb/s encoder target.
+
+Across the accepted library, the 162 AAC stems measure from 41,120 to 295,166
+b/s average, with a median of 187,970 b/s. Low-information stems can report an
+average below the encoder target. The complete seven-object tracks measure from
+1,472,888 to 2,331,333 b/s average, all below the fixed 2.5 Mb/s complete-track
+ceiling. The Pot measures 1,767,869 b/s. These are browser-delivery
+measurements; the RunPod interface remains lossless float32 WAV with no bitrate
+choice.
 
 The decoded six-stem analysis initially passed 26 of 27 active tracks before limiter action. Into The Void measured `-0.8 dBTP`, 0.2 dB above the `-1.0 dBTP` ceiling, without sample clipping. The tool recommended `-0.2 dB` additional common gain. Generation 3 applies exactly `-0.2 dB` to all six `default_gain_db` values, records the measurement and reason in manifest integrity, and remeasures at `-1.0 dBTP`. The final library result is 27 of 27 pre-limiter passes with zero clipped, NaN, or infinite samples. This is the evidence-driven use of common gain; no stem was normalized independently.
 
@@ -109,7 +122,8 @@ Every generation must pass all of these checks before activation:
 - All stems are AAC-LC in M4A, stereo, one common 44.1 or 48 kHz rate, zero-based within 20 ms, fast-start, mutually aligned within 5 ms, and no more than 80 ms beyond the declared timeline as a common encoder tail.
 - A newly derived video is audio-less H.264 Main 3.1, `yuv420p`, 720p/30 fps, zero-based, fast-start, and has no keyframe gap greater than 2.05 seconds. A copied compatible video may retain Main/High and an enumerated source frame rate while meeting the same decode, timeline, fast-start, GOP, and bandwidth gates.
 - Decoded video ends within 50 ms of the declared duration. A common AAC tail up to 80 ms is accepted only when all six stem durations remain within 5 ms of one another.
-- Normal delivery should remain at or below 2.5 Mb/s total average bitrate. An exception requires a constrained-network browser pass and a recorded reason.
+- Every new complete delivery generation must remain at or below 2.5 Mb/s total
+  average bitrate.
 - Lossless reconstruction is measured before lossy encoding. Decoded-AAC reconstruction is measured separately. Neither result is misrepresented as a measurement of source-separation bleed.
 - A single common gain is applied, if needed, and recorded as `default_gain_db`; relative stem gains are unchanged.
 - Default playback has no sample clipping, a true-peak ceiling no higher than `-1 dBTP`, and no sustained heavy limiter action. The initial acceptance target is steady-state limiter reduction p99 at or below 1 dB and maximum at or below 3 dB, excluding labeled seek/start/fault recovery windows.

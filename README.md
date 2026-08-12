@@ -17,38 +17,56 @@ The browser-delivery and playback portion is finished.
 The remaining work is upstream ingestion: reliably turning a new URL or upload
 into clean lossless six-stem material using cloud infrastructure.
 
-## Process flow
+## Defined RunPod-to-VPS interface
 
-```text
-URL or upload
-    ↓
-Cloud source acquisition
-    ↓
-Cloud GPU separation
-    ↓
-Six clean lossless stems
-    ↓
-FINISHED DELIVERY PIPELINE
-  encode → verify → publish immutable generation
-    ↓
-27-track library + future accepted tracks
-    ↓
-CloudFront → any conforming browser
+```mermaid
+flowchart LR
+    A["URL or upload"] --> B["Cloud acquisition"]
+    B --> C["RunPod GPU separation"]
+    C --> D["Six stereo 44.1 kHz<br/>float32 WAV stems"]
+    D --> H{{"lossless-stem-v1<br/>DEFINED INTERFACE"}}
+    H --> E["Finished VPS delivery pipeline"]
+    E --> F["Immutable library generation"]
+    F --> G["CloudFront browser playback"]
+
+    subgraph ACTIVE["Active upstream work"]
+        A
+        B
+        C
+        D
+    end
+
+    subgraph FINISHED["Finished downstream system"]
+        E
+        F
+        G
+    end
 ```
 
-The boundary is simple: once six clean, aligned lossless stems reach the
-finished delivery pipeline, Shizzle has a repeatable path to browser-ready
-media. A new track runs through that path once and is admitted if its routine
-checks pass. The existing 27-track baseline is not reprocessed or subjected to
-another development campaign. This portion is revisited only if an actual
-problem appears.
+The interface is defined. RunPod must hand the VPS exactly six aligned,
+lossless float32 WAV stems—vocals, drums, bass, guitar, piano, and other—plus
+`handoff.json`. Every stem is stereo, 44.1 kHz, begins at sample zero, and has
+the same sample count. There is no lossy encoding and no per-stem
+normalization.
+
+RunPod ends at that interface. The VPS begins there and performs one fixed
+transformation: common attenuation when required, six AAC-LC/M4A browser
+derivatives targeting 256 kb/s each, browser-safe video, artifact verification,
+immutable publication, CloudFront delivery, and playback. The complete
+generation must remain at or below 2.5 Mb/s average.
+
+The accepted 27-track library proves complete-track delivery from 1.473 to
+2.331 Mb/s average. The exact interface, measured bitrate envelope, file
+layout, manifest, and responsibility split are in
+[`docs/lossless-stem-handoff.md`](docs/lossless-stem-handoff.md).
 
 ## Finished delivery profile
 
-- Upstream preservation: FLAC where practical; float WAV may be used as
-  temporary worker scratch.
-- Browser stems: six stereo M4A/AAC-LC files; new encodes target 44.1 kHz at
-  256 kb/s and never fall below 192 kb/s.
+- RunPod handoff: six stereo 44.1 kHz float32 WAV stems using
+  `lossless-stem-v1`.
+- Browser stems: six stereo M4A/AAC-LC files; every new lossless-derived encode
+  uses a 44.1 kHz, 256 kb/s encoder target. Actual AAC average bitrate varies
+  with the audio.
 - Video: audio-less H.264/MP4, browser-safe profile, zero-based timestamps,
   short closed GOP, and fast-start metadata.
 - Publication: immutable `tracks/<track-id>/<generation>/` objects, media first,
@@ -63,10 +81,10 @@ The exact frozen profile and measurements are in
 
 ## What to work on next
 
-1. Make the RunPod worker dependable on cloud GPU hardware.
-2. Connect URL/upload ingestion to that worker.
-3. Produce and verify six clean lossless stems.
-4. Hand those stems to the finished delivery pipeline.
+1. Change the RunPod worker to emit `lossless-stem-v1` exactly.
+2. Make that worker dependable on cloud GPU hardware.
+3. Connect URL/upload ingestion to the worker.
+4. Hand the package to the finished VPS delivery pipeline.
 
 Do not redesign or revalidate the finished playback portion while doing this.
 
@@ -88,6 +106,7 @@ docs/      Current design, handoff, provenance, and incident notes
 | Document | Purpose |
 |---|---|
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | Current live state and next upstream work |
+| [`docs/lossless-stem-handoff.md`](docs/lossless-stem-handoff.md) | Exact RunPod output and VPS input interface |
 | [`docs/superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md`](docs/superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md) | Current architecture and simple workflow |
 | [`specs/shizzle-cloud-karaoke-implementation.html`](specs/shizzle-cloud-karaoke-implementation.html) | One-page visual implementation flow |
 | [`goals/cloud-continuous-playback/encoding-profile.md`](goals/cloud-continuous-playback/encoding-profile.md) | Finished browser-delivery protocol |

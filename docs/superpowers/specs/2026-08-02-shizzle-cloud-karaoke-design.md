@@ -12,43 +12,39 @@ play and remix those stems in real time.
 The runtime is 100% cloud-hosted and exposes one standards-based browser media
 path.
 
-## 2. The whole workflow
+## 2. The whole workflow and defined interface
 
-```text
-URL or upload
-    ↓
-Cloud source acquisition                         ACTIVE WORK
-    ↓
-Cloud GPU separation into six lossless stems     ACTIVE WORK
-    ↓
-Clean, aligned lossless stems
-    ↓
-Encode and package shizzle-browser-v1            FINISHED
-    ↓
-Audit candidate and publish immutable generation FINISHED
-    ↓
-Activate one database pointer                    FINISHED
-    ↓
-CloudFront delivery and browser playback         FINISHED
+```mermaid
+flowchart LR
+    S["URL or upload"] --> A["Cloud acquisition"]
+    A --> G["RunPod GPU separation"]
+    G --> L["Six stereo 44.1 kHz<br/>float32 WAV stems"]
+    L --> H{{"lossless-stem-v1<br/>DEFINED INTERFACE"}}
+    H --> P["Finished VPS delivery transformation"]
+    P --> O["Immutable generation"]
+    O --> C["CloudFront"]
+    C --> B["Browser player"]
 ```
 
-This boundary is intentional. Once clean lossless stems exist, the downstream
-delivery path is established and repeatable. New tracks use it once. The current
-27-track library is the accepted baseline and is not reprocessed or put through
-another development campaign unless a real production defect appears.
+`lossless-stem-v1` is both the required RunPod output and the VPS input. It is
+exactly six aligned float32 WAV stems plus `handoff.json`. RunPod stops there.
+The VPS starts there and applies the already-finished delivery transformation
+without a song-specific alternate path.
+
+The exact file layout and manifest are defined in
+[`docs/lossless-stem-handoff.md`](../../lossless-stem-handoff.md).
 
 ## 3. System architecture
 
 ```mermaid
-flowchart LR
-    S["URL or upload"] --> A["VPS ingestion and orchestration"]
-    A --> G["Cloud GPU separation"]
-    G --> L["Six lossless stems"]
-    L --> P["Finished delivery pipeline"]
-    P --> O["Private S3 immutable generation"]
-    O --> C["CloudFront signed delivery"]
+flowchart TB
+    V["VPS orchestration"] --> R["RunPod separation job"]
+    R --> H{{"lossless-stem-v1"}}
+    H --> V
+    V --> S["Private S3 immutable generation"]
+    S --> C["CloudFront signed delivery"]
     C --> B["Conforming browser player"]
-    A <--> D["Postgres job and library state"]
+    V <--> D["Postgres job and library state"]
 ```
 
 - **VPS:** FastAPI control plane, authentication, Postgres, job orchestration,
@@ -71,11 +67,10 @@ Both supported entry paths converge on one cloud object:
 1. A URL is acquired by a cloud-hosted downloader, or a user uploads a source.
 2. The source is validated for size, duration, container, video, and audio.
 3. The orchestrator submits an idempotent separation job to the cloud GPU.
-4. The worker extracts audio and produces six aligned lossless stems: vocals,
-   drums, bass, guitar, piano, and shizzle/other.
-5. Integrity checks verify that the stems are complete, aligned, finite, and
-   reconstruct the source within the declared separation tolerance.
-6. Passing lossless stems cross into the finished delivery pipeline.
+4. The worker extracts audio and produces `lossless-stem-v1`: vocals, drums,
+   bass, guitar, piano, and other as aligned 44.1 kHz stereo float32 WAV.
+5. The worker uploads those six files and writes `handoff.json` last.
+6. The VPS receives that exact package and runs the fixed delivery pipeline.
 
 This is the next deliverable. The current RunPod endpoint must be made reliably
 available, then proven with a small golden source that reaches `COMPLETED` and
@@ -83,7 +78,7 @@ produces verified cloud outputs. That work does not reopen browser delivery.
 
 ## 5. Finished delivery pipeline
 
-Given six clean aligned lossless stems and source video, the fixed pipeline:
+Given `lossless-stem-v1` and the cloud source video, the fixed pipeline:
 
 1. Encodes the six browser stems to the versioned `shizzle-browser-v1` profile.
 2. Copies an already-compatible audio-less video or derives the bounded H.264
@@ -118,10 +113,13 @@ device, display, or browser-vendor-specific path.
 
 ## 7. Finished media profile
 
-- Preserve lossless upstream stems as FLAC where practical; float WAV is allowed
-  as temporary worker scratch.
+- RunPod handoff: exactly six stereo 44.1 kHz IEEE float32 WAV stems with one
+  start sample and one sample count.
 - New browser stems: stereo M4A/AAC-LC, one common sample rate per track,
-  normally 44.1 kHz at 256 kb/s and never below 192 kb/s.
+  using a 44.1 kHz, 256 kb/s encoder target for every new lossless-derived
+  encode. Actual AAC average bitrate varies with the audio.
+- Complete browser generation: no more than 2.5 Mb/s average. The accepted
+  27-track range is 1.473–2.331 Mb/s.
 - Preserve already-passing aligned AAC rather than performing lossy
   up-transcoding.
 - Apply only one common measured gain across all stems; never independently
@@ -159,14 +157,15 @@ targeted troubleshooting procedures but are not open requirements.
 
 ## 10. Next implementation sequence
 
-1. Bake the `htdemucs_6s` model weights into the worker image.
-2. Re-enable a bounded RunPod worker pool and verify a golden job reaches
-   `COMPLETED` with real S3 outputs.
-3. Connect the production orchestrator to submit, poll, reconcile, and receive
+1. Change the worker to emit `lossless-stem-v1` and stop at that interface.
+2. Bake the `htdemucs_6s` model weights into the worker image.
+3. Re-enable a bounded RunPod worker pool and verify a golden job reaches
+   `COMPLETED` with the exact package in S3.
+4. Connect the production orchestrator to submit, poll, reconcile, and receive
    completion callbacks.
-4. Make URL acquisition cloud-reliable; retain direct upload as a first-class
+5. Make URL acquisition cloud-reliable; retain direct upload as a first-class
    source path.
-5. Pass the resulting lossless stems into the finished delivery pipeline.
+6. Pass the resulting package into the finished VPS delivery pipeline.
 
 Optional interfaces such as remote controls may be built independently. They
 do not alter or gate ingestion, delivery, or playback architecture.
@@ -176,6 +175,8 @@ do not alter or gate ingestion, delivery, or playback architecture.
 - [`README.md`](../../../README.md): simple current workflow and project status.
 - [`docs/HANDOFF.md`](../../HANDOFF.md): live operational state and immediate
   upstream work.
+- [`docs/lossless-stem-handoff.md`](../../lossless-stem-handoff.md): exact
+  RunPod output and VPS input interface.
 - [`encoding-profile.md`](../../../goals/cloud-continuous-playback/encoding-profile.md):
   finished delivery contract.
 - [`evidence.md`](../../../goals/cloud-continuous-playback/evidence.md): retained

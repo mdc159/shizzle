@@ -6,9 +6,14 @@ orchestration, publication, playback telemetry, and production health.
 ## Current boundary
 
 - Browser delivery and playback are complete for the accepted 27-track library.
-- The active server work is upstream ingestion: submit a URL or upload, dispatch
-  a cloud GPU separation job, reconcile completion, verify lossless stems, and
-  hand them to the finished delivery pipeline.
+- RunPod hands the VPS the exact `lossless-stem-v1` package: six stereo,
+  44.1 kHz IEEE float32 WAV stems with identical timelines plus `handoff.json`.
+- The active server work is upstream ingestion: submit a URL or upload,
+  dispatch a cloud GPU separation job, reconcile completion, receive that
+  package, and pass it to the finished delivery pipeline.
+
+The complete interface is
+[`../docs/lossless-stem-handoff.md`](../docs/lossless-stem-handoff.md).
 
 The server controls work and grants media access. It does not relay the normal
 seven-stream playback path; signed media flows from CloudFront to the browser.
@@ -31,7 +36,7 @@ seven-stream playback path; signed media flows from CloudFront to the browser.
 2. Acquire and validate a source in cloud infrastructure.
 3. Dispatch cloud GPU separation and persist its provider job id.
 4. Reconcile by callback and polling until a terminal result exists.
-5. Verify the six lossless stems.
+5. Receive the complete `lossless-stem-v1` package.
 6. Run the finished delivery pipeline.
 7. Publish an immutable generation and activate its database pointer.
 

@@ -16,7 +16,7 @@ the 100% cloud-hosted Shizzle application.
   piano, and shizzle.
 - Media is private in S3 and delivered through signed CloudFront URLs.
 - Six AAC stems stream by Range request; one bounded audio-less video is staged
-  as the authoritative browser clock.
+  as the browser master clock.
 - The player supports transport, randomized seeking, live mixing, recovery,
   natural end, and replay.
 - Direct browser instrumentation observes media clocks, buffers, decoder state,
@@ -28,10 +28,13 @@ the 100% cloud-hosted Shizzle application.
 
 ## Delivery decision
 
-- Preserve lossless stems as FLAC where practical; float WAV is temporary
-  worker scratch only.
-- New browser stems are stereo M4A/AAC-LC at one common sample rate, targeting
-  44.1 kHz and 256 kb/s and never below 192 kb/s.
+- The RunPod input boundary is `lossless-stem-v1`: six stereo 44.1 kHz IEEE
+  float32 WAV stems with one start sample and one sample count.
+- Every new lossless-derived browser stem uses stereo M4A/AAC-LC at 44.1 kHz
+  with a 256 kb/s encoder target. Actual AAC average bitrate varies with the
+  audio.
+- Every new complete browser generation must remain at or below 2.5 Mb/s
+  average.
 - Passing aligned AAC is preserved rather than lossily up-transcoded.
 - All six stems receive only one common measured gain adjustment.
 - New or repaired video is audio-less H.264/MP4 with browser-safe profile,
@@ -44,9 +47,8 @@ The complete commands, measurements, tolerances, and rationale are retained in
 
 ## Forward use
 
-Every future track that reaches this point with clean lossless stems uses the
-same finished pipeline once. If its routine checks pass, it joins the library.
-If they fail, that candidate remains outside the library.
+Every future `lossless-stem-v1` package uses the same finished pipeline once.
+There is no track-specific alternate path downstream of that interface.
 
 The accepted 27-track baseline is finished work. It is not scheduled for
 another development or revalidation campaign. A real future production issue
@@ -55,5 +57,5 @@ may be diagnosed and fixed when it occurs.
 ## Next project boundary
 
 The active work is upstream: cloud source acquisition and dependable cloud GPU
-separation that produces the clean lossless stems consumed by this completed
-pipeline.
+separation that produces the exact `lossless-stem-v1` package consumed by this
+completed pipeline.

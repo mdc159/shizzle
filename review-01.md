@@ -2,6 +2,12 @@
 > local-prototype recommendations were superseded by the finished cloud-only,
 > capability-based browser architecture. This file is design history, not a
 > current plan or requirement.
+>
+> Its recommendation to put AAC and video derivation on RunPod is also
+> superseded. The defined current interface is `lossless-stem-v1`: RunPod hands
+> six aligned float32 WAV stems to the VPS, and the finished VPS delivery
+> pipeline owns all browser derivatives. See
+> [`docs/lossless-stem-handoff.md`](docs/lossless-stem-handoff.md).
 
 Overall verdict at the time: the direction was strong and appropriately scoped
 for a private application. The largest risks identified were playback

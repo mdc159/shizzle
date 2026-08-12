@@ -36,5 +36,7 @@ Current project status and next work are in `../README.md` and
 
 The 27-track playback library and `shizzle-browser-v1` delivery path are
 finished. The active work is URL/upload acquisition and dependable cloud GPU
-separation into six clean lossless stems. Experiments in this directory are
-consulted only when diagnosing a matching issue.
+separation into the exact `lossless-stem-v1` package defined in
+[`../docs/lossless-stem-handoff.md`](../docs/lossless-stem-handoff.md).
+Experiments in this directory are consulted only when diagnosing a matching
+issue.

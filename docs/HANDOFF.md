@@ -5,14 +5,22 @@ Repository: `X:\GitHub\shizzle`
 
 ## Read this first
 
-Shizzle has two clear portions:
+The RunPod-to-VPS interface is defined:
 
-```text
-URL/upload → cloud acquisition → cloud GPU → six lossless stems   ACTIVE
-six lossless stems → encode → verify → publish → browser playback COMPLETE
+```mermaid
+flowchart LR
+    A["Cloud source"] --> B["RunPod separation"]
+    B --> C["Six 44.1 kHz stereo<br/>float32 WAV stems"]
+    C --> H{{"lossless-stem-v1<br/>DEFINED INTERFACE"}}
+    H --> D["Finished VPS delivery pipeline"]
+    D --> E["Published browser track"]
 ```
 
-Do not reopen or redesign the completed portion while implementing ingestion.
+RunPod produces exactly the package in
+[`lossless-stem-handoff.md`](lossless-stem-handoff.md). RunPod owns separation
+through the six lossless float32 WAV files. The VPS owns everything after that
+interface: the fixed delivery transformation, publication, CloudFront, and
+browser playback.
 
 ## Finished production state
 
@@ -57,8 +65,13 @@ path and URL acquisition from the VPS is blocked by provider bot controls.
 The next deliverable is:
 
 > A URL or upload is acquired entirely in cloud infrastructure, processed by a
-> cloud GPU into six verified lossless stems, and handed to the unchanged
-> finished delivery pipeline.
+> cloud GPU into the exact `lossless-stem-v1` package, and handed to the
+> unchanged finished VPS delivery pipeline.
+
+The package contains `vocals.wav`, `drums.wav`, `bass.wav`, `guitar.wav`,
+`piano.wav`, and `other.wav`, plus `handoff.json`. Every stem is stereo,
+44.1 kHz, IEEE float32 PCM, begins at sample zero, and has the same sample
+count. There is no lossy audio and no per-stem normalization in this interface.
 
 ## RunPod state
 
@@ -76,17 +89,20 @@ The next deliverable is:
 
 ## Next actions
 
-1. Add the `htdemucs_6s` weight download to the worker image build.
-2. Publish a new image through the `mdc159/shizzle-worker` GitHub Actions
+1. Change the worker output to match `lossless-stem-v1`; remove AAC encoding,
+   video derivation, and delivery-manifest ownership from the RunPod side.
+2. Add the `htdemucs_6s` weight download to the worker image build.
+3. Publish a new image through the `mdc159/shizzle-worker` GitHub Actions
    workflow.
-3. Point the RunPod template to the new immutable tag.
-4. Re-enable a small bounded worker pool.
-5. Submit the golden fixture and require `COMPLETED` plus verified S3 outputs.
-6. If it fails, collect the actual cloud worker logs before changing code.
-7. Connect the production orchestrator's dispatch, callback, polling,
+4. Point the RunPod template to the new immutable tag.
+5. Re-enable a small bounded worker pool.
+6. Submit the golden fixture and require `COMPLETED` plus the exact lossless
+   package in cloud storage.
+7. If it fails, collect the actual cloud worker logs before changing code.
+8. Connect the production orchestrator's dispatch, callback, polling,
    reconciliation, retry, and publication path.
-8. Make URL acquisition cloud-reliable; keep upload as a first-class entry.
-9. Feed passing lossless stems into the finished `shizzle-browser-v1` pipeline.
+9. Make URL acquisition cloud-reliable; keep upload as a first-class entry.
+10. Feed `lossless-stem-v1` into the finished `shizzle-browser-v1` pipeline.
 
 ## Clean-library state
 
@@ -108,13 +124,12 @@ The next deliverable is:
   variable may select another stack.
 - Publish worker images through the dedicated GitHub Actions workflow.
 - Browser automation is a headless cloud test consumer only.
-- The worktree contains extensive uncommitted implementation and evidence
-  changes. Preserve unrelated work and do not commit without Mike's explicit
-  instruction.
 
-## Authoritative documents
+## Primary documents
 
 - [`../README.md`](../README.md) — simple project flow and current status.
+- [`lossless-stem-handoff.md`](lossless-stem-handoff.md) — exact RunPod output
+  and VPS input interface.
 - [`superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md`](superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md)
   — current architecture.
 - [`../goals/cloud-continuous-playback/encoding-profile.md`](../goals/cloud-continuous-playback/encoding-profile.md)

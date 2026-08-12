@@ -65,9 +65,9 @@
   <section class="flow" aria-label="Shizzle process flow">
     <div class="step next"><div class="status">NEXT</div><div><strong>URL or upload</strong><br>Acquire and validate the source entirely in cloud infrastructure.</div></div>
     <div class="arrow">↓</div>
-    <div class="step next"><div class="status">NEXT</div><div><strong>Cloud GPU separation</strong><br>Produce six clean aligned lossless stems.</div></div>
+    <div class="step next"><div class="status">NEXT</div><div><strong>RunPod GPU separation</strong><br>Produce six stereo 44.1 kHz IEEE float32 WAV stems.</div></div>
     <div class="arrow">↓</div>
-    <div class="boundary">Finished boundary: six clean lossless stems</div>
+    <div class="boundary">DEFINED INTERFACE: lossless-stem-v1</div>
     <div class="arrow">↓</div>
     <div class="step done"><div class="status">DONE</div><div><strong>Encode and verify</strong><br>Create <code>shizzle-browser-v1</code> stems and video, then run the fixed artifact checks.</div></div>
     <div class="arrow">↓</div>
@@ -79,28 +79,30 @@
   <h2>What is finished</h2>
   <div class="cards">
     <article class="card"><strong>27 accepted tracks</strong><p>Every active generation passes the frozen delivery profile.</p></article>
+    <article class="card"><strong>Measured delivery envelope</strong><p>Complete tracks run from 1.473 to 2.331 Mb/s average, below the fixed 2.5 Mb/s ceiling.</p></article>
     <article class="card"><strong>Cloud delivery</strong><p>Private S3, signed CloudFront URLs, Range-streamed stems, and one bounded video Blob.</p></article>
     <article class="card"><strong>Reliable player</strong><p>Transport, random seeking, six-stem mixing, fault recovery, natural end, and replay.</p></article>
     <article class="card"><strong>Direct observability</strong><p>Clocks, buffers, decoder state, Web Audio state, rendered PCM, limiter state, and telemetry.</p></article>
   </div>
 
   <h2>How future tracks work</h2>
-  <p>Once a new source produces six clean lossless stems, it enters the existing delivery pipeline. It runs the routine checks once and joins the library if it passes. The current 27-track baseline is not reprocessed or put through another development campaign. Only an actual observed issue reopens affected work.</p>
+  <p>RunPod hands the VPS exactly <code>lossless-stem-v1</code>: vocals, drums, bass, guitar, piano, and other as aligned float32 WAV, plus <code>handoff.json</code>. RunPod stops there. The VPS applies the same finished transformation to every package with no song-specific alternate path.</p>
 
   <h2>Next implementation</h2>
   <ol>
+    <li>Change the worker to emit <code>lossless-stem-v1</code> and stop at the defined interface.</li>
     <li>Bake <code>htdemucs_6s</code> weights into the worker image.</li>
     <li>Re-enable bounded RunPod capacity.</li>
-    <li>Prove one golden source reaches <code>COMPLETED</code> with verified S3 outputs.</li>
+    <li>Prove one golden source reaches <code>COMPLETED</code> with the exact six-WAV package in S3.</li>
     <li>Connect production ingestion and reconciliation to the cloud worker.</li>
     <li>Make URL acquisition cloud-reliable while retaining direct upload.</li>
-    <li>Hand passing lossless stems to the finished pipeline unchanged.</li>
+    <li>Hand <code>lossless-stem-v1</code> to the finished pipeline unchanged.</li>
   </ol>
 
   <h2>Architecture boundary</h2>
   <p>All services, processing, storage, publication, media delivery, and monitoring are cloud-hosted. Browsers consume one standards-based media contract.</p>
 
-  <p><a href="../README.md">README</a> · <a href="../docs/HANDOFF.md">Current handoff</a> · <a href="../goals/cloud-continuous-playback/encoding-profile.md">Finished delivery profile</a> · <a href="../docs/playback-troubleshooting.md">Playback troubleshooting</a></p>
+  <p><a href="../README.md">README</a> · <a href="../docs/HANDOFF.md">Current handoff</a> · <a href="../docs/lossless-stem-handoff.md">Lossless-stem interface</a> · <a href="../goals/cloud-continuous-playback/encoding-profile.md">Finished delivery profile</a> · <a href="../docs/playback-troubleshooting.md">Playback troubleshooting</a></p>
 </main>
 </body>
 </html>

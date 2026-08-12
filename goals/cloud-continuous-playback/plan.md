@@ -11,19 +11,19 @@ No additional playback campaign is planned.
 
 ## Simple workflow
 
-```text
-URL or upload
-    ↓
-Acquire source in the cloud                 NEXT WORK
-    ↓
-Separate six clean lossless stems           NEXT WORK
-    ↓
-Run finished delivery pipeline              COMPLETE
-    ↓
-Publish accepted track to the library       COMPLETE
-    ↓
-Play and remix from a conforming browser    COMPLETE
+```mermaid
+flowchart LR
+    A["URL or upload"] --> B["Cloud acquisition"]
+    B --> C["RunPod separation"]
+    C --> H{{"lossless-stem-v1<br/>six float32 WAV stems"}}
+    H --> D["Finished VPS delivery pipeline"]
+    D --> E["Published track"]
+    E --> F["Browser playback"]
 ```
+
+The RunPod output and VPS input are the same defined interface. Its exact file
+layout and audio properties are recorded in
+[`../../docs/lossless-stem-handoff.md`](../../docs/lossless-stem-handoff.md).
 
 ## Finished portion
 
@@ -79,10 +79,10 @@ then.
 
 - Extract source audio without clipping or unintended gain changes.
 - Separate vocals, drums, bass, guitar, piano, and shizzle/other.
-- Preserve aligned lossless outputs in cloud storage.
-- Verify duration, finiteness, sample alignment, reconstruction, and role
-  completeness.
-- Pass only clean candidates into the finished delivery pipeline.
+- Emit the exact `lossless-stem-v1` package in cloud storage: six stereo,
+  44.1 kHz IEEE float32 WAV files with one start sample and one sample count.
+- Write per-file byte counts and SHA-256 values into `handoff.json`.
+- Hand that package to the finished VPS delivery pipeline.
 
 ### 4. Make URL acquisition cloud-reliable
 
