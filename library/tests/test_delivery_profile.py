@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from shizzle_server.delivery_profile import (
+from shizzle_server.publish.delivery_profile import (
     CANONICAL_STEM_IDS,
     PROFILE_ID,
     canonical_stem_id,

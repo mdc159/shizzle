@@ -1,6 +1,6 @@
 """CloudFront signed cookies for private-S3 media delivery (design spec §3/§7).
 
-Lifted from the proven spike (``spikes/signed-cookie-proof/prove.py``, spike
+Lifted from the proven spike (``evidence/spikes/signed-cookie-proof/prove.py``, spike
 0.2 — 5/5 checks: 403 no-cookie / 200 signed / 206 Range / 403 expired). The
 signing is purely local (no AWS calls at request time): a custom policy over a
 resource glob, RSA-SHA1 PKCS#1 v1.5, base64 with CloudFront's URL-safe
@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
-from .settings import Settings
+from ..settings import Settings
 
 POLICY_COOKIE = "CloudFront-Policy"
 SIGNATURE_COOKIE = "CloudFront-Signature"

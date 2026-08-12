@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from .db.models import Job, JobStage, Track
+from ..db.models import Job, JobStage, Track
 
 # Backwards-compat alias: Phase 1 tests/clients imported JobStatusEnum.
 JobStatusEnum = JobStage

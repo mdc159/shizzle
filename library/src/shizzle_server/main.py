@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.routes import router
 from .db import create_engine, create_session_factory, init_db
 from .db.repository import (
     HeartbeatRepository,
@@ -17,8 +18,7 @@ from .db.repository import (
     PlaybackTelemetryRepository,
     TrackRepository,
 )
-from .processing import check_dependencies
-from .routes import router
+from .orchestrator.processing import check_dependencies
 from .settings import Settings, get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

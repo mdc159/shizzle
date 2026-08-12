@@ -31,7 +31,7 @@ sys.path.insert(0, str(SERVER_SRC))
 
 from shizzle_server.db import create_engine, create_session_factory  # noqa: E402
 from shizzle_server.db.repository import TrackRepository  # noqa: E402
-from shizzle_server.delivery_profile import (  # noqa: E402
+from shizzle_server.publish.delivery_profile import (  # noqa: E402
     CANONICAL_STEM_IDS,
     MAX_TOTAL_AVERAGE_BITRATE,
     PROFILE_ID,
@@ -41,7 +41,7 @@ from shizzle_server.delivery_profile import (  # noqa: E402
     evaluate_manifest,
     has_errors,
 )
-from shizzle_server.media_audit import (  # noqa: E402
+from shizzle_server.publish.media_audit import (  # noqa: E402
     MediaAuditError,
     audit_audio_file,
     audit_video_file,

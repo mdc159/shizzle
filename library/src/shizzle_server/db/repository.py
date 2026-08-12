@@ -499,7 +499,7 @@ class TrackRepository:
     ) -> tuple[Track, bool]:
         """Insert or refresh a track row that has no job behind it.
 
-        Used by the library importer (`scripts/import_legacy_library.py`),
+        Used by the library importer (`ops/import_legacy_library.py`),
         which publishes objects to S3 itself and then records the row. Jobs go
         through `JobRepository.publish_track` instead — that one also owns the
         publishing -> ready transition, which does not apply here.

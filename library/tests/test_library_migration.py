@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from shizzle_server.delivery_profile import CANONICAL_STEM_IDS, PROFILE_ID
-from shizzle_server.library_migration import (
+from shizzle_server.publish.delivery_profile import CANONICAL_STEM_IDS, PROFILE_ID
+from shizzle_server.publish.library_migration import (
     build_migrated_manifest,
     decide_migration,
     video_encode_command,

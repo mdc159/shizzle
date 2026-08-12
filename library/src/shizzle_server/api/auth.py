@@ -23,7 +23,7 @@ from hashlib import sha256
 
 from fastapi import HTTPException, Request
 
-from .settings import Settings
+from ..settings import Settings
 
 TOKEN_COOKIE = "shizzle_token"
 

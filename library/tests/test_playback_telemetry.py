@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from shizzle_server.models import PlaybackTelemetryRequest
-from shizzle_server.routes import _TelemetryRateLimiter
+from shizzle_server.api.models import PlaybackTelemetryRequest
+from shizzle_server.api.routes import _TelemetryRateLimiter
 
 
 async def _track(track_repo):
@@ -120,7 +120,7 @@ def test_telemetry_payload_rejects_credentials_and_unbounded_detail():
 
 def test_telemetry_rate_limiter_bounds_and_reopens_window(monkeypatch):
     clock = iter([0.0, 0.1, 0.2, 10.1])
-    monkeypatch.setattr("shizzle_server.routes.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("shizzle_server.api.routes.time.monotonic", lambda: next(clock))
     limiter = _TelemetryRateLimiter(limit=2, window_seconds=10)
     session_id = uuid.uuid4()
 

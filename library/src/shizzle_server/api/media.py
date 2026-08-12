@@ -15,8 +15,8 @@ from typing import Any
 
 import boto3
 
+from ..settings import Settings
 from . import cloudfront
-from .settings import Settings
 
 
 @lru_cache(maxsize=1)

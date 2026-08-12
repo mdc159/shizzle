@@ -1,6 +1,6 @@
 """Async database engine/session plumbing.
 
-Schema authority is Alembic (server/alembic) for Postgres. For the SQLite
+Schema authority is Alembic (library/alembic) for Postgres. For the SQLite
 fallback (single-container `local` profile) `init_db` creates tables directly —
 SQLite there is a throwaway per-machine cache, not a migrated production store.
 """

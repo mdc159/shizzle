@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from shizzle_server.audio_quality import build_six_stem_mix_filter, parse_mix_quality
+from shizzle_server.publish.audio_quality import build_six_stem_mix_filter, parse_mix_quality
 
 
 def test_filter_preserves_per_stem_gain_and_applies_one_master_headroom():

@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from shizzle_server.media_audit import MediaAuditError, inspect_mp4_atoms, max_keyframe_interval
+from shizzle_server.publish.media_audit import (
+    MediaAuditError,
+    inspect_mp4_atoms,
+    max_keyframe_interval,
+)
 
 
 def _atom(kind: bytes, body: bytes) -> bytes:

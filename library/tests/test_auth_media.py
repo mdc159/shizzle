@@ -10,8 +10,8 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from shizzle_server import cloudfront, media
-from shizzle_server.auth import (
+from shizzle_server.api import cloudfront, media
+from shizzle_server.api.auth import (
     check_passcode,
     create_device_token,
     verify_device_token,

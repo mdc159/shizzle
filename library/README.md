@@ -13,7 +13,7 @@ orchestration, publication, playback telemetry, and production health.
   package, and pass it to the finished delivery pipeline.
 
 The complete interface is
-[`../docs/lossless-stem-handoff.md`](../docs/lossless-stem-handoff.md).
+[`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md).
 
 The server controls work and grants media access. It does not relay the normal
 seven-stream playback path; signed media flows from CloudFront to the browser.
@@ -46,9 +46,9 @@ are established.
 ## Validation
 
 ```text
-uv run --directory server ruff check .
-uv run --directory server pytest -q
-uv run --directory server mypy .
+uv run --directory library ruff check .
+uv run --directory library pytest -q
+uv run --directory library mypy .
 ```
 
 The Postgres contract suite covers restart recovery, expired leases, duplicate

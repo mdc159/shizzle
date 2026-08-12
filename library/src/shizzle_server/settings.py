@@ -64,7 +64,7 @@ class Settings(BaseSettings):
 
     # --- AWS / S3 media ------------------------------------------------------
     # The imported legacy library lives in `karaoke-pimpshizzle` under
-    # `tracks/{id}/{generation}/…` (see scripts/import_legacy_library.py). The
+    # `tracks/{id}/{generation}/…` (see ops/import_legacy_library.py). The
     # media-manifest route reads manifest.json from here.
     aws_region: str = "us-east-1"
     # Machine gotcha: a global AWS_ENDPOINT_URL points this PC at Cloudflare R2.

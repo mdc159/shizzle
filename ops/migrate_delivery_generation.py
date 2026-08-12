@@ -25,13 +25,13 @@ sys.path.insert(0, str(SERVER_SRC))
 
 from shizzle_server.db import create_engine, create_session_factory  # noqa: E402
 from shizzle_server.db.repository import TrackRepository  # noqa: E402
-from shizzle_server.delivery_profile import PROFILE_ID  # noqa: E402
-from shizzle_server.library_migration import (  # noqa: E402
+from shizzle_server.publish.delivery_profile import PROFILE_ID  # noqa: E402
+from shizzle_server.publish.library_migration import (  # noqa: E402
     build_migrated_manifest,
     decide_migration,
     video_encode_command,
 )
-from shizzle_server.media_audit import audit_video_file, sha256_file  # noqa: E402
+from shizzle_server.publish.media_audit import audit_video_file, sha256_file  # noqa: E402
 from shizzle_server.publish import (  # noqa: E402
     ChecksumPolicy,
     Publisher,

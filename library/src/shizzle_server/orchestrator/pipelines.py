@@ -51,7 +51,7 @@ class LocalPipeline:
     REQUIRED = ("video.mp4", "stems.json")
 
     async def split(self, job_dir: Path, source_path: Path, title: str) -> dict[str, float]:
-        from .. import processing
+        from . import processing
 
         if (job_dir / self.MANIFEST).exists():
             return {}  # already done before a crash — idempotent no-op

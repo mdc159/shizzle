@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from shizzle_server.processing import STEM_ID_MAP, STEM_ORDER, write_manifest
+from shizzle_server.orchestrator.processing import STEM_ID_MAP, STEM_ORDER, write_manifest
 
 
 def _write(tmp_path: Path, with_m4a: bool = False) -> dict[str, Any]:

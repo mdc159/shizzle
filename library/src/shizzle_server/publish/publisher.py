@@ -6,7 +6,7 @@ finished and staged its output.
 
 Contract
 --------
-The worker (``worker/handler.py``) uploads its output under
+The worker (``stemsplit/handler.py``) uploads its output under
 
     tracks/{track_id}/{generation}/staging/
         video.mp4
@@ -15,7 +15,7 @@ The worker (``worker/handler.py``) uploads its output under
         manifest.json
 
 and reports every object back in its result payload as ``uploads[]`` records
-of ``{file, key, sha256, size_bytes}`` (see ``worker/s3_ops.upload_outputs``).
+of ``{file, key, sha256, size_bytes}`` (see ``stemsplit/s3_ops.upload_outputs``).
 
 The publisher then, in this exact order:
 
@@ -43,7 +43,7 @@ publishing stage converges on the same row).
 
 Note on checksum provenance
 ---------------------------
-``worker/s3_ops.upload_file`` calls ``s3.upload_file`` without
+``stemsplit/s3_ops.upload_file`` calls ``s3.upload_file`` without
 ``ChecksumAlgorithm="SHA256"``, so AWS does not store a SHA256 for staged
 objects and :data:`ChecksumPolicy.AUTO` falls back to streaming them back to
 the VPS to hash. That is correct but costs egress. Adding
@@ -67,11 +67,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from .db.repository import JobRepository
-from .errors import ErrorCode, StageError
+from ..db.repository import JobRepository
+from ..errors import ErrorCode, StageError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from .db.models import Job, Track
+    from ..db.models import Job, Track
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +231,7 @@ class StagedObject:
 
     @classmethod
     def from_upload_record(cls, record: dict[str, Any]) -> StagedObject:
-        """Build from a ``worker/s3_ops.upload_file`` record."""
+        """Build from a ``stemsplit/s3_ops.upload_file`` record."""
         rel = record.get("file") or record.get("key", "")
         return cls(
             file=str(rel).lstrip("/"),
@@ -654,7 +654,7 @@ async def publish_job(
     Raises :class:`StageError` so the orchestrator loop's normal error handling
     applies.
     """
-    from .db.repository import track_id_for_job
+    from ..db.repository import track_id_for_job
 
     track_id = track_id_for_job(job.id)
     reported = StagedObject.from_result_payload(worker_result)
