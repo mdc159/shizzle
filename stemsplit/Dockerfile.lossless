@@ -1,0 +1,67 @@
+# Shizzle lossless-stem worker — RunPod serverless container
+#
+# Emits exactly the lossless-stem-v1 package (six float32 WAVs + handoff.json
+# last). No AAC, no video, no delivery manifest — those are VPS-side.
+#
+# Self-contained by requirement: htdemucs_6s weights are baked at build time;
+# a separation must complete with no network egress except object storage.
+# Layer ordering follows the known-good recipe: CUDA base -> system deps ->
+# torch cu121 (largest, cached early) -> demucs/audio -> weights -> handler
+# deps -> code (most volatile, last).
+#
+# Build:       docker build -f stemsplit/Dockerfile.lossless -t shizzle-lossless-worker stemsplit/
+# Local run:   docker run --rm --gpus all \
+#                -v <source-dir>:/in:ro -v <out-dir>:/out \
+#                shizzle-lossless-worker \
+#                python3 lossless_handler.py --local "/in/<file>.mp4" /out
+# Offline proof (air-gapped separation must still work):
+#              docker run --rm --gpus all --network none ... (same as above)
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    ffmpeg \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+WORKDIR /app
+
+# PyTorch + CUDA 12.1 (large layer, cached early)
+RUN pip3 install --upgrade pip \
+    && pip3 install --index-url https://download.pytorch.org/whl/cu121 \
+    torch torchaudio
+
+# Demucs and audio deps
+RUN pip3 install \
+    demucs \
+    soundfile \
+    numpy'<2'
+
+# Bake the htdemucs_6s weights into the image. After this layer the model
+# loads with zero network access — the leading historical RunPod failure
+# (cold workers dying on multi-GB first-run downloads) cannot occur.
+RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s')"
+# Prove the bake: loading again with the HF Hub forced offline must succeed.
+RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s'); print('WEIGHTS-BAKED-OFFLINE-OK')"
+
+# Handler deps
+RUN pip3 install runpod boto3 requests
+
+# Code last (most volatile layer)
+COPY lossless_worker.py lossless_handler.py s3_ops.py ./
+
+# No Docker HEALTHCHECK — RunPod's own probe fights it on a ~15 GB image
+# (verified 2026-08-03: workers got cycled during torch+demucs warmup).
+
+CMD ["python3", "lossless_handler.py"]
