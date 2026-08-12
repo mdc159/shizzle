@@ -123,7 +123,7 @@ class JobRepository:
                 JobEvent(
                     job_id=job.id,
                     event="created",
-                    detail={"source_type": source_type.value, "source_ref": source_ref},
+                    detail={"source_type": source_type.value},
                 )
             )
         return job
@@ -246,7 +246,13 @@ class JobRepository:
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.dispatched)
-            if job.status != JobStage.dispatched or job.lease_owner != worker_id:
+            lease_expires_at = _aware(job.lease_expires_at)
+            if (
+                job.status != JobStage.dispatched
+                or job.lease_owner != worker_id
+                or lease_expires_at is None
+                or lease_expires_at <= now
+            ):
                 raise InvalidTransition(job_id, job.status, JobStage.dispatched)
             job.runpod_job_id = runpod_job_id
             job.worker_phase = "dispatched"

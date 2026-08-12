@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { getJobEvents, getJobs } from '@/lib/api';
 import { useStore } from '@/stores/useStore';
@@ -12,7 +12,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 
-export const BASELINE_S_PER_MIN = 40 / 5.75;
+const BASELINE_S = 40; // Dashboard v0 placeholder until job duration is exposed.
 const POLL_MS = 5000;
 const STAGES: JobStatus['status'][] = [
   'pending',
@@ -47,6 +47,7 @@ export const PipelineDrawer: React.FC = () => {
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const eventRequest = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -71,16 +72,20 @@ export const PipelineDrawer: React.FC = () => {
   }, [isOpen, refresh]);
 
   const showEvents = async (job: JobStatus) => {
+    const request = ++eventRequest.current;
     setSelectedJob(job);
     setEvents([]);
     setEventsError(null);
     setEventsLoading(true);
     try {
-      setEvents(await getJobEvents(job.jobId));
+      const nextEvents = await getJobEvents(job.jobId);
+      if (request === eventRequest.current) setEvents(nextEvents);
     } catch (err) {
-      setEventsError(err instanceof Error ? err.message : 'Failed to load events');
+      if (request === eventRequest.current) {
+        setEventsError(err instanceof Error ? err.message : 'Failed to load events');
+      }
     } finally {
-      setEventsLoading(false);
+      if (request === eventRequest.current) setEventsLoading(false);
     }
   };
 
@@ -128,7 +133,7 @@ export const PipelineDrawer: React.FC = () => {
                     <div className="space-y-2">
                       {stageJobs.map(job => {
                         const beat = heartbeat(job.workerHeartbeatAt);
-                        const baseline = BASELINE_S_PER_MIN * 5.75;
+                        const baseline = BASELINE_S;
                         return (
                           <button
                             key={job.jobId}

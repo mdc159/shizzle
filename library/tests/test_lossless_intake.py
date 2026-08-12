@@ -7,10 +7,13 @@ These three tests cover the contract gate, the happy path, and idempotency.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import boto3
 import pytest
@@ -20,6 +23,7 @@ from shizzle_server.publish import lossless_intake
 from shizzle_server.publish.lossless_intake import (
     IntakeError,
     Package,
+    _package_path,
     common_gain_db,
     derive_video,
     download_package,
@@ -179,7 +183,7 @@ def test_transform_emits_player_timeline_contract(tmp_path: Path, monkeypatch):
     manifest = lossless_intake.transform(pkg, source, tmp_path / "candidate", "T", "A")
     assert manifest["timeline"] == {
         "start_ms": 0,
-        "duration_ms": int(pkg.duration_seconds * 1000),
+        "duration_ms": int(round(pkg.duration_seconds * 1000)),
         "sample_rate_hz": 44100,
     }
 
@@ -208,4 +212,115 @@ def test_derive_video_caps_and_probes_synthetic_fixture(tmp_path: Path):
         capture_output=True,
         text=True,
     ).stdout.strip())
-    assert abs(actual - 0.75) <= 0.5
+    assert abs(actual - 0.75) <= 0.05
+
+
+def _write_verification_package(root: Path, *, sample_count: int = 10) -> dict:
+    stems = []
+    for role in ROLES:
+        path = root / "stems" / f"{role}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(role.encode())
+        stems.append({
+            "role": role,
+            "file": f"stems/{role}.wav",
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    handoff = {
+        "interface": "lossless-stem-v1",
+        "source": {"object_key": "sources/id/source.mp4", "sha256": "a" * 64},
+        "separation": {
+            "model": "htdemucs_6s",
+            "model_version": "test",
+            "worker_image": "worker:test",
+            "sample_rate_hz": 44100,
+            "channels": 2,
+            "sample_format": "f32le",
+            "start_sample": 0,
+            "sample_count": sample_count,
+        },
+        "stems": stems,
+    }
+    (root / "handoff.json").write_text(json.dumps(handoff))
+    return handoff
+
+
+def test_verification_path_containment_rejects_escape(tmp_path: Path):
+    root = tmp_path / "package"
+    root.mkdir()
+    with pytest.raises(IntakeError, match="escapes package directory"):
+        _package_path(root, "../../outside.wav")
+
+
+def test_load_rejects_duplicate_roles_before_deduplication(tmp_path: Path):
+    root = tmp_path / "package"
+    root.mkdir()
+    handoff = _write_verification_package(root)
+    handoff["stems"][1]["role"] = "vocals"
+    (root / "handoff.json").write_text(json.dumps(handoff))
+
+    with pytest.raises(IntakeError, match="stem must map"):
+        lossless_intake.load_and_verify_package(root)
+
+
+def test_load_rejects_actual_stem_sample_count_mismatch(tmp_path: Path, monkeypatch):
+    root = tmp_path / "package"
+    root.mkdir()
+    _write_verification_package(root, sample_count=10)
+    monkeypatch.setattr(
+        lossless_intake,
+        "_run",
+        lambda _cmd: SimpleNamespace(stdout=json.dumps({"streams": [{
+            "codec_name": "pcm_f32le",
+            "sample_rate": "44100",
+            "channels": 2,
+            "duration_ts": 9,
+        }]})),
+    )
+
+    with pytest.raises(IntakeError, match="sample count 9 != handoff 10"):
+        lossless_intake.load_and_verify_package(root)
+
+
+def test_silent_mix_integrity_is_standard_json(tmp_path: Path, monkeypatch):
+    pkg = Package(
+        root=tmp_path / "pkg",
+        handoff={
+            "source": {"sha256": "abc", "object_key": "sources/id/source.mp4"},
+            "separation": {"sample_count": 44100, "worker_image": "worker:sha"},
+        },
+    )
+    monkeypatch.setattr(
+        lossless_intake, "measure_default_mix_true_peak", lambda _pkg: float("-inf")
+    )
+    monkeypatch.setattr(
+        lossless_intake, "encode_stem", lambda _wav, out: out.write_bytes(b"audio")
+    )
+    monkeypatch.setattr(
+        lossless_intake,
+        "derive_video",
+        lambda _source, out, _duration, **_kwargs: out.write_bytes(b"video"),
+    )
+
+    manifest = lossless_intake.transform(
+        pkg, tmp_path / "source.mp4", tmp_path / "candidate", "T", "A"
+    )
+    assert manifest["integrity"]["default_mix_true_peak_dbtp"] is None
+    json.dumps(manifest, allow_nan=False)
+
+
+def test_stage_ignores_stale_manifest_when_collecting_media(tmp_path: Path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "video.mp4").write_bytes(b"video")
+    (candidate / "manifest.json").write_text("stale")
+
+    class S3:
+        def upload_file(self, *_args, **_kwargs):
+            pass
+
+    staged = lossless_intake.stage(
+        S3(), BUCKET, uuid.uuid4(), 1, candidate, {"version": 3}
+    )
+    assert [item.file for item in staged] == ["video.mp4", "manifest.json"]

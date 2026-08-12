@@ -43,6 +43,22 @@ async def test_http_errors_are_mapped(status: int, retryable: bool) -> None:
     assert exc.value.retryable is retryable
 
 
+async def test_cancel_posts_to_expected_endpoint() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url == "https://runpod.test/v2/endpoint-1/cancel/job-1"
+        return httpx.Response(200)
+
+    await client(handler).cancel("job-1")
+
+
+async def test_cancel_errors_use_structured_mapping() -> None:
+    with pytest.raises(StageError) as exc:
+        await client(lambda _request: httpx.Response(503)).cancel("job-1")
+    assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert exc.value.retryable is True
+
+
 async def test_timeout_is_mapped() -> None:
     def timeout(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
@@ -50,6 +66,16 @@ async def test_timeout_is_mapped() -> None:
     with pytest.raises(StageError) as exc:
         await client(timeout).poll("job-1")
     assert exc.value.code == ErrorCode.RUNPOD_TIMEOUT
+    assert exc.value.retryable is True
+
+
+async def test_other_request_errors_are_mapped() -> None:
+    def protocol_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("broken stream", request=request)
+
+    with pytest.raises(StageError) as exc:
+        await client(protocol_error).poll("job-1")
+    assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
     assert exc.value.retryable is True
 
 

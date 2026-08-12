@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .delivery_profile import CANONICAL_STEM_IDS as STEM_ROLES
+from .delivery_profile import TRACK_DURATION_TOLERANCE_SEC
 from .publisher import (
     Publisher,
     StagedObject,
@@ -58,6 +59,10 @@ STEM_DISPLAY_NAMES = {
 
 class IntakeError(RuntimeError):
     """A package failed verification or the transform failed a gate."""
+
+
+class PackageNotReady(IntakeError):
+    """The worker has not written its handoff-last completion marker yet."""
 
 
 # --- 0. fetch the package across the interface --------------------------------
@@ -109,22 +114,31 @@ def download_package(s3: Any, bucket: str, package_prefix: str, dest: Path) -> P
     handoff_key = f"{package_prefix}/handoff.json"
     head = _head_or_none(s3, bucket, handoff_key)
     if head is None:
-        raise IntakeError("package has not crossed the interface")
+        raise PackageNotReady("package has not crossed the interface")
     handoff_dest = dest / "handoff.json"
     _download_object(
         s3, bucket, handoff_key, handoff_dest, expected_size=int(head.get("ContentLength", -1))
     )
 
-    handoff = json.loads(handoff_dest.read_text())
+    try:
+        handoff = json.loads(handoff_dest.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntakeError(f"invalid handoff.json: {exc}") from exc
+    if not isinstance(handoff, dict) or not isinstance(handoff.get("stems"), list):
+        raise IntakeError("handoff.json must contain a stems list")
     root = dest.resolve()
-    for entry in handoff.get("stems", []):
+    for entry in handoff["stems"]:
+        if not isinstance(entry, dict) or "file" not in entry:
+            raise IntakeError("each handoff stem must declare a file")
         rel = str(entry["file"]).lstrip("/")
         target = (dest / rel).resolve()
         if not target.is_relative_to(root):
             raise IntakeError(f"stem path escapes package directory: {rel}")
+        size = entry.get("bytes")
+        if not isinstance(size, int) or size < 1:
+            raise IntakeError(f"invalid stem size for {rel}")
         _download_object(
-            s3, bucket, f"{package_prefix}/{rel}", target,
-            expected_size=int(entry["bytes"]) if "bytes" in entry else None,
+            s3, bucket, f"{package_prefix}/{rel}", target, expected_size=size
         )
     logger.info("package downloaded into %s (%d stems)", dest, len(handoff.get("stems", [])))
     return dest
@@ -157,39 +171,86 @@ class Package:
         return float(self.handoff["separation"]["sample_count"]) / SAMPLE_RATE
 
 
+def _package_path(root: Path, declared: str) -> Path:
+    target = (root / declared).resolve()
+    if not target.is_relative_to(root.resolve()):
+        raise IntakeError(f"stem path escapes package directory: {declared}")
+    return target
+
+
 def load_and_verify_package(root: Path) -> Package:
     """Every claim in handoff.json is re-proven against the actual files."""
-    handoff = json.loads((root / "handoff.json").read_text())
-    if handoff.get("interface") != INTERFACE:
-        raise IntakeError(f"not a {INTERFACE} package: {handoff.get('interface')!r}")
-    sep = handoff["separation"]
-    for field, want in (("sample_rate_hz", SAMPLE_RATE), ("channels", 2),
+    try:
+        handoff = json.loads((root / "handoff.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IntakeError(f"invalid handoff.json: {exc}") from exc
+    if not isinstance(handoff, dict) or handoff.get("interface") != INTERFACE:
+        actual = handoff.get("interface") if isinstance(handoff, dict) else type(handoff).__name__
+        raise IntakeError(f"not a {INTERFACE} package: {actual!r}")
+    sep = handoff.get("separation")
+    raw_stems = handoff.get("stems")
+    source = handoff.get("source")
+    if not isinstance(sep, dict) or not isinstance(raw_stems, list) or not isinstance(source, dict):
+        raise IntakeError("handoff separation, source, and stems must be objects/list")
+    if (
+        not isinstance(source.get("object_key"), str)
+        or not source["object_key"]
+        or not isinstance(source.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+    ):
+        raise IntakeError("source must declare an object key and lowercase sha256")
+    for field in ("model_version", "worker_image"):
+        if not isinstance(sep.get(field), str) or not sep[field]:
+            raise IntakeError(f"separation.{field} must be a non-empty string")
+    for field, want in (("model", "htdemucs_6s"),
+                        ("sample_rate_hz", SAMPLE_RATE), ("channels", 2),
                         ("sample_format", "f32le"), ("start_sample", 0)):
         if sep.get(field) != want:
             raise IntakeError(f"separation.{field}={sep.get(field)!r}, expected {want!r}")
+    sample_count = sep.get("sample_count")
+    if not isinstance(sample_count, int) or sample_count < 1:
+        raise IntakeError("separation.sample_count must be a positive integer")
 
-    stems = {s["role"]: s for s in handoff["stems"]}
-    if sorted(stems) != sorted(STEM_ROLES):
-        raise IntakeError(f"roles {sorted(stems)} != required {sorted(STEM_ROLES)}")
+    if len(raw_stems) != len(STEM_ROLES) or not all(isinstance(s, dict) for s in raw_stems):
+        raise IntakeError(f"package must declare exactly {len(STEM_ROLES)} stem objects")
+    stems: dict[str, dict[str, Any]] = {}
+    for expected_role, entry in zip(STEM_ROLES, raw_stems, strict=True):
+        role = entry.get("role")
+        expected_file = f"stems/{expected_role}.wav"
+        if role != expected_role or entry.get("file") != expected_file or role in stems:
+            raise IntakeError(
+                f"stem must map {expected_role!r} to {expected_file!r}, got "
+                f"{role!r} -> {entry.get('file')!r}"
+            )
+        stems[role] = entry
 
     for role, entry in stems.items():
-        path = root / entry["file"]
+        path = _package_path(root, str(entry["file"]))
         if not path.exists():
             raise IntakeError(f"missing stem file: {entry['file']}")
-        if path.stat().st_size != entry["bytes"]:
-            raise IntakeError(f"{role}: size {path.stat().st_size} != manifest {entry['bytes']}")
-        if _sha256(path) != entry["sha256"]:
+        if path.stat().st_size != entry.get("bytes"):
+            raise IntakeError(f"{role}: size {path.stat().st_size} != manifest {entry.get('bytes')}")
+        if _sha256(path) != entry.get("sha256"):
             raise IntakeError(f"{role}: sha256 mismatch")
-        probe = json.loads(_run([
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=codec_name,sample_rate,channels",
-            "-of", "json", str(path),
-        ]).stdout)["streams"][0]
-        if (probe["codec_name"], int(probe["sample_rate"]), probe["channels"]) != (
-            "pcm_f32le", SAMPLE_RATE, 2,
-        ):
+        try:
+            probe = json.loads(_run([
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name,sample_rate,channels,duration_ts",
+                "-of", "json", str(path),
+            ]).stdout)["streams"][0]
+            audio_format = (
+                probe["codec_name"], int(probe["sample_rate"]), probe["channels"]
+            )
+            actual_samples = int(probe["duration_ts"])
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise IntakeError(f"{role}: invalid ffprobe result") from exc
+        if audio_format != ("pcm_f32le", SAMPLE_RATE, 2):
             raise IntakeError(f"{role}: not stereo 44.1 kHz float32 ({probe})")
-    logger.info("package verified: 6 stems, %.2f s", handoff["separation"]["sample_count"] / SAMPLE_RATE)
+        if actual_samples != sample_count:
+            raise IntakeError(
+                f"{role}: sample count {actual_samples} != handoff {sample_count}"
+            )
+    logger.info("package verified: 6 stems, %.2f s", sample_count / SAMPLE_RATE)
     return Package(root=root, handoff=handoff)
 
 
@@ -256,7 +317,7 @@ def derive_video(
     except ValueError as exc:
         raise IntakeError(f"could not read derived video duration: {probe!r}") from exc
     delta = actual - duration
-    if delta < -1.0 or delta > 0.5:
+    if abs(delta) > TRACK_DURATION_TOLERANCE_SEC:
         raise IntakeError(
             f"video duration {actual:.3f}s is outside the stem timeline {duration:.3f}s"
         )
@@ -332,14 +393,14 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
         ],
         "timeline": {
             "start_ms": 0,
-            "duration_ms": int(duration * 1000),
+            "duration_ms": int(round(duration * 1000)),
             "sample_rate_hz": SAMPLE_RATE,
         },
         "integrity": {
             "source": INTERFACE,
             "handoff_source_sha256": pkg.handoff["source"]["sha256"],
             "worker_image": pkg.handoff["separation"]["worker_image"],
-            "default_mix_true_peak_dbtp": tp,
+            "default_mix_true_peak_dbtp": tp if math.isfinite(tp) else None,
         },
         "processing": {"source": INTERFACE, "origin": pkg.handoff["source"]["object_key"]},
     }
@@ -351,7 +412,10 @@ def stage(s3: Any, bucket: str, track_id: uuid.UUID, generation: int,
           candidate: Path, manifest: dict[str, Any]) -> list[StagedObject]:
     prefix = staging_prefix(track_id, generation)
     staged: list[StagedObject] = []
-    files = sorted(p for p in candidate.rglob("*") if p.is_file())
+    files = sorted(
+        p for p in candidate.rglob("*")
+        if p.is_file() and p.name != "manifest.json"
+    )
     for path in files:
         rel = path.relative_to(candidate).as_posix()
         content_type = "audio/mp4" if rel.endswith(".m4a") else "video/mp4"
@@ -361,7 +425,7 @@ def stage(s3: Any, bucket: str, track_id: uuid.UUID, generation: int,
                                    sha256=_sha256(path)))
         logger.info("staged %s (%.1f MiB)", rel, path.stat().st_size / 1024**2)
     mpath = candidate / "manifest.json"
-    mpath.write_text(json.dumps(manifest, indent=2))
+    mpath.write_text(json.dumps(manifest, indent=2, allow_nan=False))
     s3.upload_file(str(mpath), bucket, f"{prefix}manifest.json",
                    ExtraArgs={"ContentType": "application/json"})
     staged.append(StagedObject(file="manifest.json", size_bytes=mpath.stat().st_size,

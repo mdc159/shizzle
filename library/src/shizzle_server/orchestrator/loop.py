@@ -47,7 +47,11 @@ class Orchestrator:
                 endpoint_id=self.settings.runpod_endpoint_id,
                 api_base=self.settings.runpod_api_base,
             )
-            if self.settings.cloud_pipeline and self.settings.runpod_api_key
+            if (
+                self.settings.cloud_pipeline
+                and self.settings.runpod_api_key
+                and self.settings.runpod_endpoint_id
+            )
             else NotConfiguredRunPodClient()
         )
         self._stopping = asyncio.Event()

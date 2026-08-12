@@ -13,6 +13,7 @@ RunPod progress channel, so a stall is diagnosable by which phase froze.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -36,10 +37,8 @@ def handler(job: dict) -> dict:
     import runpod
 
     def heartbeat(msg: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             runpod.serverless.progress_update(job, msg)
-        except Exception:
-            pass  # heartbeats must never kill a job
 
     params = job.get("input", {})
     track_id = params["track_id"]
@@ -51,11 +50,13 @@ def handler(job: dict) -> dict:
     ).rstrip("/")
 
     s3 = create_s3_client()
+    handoff_key = f"{prefix}/handoff.json"
+    s3.delete_object(Bucket=bucket, Key=handoff_key)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         source = tmp_path / Path(input_key).name
         heartbeat(f"acquire: downloading s3://{bucket}/{input_key}")
-        download_source(s3, bucket, input_key, source)
+        download_source(s3, bucket, input_key, source, heartbeat)
 
         handoff = run(
             source, tmp_path,
@@ -68,16 +69,19 @@ def handler(job: dict) -> dict:
         for i, role in enumerate(ROLES, 1):
             key = f"{prefix}/stems/{role}.wav"
             heartbeat(f"upload: {role}.wav ({i}/6) -> {key}")
-            uploads.append(upload_file(s3, bucket, key, tmp_path / "stems" / f"{role}.wav"))
+            uploads.append(
+                upload_file(
+                    s3, bucket, key, tmp_path / "stems" / f"{role}.wav", heartbeat
+                )
+            )
 
         # handoff.json is written LAST: its presence means the package crossed
         # the interface. A dead worker leaves no handoff and therefore nothing
         # downstream will consume.
-        handoff_key = f"{prefix}/handoff.json"
         handoff_path = tmp_path / "handoff.json"
         handoff_path.write_text(json.dumps(_clean(handoff), indent=2))
         heartbeat(f"handoff: writing {handoff_key} (package complete)")
-        upload_file(s3, bucket, handoff_key, handoff_path)
+        upload_file(s3, bucket, handoff_key, handoff_path, heartbeat)
 
     return {
         "status": "COMPLETED",

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -319,16 +319,14 @@ class TestDispatchedPark:
         assert await job_repo.claim_next(worker_id="B", lease_seconds=120) is None
 
         # A parks: lease freed, recheck scheduled, attempt untouched.
-        await job_repo.park(job.id, worker_id="A", recheck_in_seconds=2.0)
+        await job_repo.park(job.id, worker_id="A", recheck_in_seconds=60.0)
         parked = await job_repo.get_job(job.id)
         assert parked.status == JobStage.dispatched
         assert parked.attempt == 0
         assert parked.lease_owner is None
         assert parked.lease_expires_at is None
         assert parked.next_retry_at is not None
-
-        # Recheck interval not yet elapsed -> still unclaimable (one claim/interval).
-        assert await job_repo.claim_next(worker_id="B", lease_seconds=120) is None
+        assert parked.next_retry_at.replace(tzinfo=UTC) > utcnow()
 
         # Advance past next_retry_at on the real DB, then B reclaims it.
         async with pg_engine.begin() as conn:

@@ -121,12 +121,22 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 ErrorCode.RUNPOD_DISPATCH_FAILED,
             }
             stalled_for = _age_seconds(job.worker_heartbeat_at)
-            if not transient or (
+            if not transient:
+                raise
+            if (
                 stalled_for is not None
                 and stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
+                try:
+                    await ctx.runpod.cancel(job.runpod_job_id)
+                finally:
+                    await ctx.jobs.record_worker_progress(job.id, phase="failed")
                 raise
-            ctx.detail["poll_failures"] = int(ctx.detail.get("poll_failures", 0)) + 1
+            await ctx.jobs.append_event(
+                job.id,
+                "runpod_poll_failed",
+                {"error_code": exc.code.value, "detail": exc.detail[:500]},
+            )
             logger.warning("job %s: transient RunPod poll failure: %s", job.id, exc)
             return None
         status, phase = parse_worker_progress(status_payload)
@@ -134,7 +144,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         if status == "COMPLETED":
             output = status_payload.get("output")
             detail = output if isinstance(output, dict) else {"output": output}
-            await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
+            events = await ctx.jobs.list_events(job.id)
+            if not any(event.event == "worker_completed" for event in events):
+                await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
             return JobStage.verifying
 
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):

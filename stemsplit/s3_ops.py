@@ -6,12 +6,36 @@ computed locally and recorded in the upload record; the publisher verifies
 staged objects server-side against these checksums before promotion.
 """
 
+import contextlib
 import hashlib
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import boto3
+
+Heartbeat = Callable[[str], None]
+
+
+def _transfer_callback(
+    heartbeat: Heartbeat | None, label: str, total_bytes: int
+) -> Callable[[int], None] | None:
+    if heartbeat is None or total_bytes <= 0:
+        return None
+    transferred = 0
+    last_bucket = -1
+
+    def callback(bytes_amount: int) -> None:
+        nonlocal transferred, last_bucket
+        with contextlib.suppress(Exception):
+            transferred += bytes_amount
+            bucket = min(20, int(20 * transferred / total_bytes))
+            if bucket != last_bucket:
+                heartbeat(f"{label}: {bucket * 5}%")
+                last_bucket = bucket
+
+    return callback
 
 
 def sha256_file(path: Path) -> str:
@@ -91,7 +115,13 @@ def verify_upload(s3: Any, bucket: str, s3_key: str, local_path: Path) -> None:
         raise RuntimeError(f"Failed to verify S3 upload for {s3_key}: {str(e)}") from e
 
 
-def download_source(s3: Any, bucket: str, input_key: str, local_path: Path) -> None:
+def download_source(
+    s3: Any,
+    bucket: str,
+    input_key: str,
+    local_path: Path,
+    heartbeat: Heartbeat | None = None,
+) -> None:
     """
     Download source file from S3 with verification.
 
@@ -105,11 +135,23 @@ def download_source(s3: Any, bucket: str, input_key: str, local_path: Path) -> N
         RuntimeError: If download or verification fails
     """
     print(f"Downloading s3://{bucket}/{input_key} -> {local_path}", flush=True)
-    s3.download_file(bucket, input_key, str(local_path))
+    size = int(s3.head_object(Bucket=bucket, Key=input_key)["ContentLength"])
+    s3.download_file(
+        bucket,
+        input_key,
+        str(local_path),
+        Callback=_transfer_callback(heartbeat, "acquire", size),
+    )
     verify_download(local_path)
 
 
-def upload_file(s3: Any, bucket: str, s3_key: str, local_path: Path) -> dict[str, Any]:
+def upload_file(
+    s3: Any,
+    bucket: str,
+    s3_key: str,
+    local_path: Path,
+    heartbeat: Heartbeat | None = None,
+) -> dict[str, Any]:
     """
     Upload file to S3 with verification and a recorded sha256 checksum.
 
@@ -129,7 +171,14 @@ def upload_file(s3: Any, bucket: str, s3_key: str, local_path: Path) -> dict[str
     digest = sha256_file(local_path)
     print(f"Uploading {local_path} -> s3://{bucket}/{s3_key} (sha256={digest[:12]}...)",
           flush=True)
-    s3.upload_file(str(local_path), bucket, s3_key)
+    s3.upload_file(
+        str(local_path),
+        bucket,
+        s3_key,
+        Callback=_transfer_callback(
+            heartbeat, f"upload: {local_path.name}", local_path.stat().st_size
+        ),
+    )
     verify_upload(s3, bucket, s3_key, local_path)
     return {
         "file": local_path.name,

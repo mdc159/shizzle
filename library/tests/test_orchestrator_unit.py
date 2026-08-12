@@ -560,8 +560,48 @@ async def test_transient_poll_failure_parks_without_consuming_attempt(
     )
 
     assert await handle_dispatched(ctx) is None
-    assert ctx.detail["poll_failures"] == 1
     assert (await job_repo.get_job(upload_job.id)).attempt == 0
+    failures = [
+        event for event in await job_repo.list_events(upload_job.id)
+        if event.event == "runpod_poll_failed"
+    ]
+    assert failures[0].detail["error_code"] == "RUNPOD_TIMEOUT"
+
+
+async def test_stale_poll_outage_cancels_and_marks_existing_job_failed(
+    settings, job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="poll-test", runpod_job_id="rp-stale"
+    )
+    settings.runpod_worker_stall_seconds = 10
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=11)
+
+    fake = FakeRunPodClient([
+        StageError(ErrorCode.RUNPOD_TIMEOUT, "persistent outage", retryable=True)
+    ])
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="poll-test",
+    )
+
+    with pytest.raises(StageError, match="persistent outage"):
+        await handle_dispatched(ctx)
+    assert fake.cancelled == ["rp-stale"]
+    assert (await job_repo.get_job(upload_job.id)).worker_phase == "failed"
 
 
 async def test_worker_completed_wraps_non_object_output(
@@ -587,10 +627,12 @@ async def test_worker_completed_wraps_non_object_output(
     )
 
     assert await handle_dispatched(ctx) == JobStage.verifying
+    assert await handle_dispatched(ctx) == JobStage.verifying
     completed = [
         event for event in await job_repo.list_events(upload_job.id)
         if event.event == "worker_completed"
     ]
+    assert len(completed) == 1
     assert completed[0].detail == {"output": "done"}
 
 
@@ -670,9 +712,9 @@ async def test_cloud_verifying_missing_handoff_is_retryable(
     monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
 
     def missing(*_args):
-        from shizzle_server.publish.lossless_intake import IntakeError
+        from shizzle_server.publish.lossless_intake import PackageNotReady
 
-        raise IntakeError("package has not crossed the interface")
+        raise PackageNotReady("package has not crossed the interface")
 
     monkeypatch.setattr(cloud, "download_package", missing)
     with pytest.raises(StageError) as exc:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from shizzle_server.db.models import JobStage, SourceType
+from shizzle_server.db.models import Job, JobStage, SourceType, utcnow
 from shizzle_server.db.repository import (
     InvalidTransition,
     TrackGenerationConflict,
@@ -266,3 +267,22 @@ async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_rep
         await job_repo.record_dispatch(
             upload_job.id, worker_id="worker-b", runpod_job_id="runpod-1"
         )
+
+
+async def test_record_dispatch_rejects_expired_or_missing_lease(job_repo, upload_job):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+
+    for expiry in (utcnow() - timedelta(seconds=1), None):
+        async with job_repo._sf() as session, session.begin():
+            row = await session.get(Job, upload_job.id)
+            row.lease_expires_at = expiry
+        with pytest.raises(InvalidTransition):
+            await job_repo.record_dispatch(
+                upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+            )

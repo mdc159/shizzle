@@ -27,12 +27,13 @@ from ..db.repository import track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..publish.lossless_intake import (
     IntakeError,
+    PackageNotReady,
     download_package,
     load_and_verify_package,
     stage,
     transform,
 )
-from ..publish.publisher import Publisher
+from ..publish.publisher import Publisher, PublishError
 
 if TYPE_CHECKING:  # avoid a runtime import cycle with stages.py
     from .stages import StageContext
@@ -121,11 +122,17 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             pkg_dir,
         )
         pkg = await asyncio.to_thread(load_and_verify_package, pkg_dir)
+    except PackageNotReady as exc:
+        raise StageError(
+            ErrorCode.CHECKSUM_MISMATCH,
+            f"package verification failed: {exc}"[:500],
+            retryable=True,
+        ) from exc
     except IntakeError as exc:
         raise StageError(
             ErrorCode.CHECKSUM_MISMATCH,
             f"package verification failed: {exc}"[:500],
-            retryable=str(exc) == "package has not crossed the interface",
+            retryable=False,
         ) from exc
     source_sha256 = pkg.handoff.get("source", {}).get("sha256")
     if ctx.job.input_checksum and source_sha256 != ctx.job.input_checksum:
@@ -190,6 +197,8 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         raise StageError(
             ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
         ) from exc
+    except PublishError as exc:
+        raise exc.to_stage_error() from exc
     except Exception as exc:
         raise StageError(
             ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=True

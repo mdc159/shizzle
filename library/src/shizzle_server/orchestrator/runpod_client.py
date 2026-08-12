@@ -128,7 +128,7 @@ class HttpRunPodClient:
                 response = await client.request(method, f"{self._endpoint_url}{path}", **kwargs)
         except httpx.TimeoutException as exc:
             raise StageError(ErrorCode.RUNPOD_TIMEOUT, str(exc), retryable=True) from exc
-        except httpx.ConnectError as exc:
+        except httpx.RequestError as exc:
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED, str(exc), retryable=True
             ) from exc

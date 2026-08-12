@@ -59,7 +59,10 @@ def _noop_heartbeat(_msg: str) -> None:
 
 def _separation_callback(heartbeat: Heartbeat) -> Callable[..., None]:
     """Translate best-effort Demucs segment progress into watchdog heartbeats."""
+    last_percent: int | None = None
+
     def callback(info: Any, *_args: Any, **_kwargs: Any) -> None:
+        nonlocal last_percent
         try:
             if not isinstance(info, dict):
                 return
@@ -67,8 +70,11 @@ def _separation_callback(heartbeat: Heartbeat) -> Callable[..., None]:
             length = float(info["audio_length"])
             if length <= 0:
                 return
-            progress = min(1.0, max(0.0, offset / length))
-            heartbeat(f"separate: {int(100 * progress)}%")
+            percent = int(100 * min(1.0, max(0.0, offset / length)))
+            if percent == last_percent:
+                return
+            heartbeat(f"separate: {percent}%")
+            last_percent = percent
         except Exception:
             return
 
@@ -121,6 +127,7 @@ def separate(
 
     heartbeat("separate: running model")
     _origin, separated = separator.separate_audio_file(audio_wav)
+    heartbeat("separate: 100%")
 
     import demucs
 
