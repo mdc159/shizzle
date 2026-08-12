@@ -26,8 +26,8 @@ __pycache__/
 # Node
 node_modules/
 dist/
-ui/playwright-report/
-ui/test-results/
+player/playwright-report/
+player/test-results/
 
 # OS / editor
 Thumbs.db
@@ -35,7 +35,7 @@ Thumbs.db
 *.swp
 
 # Spike scratch output (results docs ARE committed; raw dumps are not)
-spikes/**/out/
+evidence/spikes/**/out/
 
 # Local agent/browser state and generated run output
 .claude/

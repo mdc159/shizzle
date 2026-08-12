@@ -62,7 +62,7 @@ Use when the video freezes, fails to start, or throws `MEDIA_ERR_DECODE`.
 The Pot originally failed because its video had end-loaded metadata, roughly
 seven-second keyframe gaps, and a complete-decode error. The repaired short-GOP,
 fast-start video removed the production seek failure. See
-`goals/cloud-continuous-playback/evidence.md` sections “What failed and why” and
+`evidence/cloud-continuous-playback/evidence.md` sections “What failed and why” and
 “What changed.”
 
 ## Stem delivery and recovery
@@ -78,7 +78,7 @@ Use when a stem stalls, disappears, or fails after seeking.
    greater than 50 ms and recovery no longer than 3 seconds.
 
 The retained 27-track bounded-fault report is
-`goals/cloud-continuous-playback/evidence/browser/library-27-faults-staged-video.json`.
+`evidence/cloud-continuous-playback/evidence/browser/library-27-faults-staged-video.json`.
 Use its procedure against the affected track, not as a default whole-library
 run.
 
@@ -95,7 +95,7 @@ Use when the picture advances but no audio is heard.
 
 This distinction came from the silent intro in Mother Love Bone — Stardog
 Champion. Evidence:
-`goals/cloud-continuous-playback/evidence/browser/stardog-input-pcm-replay-natural.json`.
+`evidence/cloud-continuous-playback/evidence/browser/stardog-input-pcm-replay-natural.json`.
 
 ## Random-seek reproduction
 
@@ -109,7 +109,7 @@ Use for a specific seek or synchronization report.
 4. Keep the existing 3-second recovery and 50 ms settled-offset limits.
 
 The full development stress procedure is retained in
-`goals/cloud-continuous-playback/evidence/browser/library-27-stress-staged-video.json`.
+`evidence/cloud-continuous-playback/evidence/browser/library-27-stress-staged-video.json`.
 Use only the relevant track or a small representative set unless the defect is
 demonstrably system-wide.
 
@@ -137,7 +137,7 @@ incorrectly separated.
 3. Inspect steady-state limiter reduction while direct PCM is expected.
 4. Listen to the default mix, vocals-muted mix, individual roles, the reported
    passage, and one transition.
-5. Use `goals/cloud-continuous-playback/listening-worksheet.md` to record the
+5. Use `evidence/cloud-continuous-playback/listening-worksheet.md` to record the
    affected track only.
 
 Do not transcode an already-lossy file merely to increase its nominal bitrate.
@@ -152,20 +152,20 @@ Do not transcode an already-lossy file merely to increase its nominal bitrate.
    absent from durable telemetry.
 
 The original signed-delivery experiments are retained in
-`spikes/RESULTS-0.2.md` and `spikes/signed-cookie-proof/`.
+`evidence/spikes/RESULTS-0.2.md` and `evidence/spikes/signed-cookie-proof/`.
 
 ## Retained experiment index
 
-- `goals/cloud-continuous-playback/evidence.md` — why the final playback design
+- `evidence/cloud-continuous-playback/evidence.md` — why the final playback design
   changed and what each failure taught.
-- `goals/cloud-continuous-playback/evidence/browser/` — machine-readable natural,
+- `evidence/cloud-continuous-playback/evidence/browser/` — machine-readable natural,
   stress, fault, recovery, replay, and transition reports.
-- `goals/cloud-continuous-playback/evidence/vps/` — artifact, publication,
+- `evidence/cloud-continuous-playback/evidence/vps/` — artifact, publication,
   activation, audio-quality, and delivery reports.
-- `spikes/RESULTS-0.1.md` — early decoder-clock/skew experiment.
-- `spikes/RESULTS-0.2.md` — signed media and Range experiment.
-- `spikes/RESULTS-0.3-0.4.md` — Demucs gain/reconstruction and AAC comparison.
-- `spikes/RESULTS-frontend-deploy.md` — early outside-in deployment checks.
+- `evidence/spikes/RESULTS-0.1.md` — early decoder-clock/skew experiment.
+- `evidence/spikes/RESULTS-0.2.md` — signed media and Range experiment.
+- `evidence/spikes/RESULTS-0.3-0.4.md` — Demucs gain/reconstruction and AAC comparison.
+- `evidence/spikes/RESULTS-frontend-deploy.md` — early outside-in deployment checks.
 
 These records are troubleshooting assets. They explain observed failure modes
 and provide reproducible targeted tests; they are not unfinished requirements.

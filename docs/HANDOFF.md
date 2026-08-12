@@ -17,7 +17,7 @@ flowchart LR
 ```
 
 RunPod produces exactly the package in
-[`lossless-stem-handoff.md`](lossless-stem-handoff.md). RunPod owns separation
+[`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md). RunPod owns separation
 through the six lossless float32 WAV files. The VPS owns everything after that
 interface: the fixed delivery transformation, publication, CloudFront, and
 browser playback.
@@ -69,9 +69,11 @@ The next deliverable is:
 > unchanged finished VPS delivery pipeline.
 
 The package contains `vocals.wav`, `drums.wav`, `bass.wav`, `guitar.wav`,
-`piano.wav`, and `other.wav`, plus `handoff.json`. Every stem is stereo,
+`piano.wav`, and `shizzle.wav`, plus `handoff.json`. Every stem is stereo,
 44.1 kHz, IEEE float32 PCM, begins at sample zero, and has the same sample
 count. There is no lossy audio and no per-stem normalization in this interface.
+The sixth role is named `shizzle` at this interface; the worker rewrite renames
+the separator's native `other` output to `shizzle` as it writes the package.
 
 ## RunPod state
 
@@ -82,7 +84,7 @@ count. There is no lossy audio and no per-stem normalization in this interface.
 - Worker image: `ghcr.io/mdc159/shizzle-worker:v2`.
 - A complete separation with real S3 input/output and both integrity gates was
   previously proven on an RTX 4070.
-- `worker/Dockerfile` does not bake `htdemucs_6s` weights. Cold workers must
+- `stemsplit/Dockerfile` does not bake `htdemucs_6s` weights. Cold workers must
   download them, which is the leading unresolved RunPod failure hypothesis.
 - A healthy worker alone is not success. Require a golden job to reach
   `COMPLETED` and verify its S3 outputs.
@@ -128,16 +130,16 @@ count. There is no lossy audio and no per-stem normalization in this interface.
 ## Primary documents
 
 - [`../README.md`](../README.md) — simple project flow and current status.
-- [`lossless-stem-handoff.md`](lossless-stem-handoff.md) — exact RunPod output
+- [`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md) — exact RunPod output
   and VPS input interface.
-- [`superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md`](superpowers/specs/2026-08-02-shizzle-cloud-karaoke-design.md)
+- [`architecture.md`](architecture.md)
   — current architecture.
-- [`../goals/cloud-continuous-playback/encoding-profile.md`](../goals/cloud-continuous-playback/encoding-profile.md)
+- [`../interfaces/shizzle-browser-v1/spec.md`](../interfaces/shizzle-browser-v1/spec.md)
   — finished delivery profile.
-- [`../goals/cloud-continuous-playback/evidence.md`](../goals/cloud-continuous-playback/evidence.md)
+- [`../evidence/cloud-continuous-playback/evidence.md`](../evidence/cloud-continuous-playback/evidence.md)
   — retained engineering evidence.
 - [`playback-troubleshooting.md`](playback-troubleshooting.md) — symptom-driven
   diagnostics and the retained playback experiments.
-- [`../goals/cloud-continuous-playback/plan.md`](../goals/cloud-continuous-playback/plan.md)
+- [`../evidence/cloud-continuous-playback/plan.md`](../evidence/cloud-continuous-playback/plan.md)
   — simple next implementation sequence.
-- `spikes/` — troubleshooting experiments, not current requirements.
+- `evidence/spikes/` — troubleshooting experiments, not current requirements.

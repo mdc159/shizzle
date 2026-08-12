@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shizzle.systems/schemas/lossless-stem-v1.schema.json",
+  "title": "Shizzle RunPod to VPS lossless stem interface",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["interface", "track_id", "generation", "source", "separation", "stems"],
+  "properties": {
+    "interface": {
+      "const": "lossless-stem-v1"
+    },
+    "track_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_key", "sha256"],
+      "properties": {
+        "object_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "separation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "model_version",
+        "worker_image",
+        "sample_rate_hz",
+        "channels",
+        "sample_format",
+        "start_sample",
+        "sample_count"
+      ],
+      "properties": {
+        "model": {
+          "const": "htdemucs_6s"
+        },
+        "model_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_rate_hz": {
+          "const": 44100
+        },
+        "channels": {
+          "const": 2
+        },
+        "sample_format": {
+          "const": "f32le"
+        },
+        "start_sample": {
+          "const": 0
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "stems": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/vocals"
+        },
+        {
+          "$ref": "#/$defs/drums"
+        },
+        {
+          "$ref": "#/$defs/bass"
+        },
+        {
+          "$ref": "#/$defs/guitar"
+        },
+        {
+          "$ref": "#/$defs/piano"
+        },
+        {
+          "$ref": "#/$defs/shizzle"
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stemBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "file", "bytes", "sha256"],
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 45
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "vocals": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "vocals"
+            },
+            "file": {
+              "const": "stems/vocals.wav"
+            }
+          }
+        }
+      ]
+    },
+    "drums": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "drums"
+            },
+            "file": {
+              "const": "stems/drums.wav"
+            }
+          }
+        }
+      ]
+    },
+    "bass": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "bass"
+            },
+            "file": {
+              "const": "stems/bass.wav"
+            }
+          }
+        }
+      ]
+    },
+    "guitar": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "guitar"
+            },
+            "file": {
+              "const": "stems/guitar.wav"
+            }
+          }
+        }
+      ]
+    },
+    "piano": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "piano"
+            },
+            "file": {
+              "const": "stems/piano.wav"
+            }
+          }
+        }
+      ]
+    },
+    "shizzle": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stemBase"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "shizzle"
+            },
+            "file": {
+              "const": "stems/shizzle.wav"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
