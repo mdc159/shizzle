@@ -16,7 +16,7 @@ Gate (b) — decoded-delivery, post-encode:
     offset == 0, decoded length within codec-padding tolerance.
 
 Measurement method (align, unity-sum, RMS/peak residual) lifted from
-spikes/demucs-gain/run.py. Thresholds proposed from one track; re-validate on
+evidence/spikes/demucs-gain/run.py. Thresholds proposed from one track; re-validate on
 ~5 tracks before freezing (bump PROFILE_VERSION when thresholds change).
 """
 

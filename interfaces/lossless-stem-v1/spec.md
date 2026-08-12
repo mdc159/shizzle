@@ -47,11 +47,10 @@ tracks/<track-id>/<generation>/separation/
     bass.wav
     guitar.wav
     piano.wav
-    other.wav
+    shizzle.wav
 ```
 
-There are exactly six stem files. `other` is the separator role. The VPS maps
-it to the user-facing `shizzle` role when it creates the browser generation.
+There are exactly six stem files. The sixth role is named `shizzle` at this interface and everywhere after it; the separator's native label for that output is `other`, and the worker renames it as it writes the package (design authority, Mike 2026-08-11).
 
 ## Required lossless audio format
 
@@ -78,9 +77,9 @@ stream.
 The manifest makes the package identifiable and verifiable:
 
 Its machine-readable JSON Schema is
-[`../worker/lossless-stem-v1.schema.json`](../worker/lossless-stem-v1.schema.json).
+[`schema.json`](schema.json).
 A complete six-stem example is
-[`../worker/lossless-stem-v1.example.json`](../worker/lossless-stem-v1.example.json).
+[`example.json`](example.json).
 
 ```json
 {

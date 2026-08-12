@@ -95,7 +95,7 @@
           "$ref": "#/$defs/piano"
         },
         {
-          "$ref": "#/$defs/other"
+          "$ref": "#/$defs/shizzle"
         }
       ],
       "items": false
@@ -211,7 +211,7 @@
         }
       ]
     },
-    "other": {
+    "shizzle": {
       "allOf": [
         {
           "$ref": "#/$defs/stemBase"
@@ -219,10 +219,10 @@
         {
           "properties": {
             "role": {
-              "const": "other"
+              "const": "shizzle"
             },
             "file": {
-              "const": "stems/other.wav"
+              "const": "stems/shizzle.wav"
             }
           }
         }

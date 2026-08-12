@@ -8,11 +8,11 @@ AAC browser stems or the final delivery manifest; those belong to the finished
 VPS delivery pipeline.
 
 The complete interface is
-[`../docs/lossless-stem-handoff.md`](../docs/lossless-stem-handoff.md).
+[`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md).
 The machine-readable manifest definition is
-[`lossless-stem-v1.schema.json`](lossless-stem-v1.schema.json).
+[`../interfaces/lossless-stem-v1/schema.json`](../interfaces/lossless-stem-v1/schema.json).
 A complete example is
-[`lossless-stem-v1.example.json`](lossless-stem-v1.example.json).
+[`../interfaces/lossless-stem-v1/example.json`](../interfaces/lossless-stem-v1/example.json).
 
 ## Output layout
 

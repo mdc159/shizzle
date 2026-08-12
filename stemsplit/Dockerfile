@@ -1,10 +1,10 @@
 # Shizzle GPU worker — RunPod serverless container
 #
-# Layer ordering follows worker/Dockerfile.reference (known-good k25 recipe)
+# Layer ordering follows stemsplit/Dockerfile.reference (known-good k25 recipe)
 # for cache efficiency: CUDA base -> system deps -> torch cu121 (largest,
 # cached early) -> demucs/audio deps -> small handler deps -> code.
 #
-# Build:       docker build -t shizzle-worker worker/
+# Build:       docker build -t shizzle-worker stemsplit/
 # Local smoke: docker run --rm --gpus all \
 #                -v <fixtures>:/fixture -v <out>:/out \
 #                -v <torch-cache>:/root/.cache/torch \

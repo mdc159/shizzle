@@ -13,7 +13,7 @@ This record separates three things that must not be conflated:
 Passing an FFmpeg probe is necessary, but it is not proof that a song sounds good or plays continuously in a real browser.
 
 The input to this finished delivery profile is the defined
-[`lossless-stem-v1`](../../docs/lossless-stem-handoff.md) package: six stereo,
+[`lossless-stem-v1`](../lossless-stem-v1/spec.md) package: six stereo,
 44.1 kHz IEEE float32 WAV stems with one shared timeline. RunPod produces that
 package. The VPS performs every delivery step described below.
 
