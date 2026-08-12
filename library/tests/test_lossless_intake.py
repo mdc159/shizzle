@@ -8,6 +8,7 @@ These three tests cover the contract gate, the happy path, and idempotency.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -183,6 +184,9 @@ def test_transform_emits_player_timeline_contract(tmp_path: Path, monkeypatch):
     }
 
 
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg required"
+)
 def test_derive_video_caps_and_probes_synthetic_fixture(tmp_path: Path):
     source = tmp_path / "synthetic.mp4"
     subprocess.run(
