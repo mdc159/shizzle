@@ -335,12 +335,18 @@ class FakeRunPodClient:
     repeating the last one when the script is exhausted (keeps stall/queue
     watchdog tests deterministic)."""
 
-    def __init__(self, responses: list[dict | Exception]) -> None:
+    def __init__(
+        self,
+        responses: list[dict | Exception],
+        *,
+        cancel_error: Exception | None = None,
+    ) -> None:
         self.responses = list(responses)
         self._i = 0
         self.dispatched: list[tuple[str, str, dict]] = []
         self.polled: list[str] = []
         self.cancelled: list[str] = []
+        self.cancel_error = cancel_error
 
     async def dispatch(self, *, job_id, idempotency_key, payload):
         rid = f"rp-{len(self.dispatched) + 1}"
@@ -357,6 +363,8 @@ class FakeRunPodClient:
 
     async def cancel(self, runpod_job_id: str) -> None:
         self.cancelled.append(runpod_job_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
 
 
 def _stub_cloud_intake(monkeypatch) -> None:
@@ -602,6 +610,98 @@ async def test_stale_poll_outage_cancels_and_marks_existing_job_failed(
         await handle_dispatched(ctx)
     assert fake.cancelled == ["rp-stale"]
     assert (await job_repo.get_job(upload_job.id)).worker_phase == "failed"
+
+
+async def test_stale_worker_cancel_failure_does_not_mask_transient_poll_error(
+    settings, job_repo, upload_job
+):
+    """wave3 #1: a non-retryable cancel failure during a stale-worker transient
+    outage must not replace the original retryable poll error. The worker is
+    still marked failed, and the transient error (not the cancel error)
+    propagates so the job retries."""
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="poll-test", runpod_job_id="rp-stale"
+    )
+    settings.runpod_worker_stall_seconds = 10
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=11)
+
+    fake = FakeRunPodClient(
+        [StageError(ErrorCode.RUNPOD_TIMEOUT, "persistent outage", retryable=True)],
+        cancel_error=StageError(
+            ErrorCode.RUNPOD_DISPATCH_FAILED, "cancel api down", retryable=False
+        ),
+    )
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="poll-test",
+    )
+
+    # The transient poll error propagates, NOT the non-retryable cancel error.
+    with pytest.raises(StageError, match="persistent outage"):
+        await handle_dispatched(ctx)
+    assert fake.cancelled == ["rp-stale"]
+    assert (await job_repo.get_job(upload_job.id)).worker_phase == "failed"
+    # The non-retryable cancel error never lands on the job.
+    job = await job_repo.get_job(upload_job.id)
+    assert job.error_code != "RUNPOD_DISPATCH_FAILED"
+
+
+async def test_transient_poll_failure_dedupes_one_event_per_outage(
+    settings, job_repo, upload_job
+):
+    """wave3 #3: a continuous outage records at most one runpod_poll_failed
+    event, regardless of how many poll iterations it spans."""
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
+    )
+    job = await job_repo.get_job(upload_job.id)
+    settings.runpod_worker_stall_seconds = 10_000  # never trip the stale path
+    fake = FakeRunPodClient([
+        StageError(ErrorCode.RUNPOD_TIMEOUT, "temporary", retryable=True)
+    ])
+
+    async def _poll_once() -> None:
+        ctx = StageContext(
+            job=job,
+            settings=settings,
+            pipeline=None,  # type: ignore[arg-type]
+            jobs=job_repo,
+            runpod=fake,
+            worker_id="poll-test",
+        )
+        assert await handle_dispatched(ctx) is None
+
+    # Three poll iterations of the same outage.
+    for _ in range(3):
+        await _poll_once()
+
+    failures = [
+        event for event in await job_repo.list_events(upload_job.id)
+        if event.event == "runpod_poll_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0].detail["error_code"] == "RUNPOD_TIMEOUT"
+    assert len(fake.polled) == 3  # the dedup is on events, not on polls
 
 
 async def test_worker_completed_wraps_non_object_output(

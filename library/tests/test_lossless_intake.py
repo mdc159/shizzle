@@ -324,3 +324,44 @@ def test_stage_ignores_stale_manifest_when_collecting_media(tmp_path: Path):
         S3(), BUCKET, uuid.uuid4(), 1, candidate, {"version": 3}
     )
     assert [item.file for item in staged] == ["video.mp4", "manifest.json"]
+
+
+def test_track_duration_tolerance_covers_h264_frame_quantization():
+    """wave3 #5: at 30 fps one frame is ~33 ms, and H.264 frame quantization can
+    drift a clean encode by ~1 frame in either direction. The video-duration
+    gate needs at least one frame-duration of headroom so a clean single-frame-
+    early end is not rejected."""
+    from shizzle_server.publish.delivery_profile import TRACK_DURATION_TOLERANCE_SEC
+
+    assert TRACK_DURATION_TOLERANCE_SEC >= 0.100
+
+
+def test_derive_video_tolerates_clean_frame_quantization(
+    monkeypatch, tmp_path: Path
+):
+    """wave3 #5: a clean encode ending one 30 fps frame (~33 ms) short of the
+    stem timeline must pass the gate; only a deviation beyond the widened
+    tolerance raises IntakeError."""
+    source = tmp_path / "src.mp4"
+    source.write_bytes(b"")
+    out = tmp_path / "video.mp4"
+
+    def _fake_run_factory(probe_duration: str):
+        def _fake_run(cmd, timeout=1800):  # noqa: ARG005
+            if cmd[0] == "ffmpeg":
+                out.write_bytes(b"mp4")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 0, probe_duration, "")
+
+        return _fake_run
+
+    # 33 ms short of a 1.0s timeline: one frame at 30 fps — must pass.
+    monkeypatch.setattr(lossless_intake, "_run", _fake_run_factory("0.967"))
+    derive_video(source, out, 1.0)
+    assert out.exists()
+
+    # 150 ms short: beyond the widened tolerance — must raise.
+    monkeypatch.setattr(lossless_intake, "_run", _fake_run_factory("0.850"))
+    out.unlink(missing_ok=True)
+    with pytest.raises(IntakeError):
+        derive_video(source, out, 1.0)

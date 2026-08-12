@@ -51,7 +51,13 @@ def handler(job: dict) -> dict:
 
     s3 = create_s3_client()
     handoff_key = f"{prefix}/handoff.json"
-    s3.delete_object(Bucket=bucket, Key=handoff_key)
+    # wave3 #2: do NOT delete the shared handoff.json marker here. A retry that
+    # shares this prefix could be racing an earlier worker that already crossed
+    # the interface; deleting would destroy its valid completion marker and the
+    # publisher (cloud_verifying) would then see PackageNotReady. handoff.json is
+    # written LAST below, so its appearance is the atomic promotion of a newly
+    # complete package — a stale marker from a dead prior attempt can only exist
+    # if that attempt fully succeeded, in which case keeping it is correct.
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         source = tmp_path / Path(input_key).name

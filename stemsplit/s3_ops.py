@@ -9,6 +9,7 @@ staged objects server-side against these checksums before promotion.
 import contextlib
 import hashlib
 import os
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,10 +26,14 @@ def _transfer_callback(
         return None
     transferred = 0
     last_bucket = -1
+    # wave3 #4: boto3 multipart transfers invoke the Callback from several
+    # transfer-manager threads concurrently; the closure state below is shared,
+    # so every read-modify-write is guarded by this lock.
+    lock = threading.Lock()
 
     def callback(bytes_amount: int) -> None:
         nonlocal transferred, last_bucket
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(Exception), lock:
             transferred += bytes_amount
             bucket = min(20, int(20 * transferred / total_bytes))
             if bucket != last_bucket:

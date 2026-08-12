@@ -35,6 +35,28 @@ def _age_seconds(since: datetime | None) -> float | None:
     return (utcnow() - since).total_seconds()
 
 
+async def _cancel_best_effort(
+    ctx: StageContext, runpod_job_id: str, *, reason: str
+) -> None:
+    """Cancel a RunPod job without masking the triggering error.
+
+    A non-retryable ``cancel`` failure must never replace the original error.
+    In the stale-worker path that original error is a *transient* poll failure
+    meant to be retried; letting cancel replace it would permanently fail the
+    job on an unrelated API blip. We log the cancel failure and let the caller
+    fail the worker and raise whatever error it intended (wave3 #1).
+    """
+    try:
+        await ctx.runpod.cancel(runpod_job_id)
+    except Exception:
+        logger.exception(
+            "job %s: cancel failed for %s (%s); failing the worker anyway",
+            ctx.job.id,
+            runpod_job_id,
+            reason,
+        )
+
+
 @dataclass
 class StageContext:
     job: Job
@@ -127,16 +149,23 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 stalled_for is not None
                 and stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
-                try:
-                    await ctx.runpod.cancel(job.runpod_job_id)
-                finally:
-                    await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await _cancel_best_effort(
+                    ctx, job.runpod_job_id, reason="stale worker heartbeat"
+                )
+                await ctx.jobs.record_worker_progress(job.id, phase="failed")
                 raise
-            await ctx.jobs.append_event(
-                job.id,
-                "runpod_poll_failed",
-                {"error_code": exc.code.value, "detail": exc.detail[:500]},
-            )
+            # wave3 #3: dedup runpod_poll_failed to one row per outage, like the
+            # bounded history in record_worker_progress. The most recent event
+            # being a runpod_poll_failed means we are still inside the same
+            # outage; any other event (dispatch, worker_completed, phase change,
+            # …) resets it so the next outage gets a fresh row.
+            events = await ctx.jobs.list_events(job.id)
+            if not events or events[-1].event != "runpod_poll_failed":
+                await ctx.jobs.append_event(
+                    job.id,
+                    "runpod_poll_failed",
+                    {"error_code": exc.code.value, "detail": exc.detail[:500]},
+                )
             logger.warning("job %s: transient RunPod poll failure: %s", job.id, exc)
             return None
         status, phase = parse_worker_progress(status_payload)
@@ -160,7 +189,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         if status == "IN_QUEUE":
             queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
-                await ctx.runpod.cancel(job.runpod_job_id)
+                await _cancel_best_effort(ctx, job.runpod_job_id, reason="queue timeout")
                 await ctx.jobs.record_worker_progress(job.id, phase="failed")
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,
@@ -176,7 +205,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if stalled_for is not None and (
                 stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
-                await ctx.runpod.cancel(job.runpod_job_id)
+                await _cancel_best_effort(ctx, job.runpod_job_id, reason="worker stall")
                 await ctx.jobs.record_worker_progress(job.id, phase="failed")
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,

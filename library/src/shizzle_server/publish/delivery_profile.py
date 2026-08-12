@@ -48,7 +48,13 @@ START_TOLERANCE_SEC = 0.020
 # invariant; a bounded common tail beyond the video master is harmless.
 STEM_DURATION_TOLERANCE_SEC = 0.080
 STEM_INTER_DURATION_TOLERANCE_SEC = 0.005
-TRACK_DURATION_TOLERANCE_SEC = 0.050
+# The video-duration gate compares an H.264 encode against the stem timeline.
+# At 30 fps one frame is ~33 ms and a clean encode can end a single frame early
+# or late; 50 ms barely cleared one frame and tripped on GOP quantization, so
+# the tolerance is at least one full frame-duration of headroom (wave3 #5).
+# Used by derive_video's post-encode probe and the delivery profile stream
+# check — both are the same invariant (video vs stem timeline).
+TRACK_DURATION_TOLERANCE_SEC = 0.100
 MAX_TOTAL_AVERAGE_BITRATE = 2_500_000
 
 
