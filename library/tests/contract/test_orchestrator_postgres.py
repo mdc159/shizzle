@@ -290,3 +290,54 @@ class TestOrchestratorLiveness:
         await asyncio.sleep(1.5)
         second = await hb_repo.latest()
         assert second > first
+
+
+class TestDispatchedPark:
+    """WS4 claim-based reconciliation on real Postgres: two workers, one
+    dispatched job, exactly one claim per recheck interval, and park frees the
+    lease without consuming an attempt.
+
+    Repo-level (no subprocess): the SKIP LOCKED + lease + next_retry_at
+    predicates are the contract the orchestrator loop relies on, and they are
+    what makes ``handle_dispatched`` multi-worker safe by construction.
+    """
+
+    async def test_park_frees_lease_and_gates_reclaim_until_recheck(
+        self, pg_repos, pg_engine, data_dir
+    ):
+        job_repo, _, _ = pg_repos
+        job = await make_upload_job(job_repo, data_dir)
+        for a, b in [
+            (JobStage.pending, JobStage.downloading),
+            (JobStage.downloading, JobStage.dispatched),
+        ]:
+            await job_repo.advance(job.id, from_stage=a, to_stage=b)
+
+        # Worker A claims the dispatched job; worker B is locked out (live lease).
+        claimed = await job_repo.claim_next(worker_id="A", lease_seconds=120)
+        assert claimed is not None and claimed.id == job.id
+        assert await job_repo.claim_next(worker_id="B", lease_seconds=120) is None
+
+        # A parks: lease freed, recheck scheduled, attempt untouched.
+        await job_repo.park(job.id, worker_id="A", recheck_in_seconds=2.0)
+        parked = await job_repo.get_job(job.id)
+        assert parked.status == JobStage.dispatched
+        assert parked.attempt == 0
+        assert parked.lease_owner is None
+        assert parked.lease_expires_at is None
+        assert parked.next_retry_at is not None
+
+        # Recheck interval not yet elapsed -> still unclaimable (one claim/interval).
+        assert await job_repo.claim_next(worker_id="B", lease_seconds=120) is None
+
+        # Advance past next_retry_at on the real DB, then B reclaims it.
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE jobs SET next_retry_at = :past WHERE id = :id"),
+                {"past": utcnow() - timedelta(seconds=1), "id": job.id},
+            )
+        reclaimed = await job_repo.claim_next(worker_id="B", lease_seconds=120)
+        assert reclaimed is not None and reclaimed.id == job.id
+        assert reclaimed.lease_owner == "B"
+        events = [e.event for e in await job_repo.list_events(job.id)]
+        assert events.count("stage_completed") == 2  # -> downloading -> dispatched

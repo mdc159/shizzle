@@ -187,3 +187,48 @@ async def test_generation_rollback_uses_same_atomic_ledger(track_repo):
     event = (await track_repo.list_generation_events(track_id))[0]
     assert event.event == "rollback"
     assert event.detail["reason"] == "drill"
+
+
+async def test_park_frees_lease_without_consuming_attempt_or_adding_event(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+
+    await job_repo.park(upload_job.id, worker_id="worker-a", recheck_in_seconds=10)
+
+    parked = await job_repo.get_job(upload_job.id)
+    assert parked is not None
+    assert parked.attempt == 0
+    assert parked.next_retry_at is not None
+    assert parked.lease_owner is None
+    assert parked.lease_expires_at is None
+    assert [event.event for event in await job_repo.list_events(upload_job.id)] == ["created"]
+
+
+async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job):
+    await job_repo.record_dispatch(upload_job.id, runpod_job_id="runpod-1")
+    dispatched = await job_repo.get_job(upload_job.id)
+    assert dispatched is not None
+    assert dispatched.runpod_job_id == "runpod-1"
+    assert dispatched.worker_phase == "dispatched"
+    first_heartbeat = dispatched.worker_heartbeat_at
+    assert first_heartbeat is not None
+
+    assert await job_repo.record_worker_progress(upload_job.id, phase="dispatched") is False
+    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is True
+    changed = await job_repo.get_job(upload_job.id)
+    assert changed is not None
+    assert changed.worker_phase == "separate"
+    assert changed.worker_heartbeat_at is not None
+    assert changed.worker_heartbeat_at >= first_heartbeat
+
+    changed_heartbeat = changed.worker_heartbeat_at
+    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is False
+    unchanged = await job_repo.get_job(upload_job.id)
+    assert unchanged is not None and unchanged.worker_heartbeat_at == changed_heartbeat
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events] == [
+        "created",
+        "runpod_dispatched",
+        "worker_progress",
+    ]
+    assert events[-1].detail == {"phase": "separate"}

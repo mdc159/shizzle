@@ -10,15 +10,26 @@ idempotent (see repository.publish_track).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..db.models import Job, JobStage, SourceType
-from ..db.repository import JobRepository
+from ..db.models import Job, JobStage, SourceType, utcnow
+from ..db.repository import JobRepository, track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..settings import Settings
+from . import cloud
 from .pipelines import Pipeline
-from .runpod_client import RunPodClient
+from .runpod_client import RunPodClient, parse_worker_progress
+
+
+def _age_seconds(since: datetime | None) -> float | None:
+    """Seconds elapsed since ``since``; SQLite naive datetimes treated as UTC."""
+    if since is None:
+        return None
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=UTC)
+    return (utcnow() - since).total_seconds()
 
 
 @dataclass
@@ -70,23 +81,106 @@ async def handle_downloading(ctx: StageContext) -> JobStage:
             f"uploaded source not found on disk: {ctx.source_path.name}",
             retryable=False,
         )
-    # Phase 2: local processing path. TODO(Phase 3): when cloud mode is
-    # configured, upload source to S3 staging and return JobStage.dispatched
-    # via ctx.runpod.dispatch(...) instead.
+    if ctx.settings.cloud_pipeline:
+        # Cloud path: ship the source to S3 and hand off to the RunPod worker.
+        # Local Demucs (splitting) never runs — `dispatched` IS the split.
+        await cloud.upload_source(ctx)
+        return JobStage.dispatched
     return JobStage.splitting
 
 
-async def handle_dispatched(_ctx: StageContext) -> JobStage:
-    """Phase 3 seam — never claimed by the Phase 2 loop (not in RUNNABLE_STAGES).
+async def handle_dispatched(ctx: StageContext) -> JobStage | None:
+    """One claim-based reconciliation pass for the RunPod split (decision 4).
 
-    TODO(Phase 3, 3.2): webhook receiver + polling reconciler own this stage;
-    this handler becomes the reconciler's recovery check.
+    Returns ``None`` to park (recheck in ``runpod_poll_seconds``); a stage to
+    advance to; or raises a retryable ``StageError`` (bounded by the attempt
+    cap). A RunPod job we have already marked dead (``worker_phase == "failed"``)
+    is treated as absent so a retry dispatches fresh under a new idempotency key.
     """
-    raise StageError(
-        ErrorCode.RUNPOD_DISPATCH_FAILED,
-        "dispatched stage requires the Phase 3 RunPod client",
-        retryable=False,
+    job = ctx.job
+    track_id = track_id_for_job(job.id)
+    payload = {
+        "track_id": str(track_id),
+        "generation": 1,
+        "bucket": ctx.settings.s3_media_bucket,
+        "input_key": cloud.source_key(track_id),
+        "output_prefix": cloud.separation_prefix(track_id),
+    }
+
+    if job.runpod_job_id and job.worker_phase != "failed":
+        status_payload = await ctx.runpod.poll(job.runpod_job_id)
+        status, phase = parse_worker_progress(status_payload)
+
+        if status == "COMPLETED":
+            await ctx.jobs.append_event(
+                job.id, "worker_completed", detail=status_payload.get("output") or {}
+            )
+            return JobStage.verifying
+
+        if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
+            await ctx.jobs.record_worker_progress(job.id, phase="failed")
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED,
+                f"RunPod job {job.runpod_job_id} {status}: {_runpod_error(status_payload)}",
+                retryable=True,
+            )
+
+        if status == "IN_QUEUE":
+            queued_for = _age_seconds(job.updated_at)
+            if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
+                await ctx.runpod.cancel(job.runpod_job_id)
+                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                raise StageError(
+                    ErrorCode.RUNPOD_TIMEOUT,
+                    f"RunPod queued {queued_for:.0f}s > "
+                    f"{ctx.settings.runpod_queue_timeout_seconds:.0f}s",
+                    retryable=True,
+                )
+            await ctx.jobs.record_worker_progress(job.id, phase="queued")
+            return None
+
+        if status == "IN_PROGRESS":
+            stalled_for = _age_seconds(job.worker_heartbeat_at)
+            if stalled_for is not None and (
+                stalled_for > ctx.settings.runpod_worker_stall_seconds
+            ):
+                await ctx.runpod.cancel(job.runpod_job_id)
+                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                raise StageError(
+                    ErrorCode.RUNPOD_TIMEOUT,
+                    f"RunPod worker stalled (heartbeat age > "
+                    f"{ctx.settings.runpod_worker_stall_seconds:.0f}s)",
+                    retryable=True,
+                )
+            if phase:
+                await ctx.jobs.record_worker_progress(job.id, phase=phase)
+            return None
+
+        return None  # unknown status — park and re-poll next interval
+
+    # No live RunPod job (fresh, or the previous one died): dispatch.
+    runpod_id = await ctx.runpod.dispatch(
+        job_id=job.id,
+        idempotency_key=f"{job.id.hex}:{job.attempt}",
+        payload=payload,
     )
+    await ctx.jobs.record_dispatch(job.id, runpod_job_id=runpod_id)
+    return None
+
+
+def _runpod_error(payload: dict[str, Any]) -> str:
+    """Best-effort human detail from a RunPod failure payload."""
+    for key in ("error", "errors"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value[:200]
+    output = payload.get("output")
+    if isinstance(output, dict):
+        for key in ("error", "message"):
+            value = output.get(key)
+            if isinstance(value, str) and value:
+                return value[:200]
+    return ""
 
 
 async def handle_splitting(ctx: StageContext) -> JobStage:
@@ -99,17 +193,22 @@ async def handle_splitting(ctx: StageContext) -> JobStage:
 
 
 async def handle_verifying(ctx: StageContext) -> JobStage:
-    """Structural artifact check (Phase 3 adds staged-checksum verification)."""
+    """Structural artifact check; cloud path re-proves the worker package."""
+    if ctx.settings.cloud_pipeline:
+        return await cloud.cloud_verifying(ctx)
     ctx.detail["verify"] = await ctx.pipeline.verify(ctx.job_dir)
     return JobStage.publishing
 
 
 async def handle_publishing(ctx: StageContext) -> JobStage:
-    """Write the tracks row (generation 1, local prefix placeholder) and finish.
+    """Write the tracks row and finish.
 
-    TODO(Phase 3, 3.4): the cloud publisher takes this over — verify staged
-    sha256s, copy staging -> immutable generation prefix, manifest last.
+    Cloud path: transform the verified package into a browser generation and
+    publish immutably (manifest last) via JobRepository.publish_track. Local
+    path: reuse the on-disk pipeline describe + a local placeholder prefix.
     """
+    if ctx.settings.cloud_pipeline:
+        return await cloud.cloud_publishing(ctx)
     manifest = await ctx.pipeline.describe(ctx.job_dir)
     local_prefix = f"local/{ctx.job.id.hex}"
     try:

@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     shizzle_test_stage_sleep: float = 0.0
     shizzle_test_fail_times: int = 0
 
+    # RunPod serverless settings, used only when shizzle_pipeline="cloud".
+    runpod_api_key: str = ""
+    runpod_endpoint_id: str = ""
+    runpod_api_base: str = "https://api.runpod.ai/v2"
+    runpod_poll_seconds: float = 10.0
+    runpod_queue_timeout_seconds: float = 900.0
+    runpod_worker_stall_seconds: float = 300.0
+
     processing_profile_version: int = 1
 
     # --- auth (design spec §7) -----------------------------------------------
@@ -85,6 +93,10 @@ class Settings(BaseSettings):
     media_cookie_path: str = "/cdn"
     # Signed-cookie validity. Refreshed by /api/media/session.
     media_ttl_seconds: int = 24 * 3600
+
+    @property
+    def cloud_pipeline(self) -> bool:
+        return self.shizzle_pipeline == "cloud"
 
     @property
     def auth_enabled(self) -> bool:

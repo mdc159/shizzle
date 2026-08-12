@@ -220,6 +220,57 @@ class JobRepository:
                 .values(lease_owner=None, lease_expires_at=None, updated_at=utcnow())
             )
 
+    async def park(
+        self, job_id: uuid.UUID, *, worker_id: str, recheck_in_seconds: float
+    ) -> None:
+        """Schedule a claimed job for recheck without consuming an attempt."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.lease_owner == worker_id)
+                .values(
+                    next_retry_at=now + timedelta(seconds=recheck_in_seconds),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+
+    async def record_dispatch(self, job_id: uuid.UUID, *, runpod_job_id: str) -> None:
+        """Record a RunPod dispatch and seed its worker heartbeat."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise LookupError(f"job {job_id} does not exist")
+            job.runpod_job_id = runpod_job_id
+            job.worker_phase = "dispatched"
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    event="runpod_dispatched",
+                    detail={"runpod_job_id": runpod_job_id},
+                )
+            )
+
+    async def record_worker_progress(self, job_id: uuid.UUID, *, phase: str) -> bool:
+        """Record only worker phase changes, keeping heartbeat history bounded."""
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise LookupError(f"job {job_id} does not exist")
+            if job.worker_phase == phase:
+                return False
+            now = utcnow()
+            job.worker_phase = phase
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
+            return True
+
     # --- state machine -------------------------------------------------------
 
     async def advance(

@@ -59,6 +59,72 @@ class IntakeError(RuntimeError):
     """A package failed verification or the transform failed a gate."""
 
 
+# --- 0. fetch the package across the interface --------------------------------
+
+
+def _head_or_none(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
+    try:
+        head: dict[str, Any] = s3.head_object(Bucket=bucket, Key=key)
+        return head
+    except Exception as exc:
+        resp = getattr(exc, "response", None)
+        if isinstance(resp, dict) and (
+            str(resp.get("Error", {}).get("Code", "")) in ("404", "NoSuchKey", "NotFound")
+            or resp.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404
+        ):
+            return None
+        raise
+
+
+def _download_object(
+    s3: Any, bucket: str, key: str, dest: Path, expected_size: int | None = None
+) -> None:
+    """Fetch one object, skipping when the local file already matches in size."""
+    dest = Path(dest)
+    if (
+        expected_size is not None
+        and dest.exists()
+        and dest.stat().st_size == expected_size
+    ):
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    s3.download_file(bucket, key, str(dest))
+
+
+def download_package(s3: Any, bucket: str, package_prefix: str, dest: Path) -> Path:
+    """Pull a ``lossless-stem-v1`` package from S3 into ``dest``.
+
+    The interface contract: ``handoff.json`` arrives at ``{prefix}/handoff.json``
+    only once the worker has finished writing every stem. Its absence means the
+    package has not crossed the interface yet — we refuse to read a half-written
+    prefix. Stems are downloaded from the paths declared in the handoff so the
+    worker's key layout stays its own concern. Idempotent: files already on
+    disk with a matching size are skipped, so re-runs after a crash cost only
+    the handoff read.
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    handoff_key = f"{package_prefix}/handoff.json"
+    head = _head_or_none(s3, bucket, handoff_key)
+    if head is None:
+        raise IntakeError("package has not crossed the interface")
+    handoff_dest = dest / "handoff.json"
+    _download_object(
+        s3, bucket, handoff_key, handoff_dest, expected_size=int(head.get("ContentLength", -1))
+    )
+
+    handoff = json.loads(handoff_dest.read_text())
+    for entry in handoff.get("stems", []):
+        rel = str(entry["file"]).lstrip("/")
+        _download_object(
+            s3, bucket, f"{package_prefix}/{rel}", dest / rel,
+            expected_size=int(entry["bytes"]) if "bytes" in entry else None,
+        )
+    logger.info("package downloaded into %s (%d stems)", dest, len(handoff.get("stems", [])))
+    return dest
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:

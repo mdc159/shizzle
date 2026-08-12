@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Generic, TypeVar
@@ -137,6 +137,29 @@ class CircuitBreaker(Generic[T]):
         elapsed = time.time() - self._last_failure_time
         return elapsed > self.config.timeout_seconds
 
+    def _before_call(self) -> None:
+        """Reject open circuits or move them to half-open after the timeout."""
+        if self._state != CircuitState.OPEN:
+            return
+        if self._should_attempt_reset():
+            self._transition_to(CircuitState.HALF_OPEN)
+            logger.debug(f"Circuit breaker '{self.name}' entering half-open state")
+            return
+        raise RuntimeError(
+            f"Circuit breaker '{self.name}' is open (failed {self._failures} times)"
+        )
+
+    def _record_success(self) -> None:
+        """Close a recovered half-open circuit after enough successes."""
+        if self._state != CircuitState.HALF_OPEN:
+            return
+        self._successes_in_half_open += 1
+        if self._successes_in_half_open >= self.config.success_threshold:
+            self._transition_to(CircuitState.CLOSED)
+            self._failures = 0
+            self._successes_in_half_open = 0
+            logger.info(f"Circuit breaker '{self.name}' closed - service recovered")
+
     def call(self, func: Callable[[], T], *args: Any, **kwargs: Any) -> T:
         """
         Execute function with circuit breaker protection.
@@ -153,32 +176,22 @@ class CircuitBreaker(Generic[T]):
             RuntimeError: If circuit is open
             Any exception: If func raises and circuit stays closed/half-open
         """
-        # Check if we should transition from open to half-open
-        if self._state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self._transition_to(CircuitState.HALF_OPEN)
-                logger.debug(f"Circuit breaker '{self.name}' entering half-open state")
-            else:
-                raise RuntimeError(
-                    f"Circuit breaker '{self.name}' is open "
-                    f"(failed {self._failures} times)"
-                )
-
+        self._before_call()
         try:
-            # Execute the function
             result = func(*args, **kwargs) if args or kwargs else func()
-
-            # Success - update state
-            if self._state == CircuitState.HALF_OPEN:
-                self._successes_in_half_open += 1
-                if self._successes_in_half_open >= self.config.success_threshold:
-                    self._transition_to(CircuitState.CLOSED)
-                    self._failures = 0
-                    self._successes_in_half_open = 0
-                    logger.info(f"Circuit breaker '{self.name}' closed - service recovered")
-
+            self._record_success()
             return result
+        except Exception:
+            self._record_failure()
+            raise
 
+    async def call_async(self, factory: Callable[[], Awaitable[T]]) -> T:
+        """Execute an awaitable factory with circuit breaker protection."""
+        self._before_call()
+        try:
+            result = await factory()
+            self._record_success()
+            return result
         except Exception:
             self._record_failure()
             raise
