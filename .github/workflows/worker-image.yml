@@ -30,6 +30,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: stemsplit
+          file: stemsplit/Dockerfile.lossless
           push: true
           # The commit-sha tag is the only tag: human-alias tags are
           # re-pushable and therefore not immutable. handoff.json records
