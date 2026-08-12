@@ -59,6 +59,11 @@ RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 RUN pip3 install runpod boto3 requests
 
 # Code last (most volatile layer)
+# Provenance self-id, injected by the CI build. Placed here — after the heavy
+# dependency and weights layers — so changing it never invalidates their cache.
+ARG WORKER_IMAGE=dev
+ENV WORKER_IMAGE=$WORKER_IMAGE
+
 COPY lossless_worker.py lossless_handler.py s3_ops.py ./
 
 # No Docker HEALTHCHECK — RunPod's own probe fights it on a ~15 GB image

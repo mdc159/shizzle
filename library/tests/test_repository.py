@@ -8,7 +8,11 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from shizzle_server.db.models import JobStage, SourceType
-from shizzle_server.db.repository import TrackGenerationConflict, track_id_for_job
+from shizzle_server.db.repository import (
+    InvalidTransition,
+    TrackGenerationConflict,
+    track_id_for_job,
+)
 
 
 async def test_create_and_get_job(job_repo):
@@ -205,7 +209,16 @@ async def test_park_frees_lease_without_consuming_attempt_or_adding_event(job_re
 
 
 async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job):
-    await job_repo.record_dispatch(upload_job.id, runpod_job_id="runpod-1")
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+    )
     dispatched = await job_repo.get_job(upload_job.id)
     assert dispatched is not None
     assert dispatched.runpod_job_id == "runpod-1"
@@ -228,7 +241,28 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
     events = await job_repo.list_events(upload_job.id)
     assert [event.event for event in events] == [
         "created",
+        "stage_completed",
+        "stage_completed",
         "runpod_dispatched",
         "worker_progress",
     ]
     assert events[-1].detail == {"phase": "separate"}
+
+
+async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_repo, upload_job):
+    with pytest.raises(InvalidTransition):
+        await job_repo.record_dispatch(
+            upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+        )
+
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    with pytest.raises(InvalidTransition):
+        await job_repo.record_dispatch(
+            upload_job.id, worker_id="worker-b", runpod_job_id="runpod-1"
+        )

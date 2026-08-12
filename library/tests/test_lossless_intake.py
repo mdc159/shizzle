@@ -8,13 +8,21 @@ These three tests cover the contract gate, the happy path, and idempotency.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from shizzle_server.publish.lossless_intake import IntakeError, download_package
+from shizzle_server.publish import lossless_intake
+from shizzle_server.publish.lossless_intake import (
+    IntakeError,
+    Package,
+    common_gain_db,
+    derive_video,
+    download_package,
+)
 
 BUCKET = "shizzle-intake-test"
 PREFIX = "tracks/abc/1/separation"
@@ -118,3 +126,82 @@ def test_download_package_idempotent_skips_existing_matching_files(s3, tmp_path:
     assert rec.downloads == first
     for role in ROLES:
         assert (dest / "stems" / f"{role}.wav").stat().st_size == sizes[role]
+
+
+def test_download_package_rejects_path_traversal(s3, tmp_path: Path):
+    handoff = _make_handoff(dict.fromkeys(ROLES, 10))
+    handoff["stems"][0]["file"] = "../../evil"
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=f"{PREFIX}/handoff.json",
+        Body=json.dumps(handoff).encode(),
+    )
+
+    with pytest.raises(IntakeError, match="escapes package directory"):
+        download_package(s3, BUCKET, PREFIX, tmp_path / "pkg")
+    assert not (tmp_path / "evil").exists()
+
+
+@pytest.mark.parametrize(
+    ("true_peak", "gain"),
+    [(-2.0, 0.0), (-1.0, 0.0), (-0.96, -0.1), (-0.9, -0.1), (0.0, -1.0)],
+)
+def test_common_gain_never_rounds_toward_zero(true_peak: float, gain: float):
+    assert common_gain_db(true_peak) == gain
+
+
+def test_transform_emits_player_timeline_contract(tmp_path: Path, monkeypatch):
+    pkg = Package(
+        root=tmp_path / "pkg",
+        handoff={
+            "source": {"sha256": "abc", "object_key": "sources/id/source.mp4"},
+            "separation": {
+                "sample_count": 103_414,
+                "worker_image": "worker:sha",
+            },
+        },
+    )
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+
+    monkeypatch.setattr(lossless_intake, "measure_default_mix_true_peak", lambda _pkg: -2.0)
+
+    def fake_encode(_wav: Path, out: Path) -> None:
+        out.write_bytes(b"audio")
+
+    def fake_video(_source: Path, out: Path, _duration: float, maxrate_kbps=1200) -> None:
+        out.write_bytes(b"video")
+
+    monkeypatch.setattr(lossless_intake, "encode_stem", fake_encode)
+    monkeypatch.setattr(lossless_intake, "derive_video", fake_video)
+
+    manifest = lossless_intake.transform(pkg, source, tmp_path / "candidate", "T", "A")
+    assert manifest["timeline"] == {
+        "start_ms": 0,
+        "duration_ms": int(pkg.duration_seconds * 1000),
+        "sample_rate_hz": 44100,
+    }
+
+
+def test_derive_video_caps_and_probes_synthetic_fixture(tmp_path: Path):
+    source = tmp_path / "synthetic.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+            "-i", "color=c=black:s=160x90:r=30:d=2", "-pix_fmt", "yuv420p",
+            str(source),
+        ],
+        check=True,
+    )
+    out = tmp_path / "video.mp4"
+    derive_video(source, out, 0.75)
+    actual = float(subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(out),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip())
+    assert abs(actual - 0.75) <= 0.5

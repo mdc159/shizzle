@@ -98,7 +98,16 @@ async def test_job_events_and_worker_fields(client):
         json={"url": "https://example.com/song", "title": "Timeline"},
     )).json()["jobId"]
     parsed_id = uuid.UUID(job_id)
-    await app.state.job_repo.record_dispatch(parsed_id, runpod_job_id="runpod-1")
+    await app.state.job_repo.advance(
+        parsed_id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.job_repo.advance(
+        parsed_id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await app.state.job_repo.claim_next(worker_id="api-test", lease_seconds=60)
+    await app.state.job_repo.record_dispatch(
+        parsed_id, worker_id="api-test", runpod_job_id="runpod-1"
+    )
     await app.state.job_repo.record_worker_progress(parsed_id, phase="separating")
 
     status = (await c.get(f"/api/jobs/{job_id}")).json()
@@ -111,6 +120,8 @@ async def test_job_events_and_worker_fields(client):
     events = response.json()["events"]
     assert [event["event"] for event in events] == [
         "created",
+        "stage_completed",
+        "stage_completed",
         "runpod_dispatched",
         "worker_progress",
     ]

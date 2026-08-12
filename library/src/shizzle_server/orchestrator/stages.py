@@ -9,6 +9,7 @@ idempotent (see repository.publish_track).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,8 @@ from ..settings import Settings
 from . import cloud
 from .pipelines import Pipeline
 from .runpod_client import RunPodClient, parse_worker_progress
+
+logger = logging.getLogger(__name__)
 
 
 def _age_seconds(since: datetime | None) -> float | None:
@@ -39,10 +42,12 @@ class StageContext:
     pipeline: Pipeline
     jobs: JobRepository
     runpod: RunPodClient
+    worker_id: str
     # Set by handle_publishing when it commits the track+ready transaction
     # itself; the loop then skips its own advance() call.
     published: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
+    park_seconds: float | None = None
 
     @property
     def job_dir(self) -> Path:
@@ -108,13 +113,28 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
     }
 
     if job.runpod_job_id and job.worker_phase != "failed":
-        status_payload = await ctx.runpod.poll(job.runpod_job_id)
+        try:
+            status_payload = await ctx.runpod.poll(job.runpod_job_id)
+        except StageError as exc:
+            transient = exc.retryable and exc.code in {
+                ErrorCode.RUNPOD_TIMEOUT,
+                ErrorCode.RUNPOD_DISPATCH_FAILED,
+            }
+            stalled_for = _age_seconds(job.worker_heartbeat_at)
+            if not transient or (
+                stalled_for is not None
+                and stalled_for > ctx.settings.runpod_worker_stall_seconds
+            ):
+                raise
+            ctx.detail["poll_failures"] = int(ctx.detail.get("poll_failures", 0)) + 1
+            logger.warning("job %s: transient RunPod poll failure: %s", job.id, exc)
+            return None
         status, phase = parse_worker_progress(status_payload)
 
         if status == "COMPLETED":
-            await ctx.jobs.append_event(
-                job.id, "worker_completed", detail=status_payload.get("output") or {}
-            )
+            output = status_payload.get("output")
+            detail = output if isinstance(output, dict) else {"output": output}
+            await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
             return JobStage.verifying
 
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
@@ -126,7 +146,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             )
 
         if status == "IN_QUEUE":
-            queued_for = _age_seconds(job.updated_at)
+            queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
                 await ctx.runpod.cancel(job.runpod_job_id)
                 await ctx.jobs.record_worker_progress(job.id, phase="failed")
@@ -159,12 +179,38 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         return None  # unknown status — park and re-poll next interval
 
     # No live RunPod job (fresh, or the previous one died): dispatch.
-    runpod_id = await ctx.runpod.dispatch(
-        job_id=job.id,
-        idempotency_key=f"{job.id.hex}:{job.attempt}",
-        payload=payload,
+    events = await ctx.jobs.list_events(job.id)
+    needs_grace = False
+    for event in events:
+        if event.event == "dispatch_unconfirmed":
+            needs_grace = True
+        elif event.event == "dispatch_unconfirmed_grace":
+            needs_grace = False
+    if needs_grace:
+        # A lost response may still have started the worker. Double-run is safe
+        # (package writes are overwrite-idempotent, handoff-last); this grace
+        # only bounds wasted GPU before a fresh dispatch.
+        await ctx.jobs.append_event(job.id, "dispatch_unconfirmed_grace")
+        ctx.park_seconds = 2 * ctx.settings.runpod_poll_seconds
+        return None
+
+    try:
+        runpod_id = await ctx.runpod.dispatch(
+            job_id=job.id,
+            idempotency_key=f"{job.id.hex}:{job.attempt}",
+            payload=payload,
+        )
+    except StageError as exc:
+        if exc.code is ErrorCode.RUNPOD_TIMEOUT:
+            await ctx.jobs.append_event(
+                job.id,
+                "dispatch_unconfirmed",
+                {"attempt": job.attempt, "error": exc.detail[:500]},
+            )
+        raise
+    await ctx.jobs.record_dispatch(
+        job.id, worker_id=ctx.worker_id, runpod_job_id=runpod_id
     )
-    await ctx.jobs.record_dispatch(job.id, runpod_job_id=runpod_id)
     return None
 
 

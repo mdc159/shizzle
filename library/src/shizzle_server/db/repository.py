@@ -237,13 +237,17 @@ class JobRepository:
                 )
             )
 
-    async def record_dispatch(self, job_id: uuid.UUID, *, runpod_job_id: str) -> None:
-        """Record a RunPod dispatch and seed its worker heartbeat."""
+    async def record_dispatch(
+        self, job_id: uuid.UUID, *, worker_id: str, runpod_job_id: str
+    ) -> None:
+        """Record a claimed dispatched job and seed its worker heartbeat."""
         now = utcnow()
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
-                raise LookupError(f"job {job_id} does not exist")
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.dispatched)
+            if job.status != JobStage.dispatched or job.lease_owner != worker_id:
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
             job.runpod_job_id = runpod_job_id
             job.worker_phase = "dispatched"
             job.worker_heartbeat_at = now

@@ -7,6 +7,7 @@ import asyncio
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import boto3
 import pytest
@@ -15,9 +16,14 @@ from moto import mock_aws
 from shizzle_server.api.media import _s3_client
 from shizzle_server.db.models import Job, JobStage, SourceType, utcnow
 from shizzle_server.db.repository import track_id_for_job
+from shizzle_server.errors import ErrorCode, StageError
 from shizzle_server.orchestrator import cloud
 from shizzle_server.orchestrator.loop import Orchestrator
-from shizzle_server.orchestrator.stages import StageContext
+from shizzle_server.orchestrator.stages import (
+    StageContext,
+    _age_seconds,
+    handle_dispatched,
+)
 from shizzle_server.settings import Settings
 
 
@@ -239,6 +245,7 @@ def _ctx_for_upload(settings: Settings, tmp_path: Path) -> StageContext:
     )
     return StageContext(
         job=job, settings=settings, pipeline=None, jobs=None, runpod=None,  # type: ignore[arg-type]
+        worker_id="upload-test",
     )
 
 
@@ -328,7 +335,7 @@ class FakeRunPodClient:
     repeating the last one when the script is exhausted (keeps stall/queue
     watchdog tests deterministic)."""
 
-    def __init__(self, responses: list[dict]) -> None:
+    def __init__(self, responses: list[dict | Exception]) -> None:
         self.responses = list(responses)
         self._i = 0
         self.dispatched: list[tuple[str, str, dict]] = []
@@ -344,6 +351,8 @@ class FakeRunPodClient:
         self.polled.append(runpod_job_id)
         resp = self.responses[min(self._i, len(self.responses) - 1)]
         self._i += 1
+        if isinstance(resp, Exception):
+            raise resp
         return resp
 
     async def cancel(self, runpod_job_id: str) -> None:
@@ -489,6 +498,324 @@ async def test_cloud_dispatched_park_does_not_increment_attempt(
     assert job.attempt == 0
     assert job.runpod_job_id is not None
     assert len(fake.dispatched) == 1  # parked, never re-dispatched
+
+
+async def test_queue_watchdog_age_survives_two_parks(job_repo, upload_job):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="queue-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="queue-test", runpod_job_id="rp-queue"
+    )
+    await job_repo.record_worker_progress(upload_job.id, phase="queued")
+
+    await job_repo.park(
+        upload_job.id, worker_id="queue-test", recheck_in_seconds=0
+    )
+    first = await job_repo.get_job(upload_job.id)
+    first_age = _age_seconds(first.worker_heartbeat_at)
+    await asyncio.sleep(0.02)
+
+    await job_repo.claim_next(worker_id="queue-test", lease_seconds=60)
+    assert await job_repo.record_worker_progress(upload_job.id, phase="queued") is False
+    await job_repo.park(
+        upload_job.id, worker_id="queue-test", recheck_in_seconds=0
+    )
+    second = await job_repo.get_job(upload_job.id)
+    second_age = _age_seconds(second.worker_heartbeat_at)
+
+    assert first_age is not None and second_age is not None
+    assert second_age > first_age
+    assert second.updated_at > second.worker_heartbeat_at
+
+
+async def test_transient_poll_failure_parks_without_consuming_attempt(
+    settings, job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
+    )
+    job = await job_repo.get_job(upload_job.id)
+    fake = FakeRunPodClient([
+        StageError(ErrorCode.RUNPOD_TIMEOUT, "temporary", retryable=True)
+    ])
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="poll-test",
+    )
+
+    assert await handle_dispatched(ctx) is None
+    assert ctx.detail["poll_failures"] == 1
+    assert (await job_repo.get_job(upload_job.id)).attempt == 0
+
+
+async def test_worker_completed_wraps_non_object_output(
+    settings, job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="complete-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="complete-test", runpod_job_id="rp-complete"
+    )
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=FakeRunPodClient([{"status": "COMPLETED", "output": "done"}]),
+        worker_id="complete-test",
+    )
+
+    assert await handle_dispatched(ctx) == JobStage.verifying
+    completed = [
+        event for event in await job_repo.list_events(upload_job.id)
+        if event.event == "worker_completed"
+    ]
+    assert completed[0].detail == {"output": "done"}
+
+
+async def test_dispatch_timeout_gets_one_two_interval_grace(
+    settings, job_repo, upload_job
+):
+    class TimeoutOnce(FakeRunPodClient):
+        async def dispatch(self, *, job_id, idempotency_key, payload):
+            rid = f"rp-{len(self.dispatched) + 1}"
+            self.dispatched.append((rid, idempotency_key, payload))
+            if len(self.dispatched) == 1:
+                raise StageError(ErrorCode.RUNPOD_TIMEOUT, "lost response", retryable=True)
+            return rid
+
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
+    fake = TimeoutOnce([{"status": "COMPLETED", "output": {}}])
+    first = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="grace-test",
+    )
+    with pytest.raises(StageError, match="lost response"):
+        await handle_dispatched(first)
+
+    await job_repo.schedule_retry(
+        upload_job.id,
+        worker_id="grace-test",
+        error_code=ErrorCode.RUNPOD_TIMEOUT,
+        error_detail="lost response",
+        retry_in_seconds=0,
+    )
+    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
+    grace = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="grace-test",
+    )
+    assert await handle_dispatched(grace) is None
+    assert grace.park_seconds == 2 * settings.runpod_poll_seconds
+    assert len(fake.dispatched) == 1
+
+    await job_repo.park(
+        upload_job.id, worker_id="grace-test", recheck_in_seconds=0
+    )
+    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
+    retry = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="grace-test",
+    )
+    assert await handle_dispatched(retry) is None
+    assert len(fake.dispatched) == 2
+    events = [event.event for event in await job_repo.list_events(upload_job.id)]
+    assert events.count("dispatch_unconfirmed") == 1
+    assert events.count("dispatch_unconfirmed_grace") == 1
+
+
+async def test_cloud_verifying_missing_handoff_is_retryable(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+
+    def missing(*_args):
+        from shizzle_server.publish.lossless_intake import IntakeError
+
+        raise IntakeError("package has not crossed the interface")
+
+    monkeypatch.setattr(cloud, "download_package", missing)
+    with pytest.raises(StageError) as exc:
+        await cloud.cloud_verifying(ctx)
+    assert exc.value.code is ErrorCode.CHECKSUM_MISMATCH
+    assert exc.value.retryable is True
+
+
+async def test_cloud_verifying_rejects_source_hash_mismatch(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    ctx.job.input_checksum = "expected"
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(cloud, "download_package", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud,
+        "load_and_verify_package",
+        lambda _path: SimpleNamespace(
+            handoff={
+                "source": {"sha256": "wrong"},
+                "separation": {"sample_count": 44100},
+            },
+            duration_seconds=1.0,
+        ),
+    )
+
+    with pytest.raises(StageError) as exc:
+        await cloud.cloud_verifying(ctx)
+    assert exc.value.code is ErrorCode.CHECKSUM_MISMATCH
+    assert exc.value.retryable is False
+
+
+async def test_cloud_publish_cleans_job_dir_and_persists_verification(
+    settings, job_repo, track_repo, upload_job, monkeypatch
+):
+    for before, after in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+        (JobStage.dispatched, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        job = await job_repo.advance(upload_job.id, from_stage=before, to_stage=after)
+
+    class Verification:
+        def to_integrity(self):
+            return {"policy": "auto", "object_count": 8}
+
+    class FakePublisher:
+        def __init__(self, *_args):
+            pass
+
+        async def publish_async(self, *_args):
+            tid = track_id_for_job(upload_job.id)
+            return SimpleNamespace(
+                s3_prefix=f"tracks/{tid}/1",
+                manifest_key=f"tracks/{tid}/1/manifest.json",
+                verification=Verification(),
+            )
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(
+        cloud, "load_and_verify_package", lambda _path: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        cloud,
+        "transform",
+        lambda *_args: {
+            "title": "Cloud",
+            "artist": "",
+            "duration": 1.0,
+            "integrity": {"worker_image": "worker:sha"},
+        },
+    )
+    monkeypatch.setattr(cloud, "stage", lambda *_args: [])
+    monkeypatch.setattr(cloud, "Publisher", FakePublisher)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="publish-test",
+    )
+
+    assert await cloud.cloud_publishing(ctx) == JobStage.ready
+    assert not ctx.job_dir.exists()
+    track = await track_repo.get(track_id_for_job(upload_job.id))
+    assert track.integrity == {
+        "worker_image": "worker:sha",
+        "publisher": {"policy": "auto", "object_count": 8},
+    }
+
+
+async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(
+    settings, job_repo, upload_job, monkeypatch
+):
+    from shizzle_server.publish.lossless_intake import IntakeError
+
+    for before, after in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+        (JobStage.dispatched, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        job = await job_repo.advance(upload_job.id, from_stage=before, to_stage=after)
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(
+        cloud, "load_and_verify_package", lambda _path: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        cloud,
+        "transform",
+        lambda *_args: (_ for _ in ()).throw(IntakeError("ffmpeg gate")),
+    )
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="publish-test",
+    )
+
+    with pytest.raises(StageError) as intake:
+        await cloud.cloud_publishing(ctx)
+    assert intake.value.code is ErrorCode.PUBLISH_FAILED
+    assert intake.value.retryable is False
+    assert ctx.job_dir.exists()
+
+    monkeypatch.setattr(
+        cloud,
+        "transform",
+        lambda *_args: {"title": "Cloud", "duration": 1.0, "integrity": {}},
+    )
+    monkeypatch.setattr(
+        cloud, "stage", lambda *_args: (_ for _ in ()).throw(RuntimeError("S3 down"))
+    )
+    with pytest.raises(StageError) as transient:
+        await cloud.cloud_publishing(ctx)
+    assert transient.value.code is ErrorCode.PUBLISH_FAILED
+    assert transient.value.retryable is True
+    assert ctx.job_dir.exists()
 
 
 async def _poll_predicate(pred, interval: float = 0.05):

@@ -113,6 +113,7 @@ class Orchestrator:
                     pipeline=self.pipeline,
                     jobs=self.jobs,
                     runpod=self.runpod,
+                    worker_id=self.worker_id,
                 )
                 from_stage = job.status
                 started = time.monotonic()
@@ -144,7 +145,9 @@ class Orchestrator:
                     await self.jobs.park(
                         job.id,
                         worker_id=self.worker_id,
-                        recheck_in_seconds=ctx.settings.runpod_poll_seconds,
+                        recheck_in_seconds=(
+                            ctx.park_seconds or ctx.settings.runpod_poll_seconds
+                        ),
                     )
                     return
                 if ctx.published:

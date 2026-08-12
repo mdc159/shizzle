@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import subprocess
 import uuid
@@ -115,10 +116,14 @@ def download_package(s3: Any, bucket: str, package_prefix: str, dest: Path) -> P
     )
 
     handoff = json.loads(handoff_dest.read_text())
+    root = dest.resolve()
     for entry in handoff.get("stems", []):
         rel = str(entry["file"]).lstrip("/")
+        target = (dest / rel).resolve()
+        if not target.is_relative_to(root):
+            raise IntakeError(f"stem path escapes package directory: {rel}")
         _download_object(
-            s3, bucket, f"{package_prefix}/{rel}", dest / rel,
+            s3, bucket, f"{package_prefix}/{rel}", target,
             expected_size=int(entry["bytes"]) if "bytes" in entry else None,
         )
     logger.info("package downloaded into %s (%d stems)", dest, len(handoff.get("stems", [])))
@@ -212,7 +217,7 @@ def common_gain_db(true_peak_dbtp: float) -> float:
     """At most one common attenuation; never per-stem, never a boost."""
     if true_peak_dbtp <= TRUE_PEAK_CEILING_DBTP:
         return 0.0
-    return round(TRUE_PEAK_CEILING_DBTP - true_peak_dbtp, 1)
+    return math.floor((TRUE_PEAK_CEILING_DBTP - true_peak_dbtp) * 10) / 10
 
 
 # --- 3. the fixed derivations (reference commands from shizzle-browser-v1) ----
@@ -226,10 +231,12 @@ def encode_stem(wav: Path, m4a: Path) -> None:
     ])
 
 
-def derive_video(source: Path, out: Path, maxrate_kbps: int = 1200) -> None:
+def derive_video(
+    source: Path, out: Path, duration: float, maxrate_kbps: int = 1200
+) -> None:
     _run([
         "ffmpeg", "-y", "-fflags", "+genpts", "-i", str(source),
-        "-map", "0:v:0", "-an",
+        "-map", "0:v:0", "-an", "-t", str(duration),
         "-vf",
         "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:"
         "force_divisible_by=2,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
@@ -240,6 +247,19 @@ def derive_video(source: Path, out: Path, maxrate_kbps: int = 1200) -> None:
         "-movflags", "+faststart", "-video_track_timescale", "90000",
         str(out),
     ])
+    probe = _run([
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(out),
+    ]).stdout.strip()
+    try:
+        actual = float(probe)
+    except ValueError as exc:
+        raise IntakeError(f"could not read derived video duration: {probe!r}") from exc
+    delta = actual - duration
+    if delta < -1.0 or delta > 0.5:
+        raise IntakeError(
+            f"video duration {actual:.3f}s is outside the stem timeline {duration:.3f}s"
+        )
 
 
 # --- 4. transform: package -> candidate generation on disk --------------------
@@ -256,10 +276,9 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
     for role in STEM_ROLES:
         logger.info("encode %s.m4a", role)
         encode_stem(pkg.root / "stems" / f"{role}.wav", candidate / "stems" / f"{role}.m4a")
-    logger.info("derive video.mp4")
-    derive_video(source_video, candidate / "video.mp4")
-
     duration = pkg.duration_seconds
+    logger.info("derive video.mp4")
+    derive_video(source_video, candidate / "video.mp4", duration)
 
     def _avg_bps() -> float:
         total = sum(p.stat().st_size for p in candidate.rglob("*") if p.is_file())
@@ -279,7 +298,10 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
             "(audio measures %.3f Mb/s)",
             _avg_bps() / 1e6, allowance_kbps, audio_bps / 1e6,
         )
-        derive_video(source_video, candidate / "video.mp4", maxrate_kbps=allowance_kbps)
+        derive_video(
+            source_video, candidate / "video.mp4", duration,
+            maxrate_kbps=allowance_kbps,
+        )
 
     avg_bps = _avg_bps()
     if avg_bps > TRACK_BUDGET_BPS:
@@ -308,7 +330,11 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
             }
             for role in STEM_ROLES
         ],
-        "timeline": {"start": 0.0, "duration": duration, "sample_rate_hz": SAMPLE_RATE},
+        "timeline": {
+            "start_ms": 0,
+            "duration_ms": int(duration * 1000),
+            "sample_rate_hz": SAMPLE_RATE,
+        },
         "integrity": {
             "source": INTERFACE,
             "handoff_source_sha256": pkg.handoff["source"]["sha256"],

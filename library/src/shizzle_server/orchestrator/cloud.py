@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -45,8 +46,8 @@ SEPARATION_SEGMENT = "separation"
 
 
 def source_key(track_id: uuid.UUID | str) -> str:
-    """Immutable per-generation source location: ``tracks/{id}/{gen}/source/source.mp4``."""
-    return f"tracks/{track_id}/{GENERATION}/source/source.mp4"
+    """Private upload source outside the browser cookie's ``tracks/*`` scope."""
+    return f"sources/{track_id}/source.mp4"
 
 
 def separation_prefix(track_id: uuid.UUID | str) -> str:
@@ -104,9 +105,8 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
 
     ``download_package`` asserts handoff.json crossed the interface first; the
     existing ``load_and_verify_package`` re-proves every hash/size/format claim
-    against the actual files. Any intake failure is a non-retryable checksum
-    mismatch (re-running against the same corrupted package yields the same
-    failure — the job must be re-split).
+    against the actual files. A missing handoff is transient because the worker
+    may still be uploading; other intake failures require a re-split.
     """
     track_id = track_id_for_job(ctx.job.id)
     pkg_dir = ctx.job_dir / "package"
@@ -123,9 +123,17 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
         pkg = await asyncio.to_thread(load_and_verify_package, pkg_dir)
     except IntakeError as exc:
         raise StageError(
-            ErrorCode.CHECKSUM_MISMATCH, f"package verification failed: {exc}"[:500],
-            retryable=False,
+            ErrorCode.CHECKSUM_MISMATCH,
+            f"package verification failed: {exc}"[:500],
+            retryable=str(exc) == "package has not crossed the interface",
         ) from exc
+    source_sha256 = pkg.handoff.get("source", {}).get("sha256")
+    if ctx.job.input_checksum and source_sha256 != ctx.job.input_checksum:
+        raise StageError(
+            ErrorCode.CHECKSUM_MISMATCH,
+            "worker package source checksum does not match the submitted source",
+            retryable=False,
+        )
     sep = pkg.handoff.get("separation", {})
     ctx.detail["package"] = {
         "duration": pkg.duration_seconds,
@@ -138,28 +146,34 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
     """Transform the verified package + source into a browser generation.
 
     Source comes from the local job dir if present (re-runs), else is fetched
-    from ``source_key``. Then the fixed intake transform/stage/promote runs,
-    and ``publish_track`` writes the tracks row and flips publishing → ready
-    in one transaction (so ``ctx.published`` short-circuits the loop's advance).
-    Non-StageError failures map to PUBLISH_FAILED, mirroring the local handler.
+    from the private ``sources/{track_id}/source.mp4`` key. Then the fixed
+    intake transform/stage/promote runs, and ``publish_track`` writes the tracks
+    row and flips publishing → ready in one transaction. Successful publication
+    removes the complete local job directory.
     """
     track_id = track_id_for_job(ctx.job.id)
     bucket = ctx.settings.s3_media_bucket
-    s3 = s3_client(ctx.settings)
-
-    source = ctx.source_path
-    if not source.exists():
-        source = ctx.job_dir / "source.mp4"
-        await asyncio.to_thread(_download_source, s3, bucket, source_key(track_id), source)
-
-    pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
-    candidate = ctx.job_dir / "candidate"
-    title = ctx.job.title or ctx.job.id.hex
-    manifest = await asyncio.to_thread(transform, pkg, source, candidate, title, "")
-    staged = await asyncio.to_thread(stage, s3, bucket, track_id, GENERATION, candidate, manifest)
 
     try:
+        s3 = s3_client(ctx.settings)
+        source = ctx.source_path
+        if not source.exists():
+            source = ctx.job_dir / "source.mp4"
+            await asyncio.to_thread(
+                _download_source, s3, bucket, source_key(track_id), source
+            )
+
+        pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
+        candidate = ctx.job_dir / "candidate"
+        title = ctx.job.title or ctx.job.id.hex
+        manifest = await asyncio.to_thread(transform, pkg, source, candidate, title, "")
+        staged = await asyncio.to_thread(
+            stage, s3, bucket, track_id, GENERATION, candidate, manifest
+        )
         result = await Publisher(s3, bucket).publish_async(track_id, GENERATION, staged)
+        integrity = dict(manifest.get("integrity") or {})
+        if result.verification is not None:
+            integrity["publisher"] = result.verification.to_integrity()
         await ctx.jobs.publish_track(
             ctx.job.id,
             title=manifest.get("title") or title,
@@ -168,12 +182,19 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
             s3_prefix=result.s3_prefix,
             manifest_key=result.manifest_key,
             generation=GENERATION,
-            integrity=manifest.get("integrity"),
+            integrity=integrity,
         )
     except StageError:
         raise
+    except IntakeError as exc:
+        raise StageError(
+            ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
+        ) from exc
     except Exception as exc:
-        raise StageError(ErrorCode.PUBLISH_FAILED, str(exc)[:500]) from exc
+        raise StageError(
+            ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=True
+        ) from exc
+    shutil.rmtree(ctx.job_dir, ignore_errors=True)
     ctx.published = True
     return JobStage.ready
 

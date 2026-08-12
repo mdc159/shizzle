@@ -72,6 +72,7 @@ class HttpRunPodClient:
     async def dispatch(
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
     ) -> str:
+        # RunPod exposes no idempotency header; this key is trace context only.
         logger.info("job %s: dispatching to RunPod (trace=%s)", job_id, idempotency_key)
         response = await self._call(
             lambda: self._request("POST", "/run", json={"input": payload})

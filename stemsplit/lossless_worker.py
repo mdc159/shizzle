@@ -22,12 +22,12 @@ job cleanly replaces a dead predecessor's partial outputs.
 from __future__ import annotations
 
 import hashlib
-import json
 import subprocess
 import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
@@ -55,6 +55,24 @@ Heartbeat = Callable[[str], None]
 
 def _noop_heartbeat(_msg: str) -> None:
     pass
+
+
+def _separation_callback(heartbeat: Heartbeat) -> Callable[..., None]:
+    """Translate best-effort Demucs segment progress into watchdog heartbeats."""
+    def callback(info: Any, *_args: Any, **_kwargs: Any) -> None:
+        try:
+            if not isinstance(info, dict):
+                return
+            offset = float(info["segment_offset"])
+            length = float(info["audio_length"])
+            if length <= 0:
+                return
+            progress = min(1.0, max(0.0, offset / length))
+            heartbeat(f"separate: {int(100 * progress)}%")
+        except Exception:
+            return
+
+    return callback
 
 
 def sha256_file(path: Path) -> str:
@@ -92,7 +110,12 @@ def separate(
 
     resolved = device or ("cuda" if torch.cuda.is_available() else "cpu")
     heartbeat(f"separate: loading {MODEL_NAME} on {resolved}")
-    separator = Separator(model=MODEL_NAME, device=resolved, progress=False)
+    separator = Separator(
+        model=MODEL_NAME,
+        device=resolved,
+        progress=False,
+        callback=_separation_callback(heartbeat),
+    )
     if separator.samplerate != SAMPLE_RATE:  # model property, not a knob
         raise RuntimeError(f"model samplerate {separator.samplerate} != {SAMPLE_RATE}")
 

@@ -18,6 +18,7 @@ const STAGES: JobStatus['status'][] = [
   'pending',
   'downloading',
   'dispatched',
+  'splitting',
   'verifying',
   'publishing',
 ];
@@ -116,7 +117,7 @@ export const PipelineDrawer: React.FC = () => {
         ) : (
           <>
             {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
-            <div className="mt-6 grid min-w-[900px] grid-cols-5 gap-3 overflow-x-auto">
+            <div className="mt-6 grid min-w-[1080px] grid-cols-6 gap-3 overflow-x-auto">
               {STAGES.map(stage => {
                 const stageJobs = jobs.filter(job => job.status === stage);
                 return (
