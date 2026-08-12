@@ -2,7 +2,7 @@
 injection only where reality can't be provoked on demand — hard kills,
 duplicate completions, and expired leases qualify).
 
-Requires: docker compose -f infra/compose.yml --profile test -p shizzle-test up -d postgres
+Requires: docker compose -f deploy/vps/compose.yml --profile test -p shizzle-test up -d postgres
 """
 
 from __future__ import annotations

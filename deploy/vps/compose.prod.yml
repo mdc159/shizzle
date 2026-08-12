@@ -4,8 +4,8 @@
 #   docker compose -p shizzle -f compose.prod.yml up -d --build
 #
 # Deploy layout (rsynced next to this file):
-#   /opt/shizzle/server/     server source (built into shizzle-api)
-#   /opt/shizzle/ui/         built ui/dist (served by Caddy)
+#   /opt/shizzle/library/     server source (built into shizzle-api)
+#   /opt/shizzle/player/         built player/dist (served by Caddy)
 #   /opt/shizzle/Caddyfile   production Caddyfile (this dir's Caddyfile.prod)
 #   /opt/shizzle/.env        real secrets (passcode, POSTGRES_*, AWS_*, CF_*)
 #   /opt/shizzle/secrets/    cloudfront private key (mounted, never committed)
@@ -13,7 +13,7 @@
 # Media (private S3 karaoke-pimpshizzle) is delivered through CloudFront with
 # signed cookies; Caddy reverse-proxies the same-origin /cdn path to the
 # distribution so the cookies (set on shizzle.systems) ride along. See
-# Caddyfile.prod and server/src/shizzle_server/cloudfront.py.
+# Caddyfile.prod and library/src/shizzle_server/cloudfront.py.
 #
 # caddy_data is the EXTERNAL probe volume — it holds the real Let's Encrypt
 # cert/account for shizzle.systems; reusing it avoids re-issuance + rate limits.
@@ -39,7 +39,7 @@ services:
 
   api:
     build:
-      context: ./server
+      context: ./library
       dockerfile: Dockerfile.api
     image: shizzle-api
     container_name: shizzle-api
@@ -95,7 +95,7 @@ services:
       - "443:443/udp" # HTTP/3
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./ui:/srv/ui:ro
+      - ./player:/srv/ui:ro
       - caddy_data:/data # LE certs/account — MUST persist (external below)
       - caddy_config:/config
     depends_on:

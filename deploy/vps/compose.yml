@@ -1,29 +1,29 @@
 # Shizzle infra — compose profiles.
 #
 # `local` profile: the GPU reference pipeline on this machine (RTX 4070).
-#   docker compose -f infra/compose.yml --profile local up -d --build
-#   docker compose -f infra/compose.yml --profile local down
+#   docker compose -f deploy/vps/compose.yml --profile local up -d --build
+#   docker compose -f deploy/vps/compose.yml --profile local down
 #
 # `stack` profile: the 4-service control plane mirroring the VPS layout
 # (api + orchestrator + postgres + caddy). Phase 2 — see specs Phase 2.4.
-#   docker compose -f infra/compose.yml --profile stack up -d --build
+#   docker compose -f deploy/vps/compose.yml --profile stack up -d --build
 # Caddy publishes on :80 by default (override with CADDY_HTTP_PORT for local
 # machines where 80 is taken).
 #
 # `test` profile: just Postgres, for the contract/fault-injection suite:
-#   docker compose -f infra/compose.yml --profile test -p shizzle-test up -d postgres
+#   docker compose -f deploy/vps/compose.yml --profile test -p shizzle-test up -d postgres
 # (host port 5433 to avoid clashing with any local Postgres; override with
 # POSTGRES_HOST_PORT when running `stack` and `test` side by side).
 #
 # MACHINE GOTCHA (Mike's PC, verified 2026-08-02): a global COMPOSE_PROJECT_NAME
 # env var (another project) OVERRIDES the `name:` below and will graft these
 # services onto that project. Always pass an explicit -p with this file:
-#   docker compose -p shizzle -f infra/compose.yml --profile <profile> ...
+#   docker compose -p shizzle -f deploy/vps/compose.yml --profile <profile> ...
 # Global POSTGRES_* env vars also leak into interpolation; pin them in .env.
 #
 # The UI dev server is NOT containerized. Run it on the host:
-#   npm --prefix ui run dev
-# ui/vite.config.ts already proxies /api -> http://localhost:8001, so the
+#   npm --prefix player run dev
+# player/vite.config.ts already proxies /api -> http://localhost:8001, so the
 # browser talks to Vite on :5173 and Vite forwards API calls to this container.
 #
 # GPU reservation / port / data mount mirror the proven nextgen
@@ -36,13 +36,13 @@ services:
   local-server:
     profiles: ["local"]
     build:
-      context: ../server
+      context: ../../library
       dockerfile: Dockerfile
     container_name: shizzle-local-server
     ports:
       - "8001:8001"
     volumes:
-      - ../data:/app/data
+      - ../../data:/app/data
     deploy:
       resources:
         reservations:
@@ -79,7 +79,7 @@ services:
   api:
     profiles: ["stack"]
     build:
-      context: ../server
+      context: ../../library
       dockerfile: Dockerfile.api
     image: shizzle-api
     container_name: shizzle-api
@@ -90,10 +90,10 @@ services:
       DATA_DIR: /app/data
       SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
     env_file:
-      - path: ../.env
+      - path: ../../.env
         required: false
     volumes:
-      - ../data:/app/data
+      - ../../data:/app/data
     ports:
       - "127.0.0.1:8001:8001"
     depends_on:
@@ -115,10 +115,10 @@ services:
       SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-local}
       SHIZZLE_TEST_STAGE_SLEEP: ${SHIZZLE_TEST_STAGE_SLEEP:-0}
     env_file:
-      - path: ../.env
+      - path: ../../.env
         required: false
     volumes:
-      - ../data:/app/data
+      - ../../data:/app/data
     depends_on:
       postgres:
         condition: service_healthy

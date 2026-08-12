@@ -26,7 +26,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SERVER_SRC = REPO_ROOT / "server" / "src"
+SERVER_SRC = REPO_ROOT / "library" / "src"
 sys.path.insert(0, str(SERVER_SRC))
 
 from shizzle_server.db import create_engine, create_session_factory  # noqa: E402

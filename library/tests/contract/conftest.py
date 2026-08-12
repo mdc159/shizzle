@@ -2,7 +2,7 @@
 
 Bring up the database first (from the repo root):
 
-    docker compose -f infra/compose.yml --profile test -p shizzle-test up -d postgres
+    docker compose -f deploy/vps/compose.yml --profile test -p shizzle-test up -d postgres
 
 The suite skips cleanly if Postgres is unreachable. The schema is applied by
 running the real Alembic migration (subprocess `alembic upgrade head`) — the
@@ -68,7 +68,7 @@ def pg_available() -> None:
     if not _postgres_reachable():
         pytest.skip(
             "Postgres not reachable at "
-            f"{PG_URL} — run: docker compose -f infra/compose.yml "
+            f"{PG_URL} — run: docker compose -f deploy/vps/compose.yml "
             "--profile test -p shizzle-test up -d postgres"
         )
 

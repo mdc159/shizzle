@@ -25,13 +25,13 @@ Properties this script holds to:
 Usage
 -----
     # inspect without touching anything
-    uv run --directory server python ../scripts/import_legacy_library.py --dry-run
+    uv run --directory library python ../ops/import_legacy_library.py --dry-run
 
     # import everything
-    python scripts/import_legacy_library.py --database-url postgresql+asyncpg://...
+    python ops/import_legacy_library.py --database-url postgresql+asyncpg://...
 
     # try two first
-    python scripts/import_legacy_library.py --limit 2
+    python ops/import_legacy_library.py --limit 2
 
 Credentials come from `.env` (or the ambient environment with `--no-env-file`).
 `AWS_ENDPOINT_URL` is force-cleared: this machine has a global R2 override that
@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "server" / "src"))
+sys.path.insert(0, str(REPO_ROOT / "library" / "src"))
 
 import boto3  # noqa: E402
 

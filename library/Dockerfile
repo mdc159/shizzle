@@ -3,7 +3,7 @@
 # Based on worker/Dockerfile.reference (the salvaged nextgen local-server image);
 # only the installed package and uvicorn target differ.
 #
-# Build via compose: docker compose -f infra/compose.yml --profile local up -d --build
+# Build via compose: docker compose -f deploy/vps/compose.yml --profile local up -d --build
 
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
