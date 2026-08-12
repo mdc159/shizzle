@@ -160,7 +160,7 @@ def encode_stem(wav: Path, m4a: Path) -> None:
     ])
 
 
-def derive_video(source: Path, out: Path) -> None:
+def derive_video(source: Path, out: Path, maxrate_kbps: int = 1200) -> None:
     _run([
         "ffmpeg", "-y", "-fflags", "+genpts", "-i", str(source),
         "-map", "0:v:0", "-an",
@@ -168,7 +168,7 @@ def derive_video(source: Path, out: Path) -> None:
         "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:"
         "force_divisible_by=2,fps=30,format=yuv420p,setpts=PTS-STARTPTS",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-        "-maxrate", "1200k", "-bufsize", "2400k",
+        "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{2 * maxrate_kbps}k",
         "-profile:v", "main", "-level:v", "3.1",
         "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
         "-movflags", "+faststart", "-video_track_timescale", "90000",
@@ -194,12 +194,33 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
     derive_video(source_video, candidate / "video.mp4")
 
     duration = pkg.duration_seconds
-    total_bytes = sum(p.stat().st_size for p in candidate.rglob("*") if p.is_file())
-    avg_bps = total_bytes * 8 / duration
+
+    def _avg_bps() -> float:
+        total = sum(p.stat().st_size for p in candidate.rglob("*") if p.is_file())
+        return total * 8 / duration
+
+    if _avg_bps() > TRACK_BUDGET_BPS:
+        # Bounded video re-derivation (shizzle-browser-v1): audio is fixed at
+        # its 256k target, so the video is the adjustable component. Give it
+        # whatever the budget leaves after audio, less 2% headroom for
+        # container overhead, floored for basic watchability.
+        audio_bps = sum(
+            (candidate / "stems" / f"{r}.m4a").stat().st_size for r in STEM_ROLES
+        ) * 8 / duration
+        allowance_kbps = max(300, int((TRACK_BUDGET_BPS * 0.98 - audio_bps) / 1000))
+        logger.info(
+            "over budget at %.3f Mb/s; re-deriving video at maxrate %dk "
+            "(audio measures %.3f Mb/s)",
+            _avg_bps() / 1e6, allowance_kbps, audio_bps / 1e6,
+        )
+        derive_video(source_video, candidate / "video.mp4", maxrate_kbps=allowance_kbps)
+
+    avg_bps = _avg_bps()
     if avg_bps > TRACK_BUDGET_BPS:
         raise IntakeError(
             f"complete generation {avg_bps/1e6:.3f} Mb/s exceeds the "
-            f"{TRACK_BUDGET_BPS/1e6:.1f} Mb/s budget"
+            f"{TRACK_BUDGET_BPS/1e6:.1f} Mb/s budget even after bounded "
+            "video re-derivation"
         )
     logger.info("generation average %.3f Mb/s (budget %.1f)", avg_bps / 1e6, TRACK_BUDGET_BPS / 1e6)
 
