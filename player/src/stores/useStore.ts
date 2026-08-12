@@ -13,7 +13,7 @@ interface KaraokeState {
 
     // UI State
     controlsVisible: boolean;
-    activeDrawer: 'none' | 'library' | 'mixer' | 'source';
+    activeDrawer: 'none' | 'library' | 'mixer' | 'source' | 'pipeline';
 
     // Data State
     currentTrack: Track | null;
@@ -28,7 +28,7 @@ interface KaraokeState {
     setPlaying: (playing: boolean) => void;
     togglePlay: () => void;
     setControlsVisible: (visible: boolean) => void;
-    setActiveDrawer: (drawer: 'none' | 'library' | 'mixer' | 'source') => void;
+    setActiveDrawer: (drawer: 'none' | 'library' | 'mixer' | 'source' | 'pipeline') => void;
     loadTrack: (track: Track) => void;
     setManifest: (manifest: StemsManifest | null) => void;
     setActiveJob: (job: JobStatus | null) => void;

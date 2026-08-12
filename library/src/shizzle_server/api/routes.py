@@ -287,6 +287,22 @@ async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Pro
 # --- jobs --------------------------------------------------------------------
 
 
+@router.get("/jobs/{job_id}/events")
+async def get_job_events(
+    request: Request, job_id: str, _auth: None = Protected
+) -> dict[str, list[dict[str, Any]]]:
+    parsed_id = _parse_job_id(job_id)
+    if await _jobs(request).get_job(parsed_id) is None:
+        raise HTTPException(404, "Job not found")
+    events = await _jobs(request).list_events(parsed_id)
+    return {
+        "events": [
+            {"event": event.event, "detail": event.detail, "createdAt": event.created_at}
+            for event in events
+        ]
+    }
+
+
 @router.get("/jobs/{job_id}")
 async def get_job_status(request: Request, job_id: str, _auth: None = Protected) -> JobResponse:
     job = await _jobs(request).get_job(_parse_job_id(job_id))

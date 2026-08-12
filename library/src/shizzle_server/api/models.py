@@ -19,11 +19,14 @@ class JobResponse(BaseModel):
     jobId: str
     status: JobStage
     sourceType: str
+    title: str | None = None
     attempt: int
     error: str | None = None
     errorCode: str | None = None
     message: str | None = None
     stageTimings: dict[str, Any] | None = None
+    workerPhase: str | None = None
+    workerHeartbeatAt: datetime | None = None
     trackId: str | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
@@ -34,10 +37,13 @@ class JobResponse(BaseModel):
             jobId=job.id.hex,
             status=job.status,
             sourceType=job.source_type.value,
+            title=job.title,
             attempt=job.attempt,
             error=job.error_detail,
             errorCode=job.error_code,
             stageTimings=job.stage_timings,
+            workerPhase=job.worker_phase,
+            workerHeartbeatAt=job.worker_heartbeat_at,
             trackId=str(job.track_id) if job.track_id else None,
             createdAt=job.created_at,
             updatedAt=job.updated_at,

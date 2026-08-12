@@ -35,7 +35,10 @@ async def test_upload_creates_job_row(client):
     body = status.json()
     assert body["status"] == "pending"
     assert body["sourceType"] == "upload"
+    assert body["title"] == "my song"
     assert body["attempt"] == 0
+    assert body["workerPhase"] is None
+    assert body["workerHeartbeatAt"] is None
 
     # Source file landed on disk under the job dir
     settings = app.state.settings
@@ -82,6 +85,37 @@ async def test_job_not_found(client):
     c, _ = client
     assert (await c.get("/api/jobs/nope")).status_code == 404
     assert (await c.get("/api/jobs/00000000000000000000000000000000")).status_code == 404
+    assert (await c.get("/api/jobs/nope/events")).status_code == 404
+    assert (
+        await c.get("/api/jobs/00000000000000000000000000000000/events")
+    ).status_code == 404
+
+
+async def test_job_events_and_worker_fields(client):
+    c, app = client
+    job_id = (await c.post(
+        "/api/submit-url",
+        json={"url": "https://example.com/song", "title": "Timeline"},
+    )).json()["jobId"]
+    parsed_id = uuid.UUID(job_id)
+    await app.state.job_repo.record_dispatch(parsed_id, runpod_job_id="runpod-1")
+    await app.state.job_repo.record_worker_progress(parsed_id, phase="separating")
+
+    status = (await c.get(f"/api/jobs/{job_id}")).json()
+    assert status["title"] == "Timeline"
+    assert status["workerPhase"] == "separating"
+    assert status["workerHeartbeatAt"] is not None
+
+    response = await c.get(f"/api/jobs/{job_id}/events")
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert [event["event"] for event in events] == [
+        "created",
+        "runpod_dispatched",
+        "worker_progress",
+    ]
+    assert events[-1]["detail"] == {"phase": "separating"}
+    assert all(event["createdAt"] for event in events)
 
 
 async def test_library_track_serving_and_soft_delete(client, upload_job):
