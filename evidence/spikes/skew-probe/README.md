@@ -2,7 +2,7 @@
 
 > Troubleshooting experiment instructions. Do not run these device/local-server
 > steps as current Shizzle acceptance. Use the production cloud application and
-> the targeted procedure in `../../docs/playback-troubleshooting.md` when an
+> the targeted procedure in `../../../docs/playback-troubleshooting.md` when an
 > actual synchronization issue is observed.
 
 Instrumented six-stem playback probe. Plays a track's muted video plus six
@@ -24,7 +24,7 @@ hook does); instrumentation is always per-stem.
 ## 1. Start the server (on this PC)
 
 ```powershell
-cd X:\GitHub\shizzle\spikes\skew-probe
+cd X:\GitHub\shizzle\evidence\spikes\skew-probe
 python serve.py X:\GitHub\k25\data\47bae048e13c 8077
 ```
 
@@ -69,7 +69,7 @@ node run-probe.mjs        # needs global playwright; ~5 min, writes results\*.js
    switch to **raw**, play ~1 minute, note numbers again.
 5. Tap **Download JSON report** — Safari saves to Files; AirDrop or copy
    it back to the PC into `results\` if you want the raw samples.
-6. Enter the numbers in `X:\GitHub\shizzle\spikes\RESULTS-0.1.md`
+6. Enter the numbers in `X:\GitHub\shizzle\evidence\spikes\RESULTS-0.1.md`
    (iPad Safari row).
 
 ## 4. Run on the Samsung projector (Tizen browser)

@@ -7,12 +7,12 @@ description: Read-only investigation of Shizzle's current cloud playback impleme
 
 ## Role
 
-Establish the repository's actual implementation and evidence state against `goals/cloud-continuous-playback/goal.md`, then identify the smallest safe next vertical slice.
+Establish the repository's actual implementation and evidence state against `evidence/cloud-continuous-playback/goal.md`, then identify the smallest safe next vertical slice.
 
 ## Sources
 
 Use, in order:
-1. `goals/cloud-continuous-playback/{goal,facts,encoding-profile,evidence,plan}.md`.
+1. `evidence/cloud-continuous-playback/{goal,facts,evidence,plan}.md` and `interfaces/shizzle-browser-v1/spec.md`.
 2. Current tracked and untracked repository files and `git diff`.
 3. `docs/HANDOFF.md` only as dated context; report conflicts with newer goal records.
 4. Tests and configs in the repo.

@@ -5,7 +5,7 @@
 > synchronization issue; the finished system uses one capability-based browser
 > contract.
 
-Probe: `spikes/skew-probe/` (see its README for the original experiment).
+Probe: `evidence/spikes/skew-probe/` (see its README for the original experiment).
 Track: `X:\GitHub\k25\data\47bae048e13c` — "acdc-flick", 199.7 s, six AAC
 `.m4a` stems + muted `video.mp4`, served locally with Range (206) support.
 
@@ -51,13 +51,13 @@ pending constrained devices — the fallback decision (aligned segment
 scheduler) waits on those rows.
 
 Raw reports (full 250 ms sample streams + correction logs):
-`spikes/skew-probe/results/skew-report-corrected.json`,
-`spikes/skew-probe/results/skew-report-raw.json`,
-`spikes/skew-probe/results/summaries.json`.
+`evidence/spikes/skew-probe/results/skew-report-corrected.json`,
+`evidence/spikes/skew-probe/results/skew-report-raw.json`,
+`evidence/spikes/skew-probe/results/summaries.json`.
 
 ## How to fill the pending rows
 
-Run per `spikes/skew-probe/README.md` §3 (iPad) / §4 (projector): serve
+Run per `evidence/spikes/skew-probe/README.md` §3 (iPad) / §4 (projector): serve
 from this PC, open `http://<pc-ip>:8077/index.html?track=/track`, play
 ≥3 min corrected, reload, ~1 min raw, copy the on-screen summary numbers
 into the table above (the summary block shows every column).

@@ -23,7 +23,7 @@ flowchart LR
 
 The RunPod output and VPS input are the same defined interface. Its exact file
 layout and audio properties are recorded in
-[`../../docs/lossless-stem-handoff.md`](../../docs/lossless-stem-handoff.md).
+[`../../interfaces/lossless-stem-v1/spec.md`](../../interfaces/lossless-stem-v1/spec.md).
 
 ## Finished portion
 

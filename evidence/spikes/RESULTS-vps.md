@@ -2,10 +2,10 @@
 
 Date: 2026-08-02 (all server timestamps 2026-08-03 UTC — box is UTC, local evening).
 > Troubleshooting record for VPS reachability, TLS, compose, and service health.
-> Use `../docs/HANDOFF.md` for current status.
+> Use `../../docs/HANDOFF.md` for current status.
 
 Box: Hostinger KVM 4, `srv1875370`, `72.60.173.171`. Executed from the Windows dev
-machine over SSH (root, default ed25519 key). Everything scripted in `infra/vps/`.
+machine over SSH (root, default ed25519 key). Everything scripted in `deploy/vps/`.
 
 **Verdict: no stumbling blocks.** Bare box to full outside-in HTTPS proof in ~20
 minutes wall clock, ~80 s of actual bootstrap runtime. Zero errors, zero retries.
@@ -33,7 +33,7 @@ issued** — see below.
 
 ## What was installed (versions)
 
-Via `infra/vps/setup.sh` (idempotent, re-runnable, `ssh root@... 'bash -s' < setup.sh`):
+Via `deploy/vps/setup.sh` (idempotent, re-runnable, `ssh root@... 'bash -s' < setup.sh`):
 
 | thing | version / state |
 |---|---|
@@ -55,7 +55,7 @@ fine (firewall entries added before enable; never locked out).
 
 `/opt/shizzle/`: `compose.yml` + `Caddyfile` + `.env` (generated
 `POSTGRES_PASSWORD=$(openssl rand -hex 24)`, chmod 600, probe-only credential).
-Source of truth in repo: `infra/vps/probe/`.
+Source of truth in repo: `deploy/vps/probe/`.
 
 - `db`: postgres:16-alpine, named volume `pgdata`, healthcheck `pg_isready` —
   **healthy**, `accepting connections`. Deliberately NOT published to the host

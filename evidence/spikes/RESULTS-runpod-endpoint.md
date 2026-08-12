@@ -1,7 +1,7 @@
 # RunPod endpoint — real state (2026-08-03)
 
 > Troubleshooting record for earlier RunPod endpoint failures. Endpoint details
-> in this file are observations from that run; use `../docs/HANDOFF.md` for the
+> in this file are observations from that run; use `../../docs/HANDOFF.md` for the
 > current endpoint and next action.
 
 - ONE account. Fresh key in .env works.
@@ -28,4 +28,4 @@
 
 **Root cause of RunPod "workers unhealthy / jobs stuck":** the Dockerfile `HEALTHCHECK` (`--start-period=5s`) — RunPod respects the container healthcheck and its own health mgmt fights it; torch+demucs import exceeds the 5s/10s window on the 15 GB image, so the first probe fails and RunPod cycles the worker before it takes a job. NOT a code/image/creds problem.
 
-**Fix staged:** HEALTHCHECK removed from worker/Dockerfile (committed). Remaining to make it live: rebuild → push v3 → point template vh76gbm3uy at :v3 → resubmit proof on endpoint r370i6ad7h75m3 (the 3 stuck jobs are earlier bad-schema/pre-fix submissions; clear them).
+**Fix staged:** HEALTHCHECK removed from stemsplit/Dockerfile (committed). Remaining to make it live: rebuild → push v3 → point template vh76gbm3uy at :v3 → resubmit proof on endpoint r370i6ad7h75m3 (the 3 stuck jobs are earlier bad-schema/pre-fix submissions; clear them).

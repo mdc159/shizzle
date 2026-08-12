@@ -1,11 +1,11 @@
 # Legacy library manifest schema (`karaoke/pub/*/stems.json`)
 
 What is actually in `s3://karaoke-pimpshizzle/karaoke/pub/`, and how it differs
-from the manifest the new GPU worker writes (`worker/MANIFEST.md`).
+from the manifest the new GPU worker writes (`stemsplit/MANIFEST.md`).
 
 Surveyed from the retained source set by reading all 32 manifests and listing every object.
 Source of truth for the translation performed by
-`scripts/import_legacy_library.py`.
+`ops/import_legacy_library.py`.
 
 ## 1. What is in the legacy bucket
 
@@ -63,7 +63,7 @@ and the v2-era one:
 
 ## 3. Diff against the worker v3 manifest
 
-| Field | Legacy | Worker v3 (`worker/MANIFEST.md`) | Import action |
+| Field | Legacy | Worker v3 (`stemsplit/MANIFEST.md`) | Import action |
 |---|---|---|---|
 | `version` | `3` (31), absent (1) | `3` | force `3` |
 | `title` | present, real | present | preserved verbatim |
@@ -88,7 +88,7 @@ and the v2-era one:
 
 ### The `default_gain: 0` bug
 
-`worker/MANIFEST.md` warns that the v2 `default_gain` field "must never
+`stemsplit/MANIFEST.md` warns that the v2 `default_gain` field "must never
 return". This survey shows the bug is worse than a naming problem: **every one
 of the 31 retained legacy v3 manifests carries `default_gain: 0`.** Read as the linear
 gain the field name implies, that is silence on all six stems. Whatever k25's
@@ -127,7 +127,7 @@ passed the spike-0.3 thresholds.
 
 ## 6. Fields the UI actually needs, and where the UI type is short
 
-`ui/src/types/karaoke.ts` requires `title`, `artist`, `duration`, `video`, and
+`player/src/types/karaoke.ts` requires `title`, `artist`, `duration`, `video`, and
 `stems[]` of `{id, name, file, default_gain_db}`; `version`, `timeline`,
 `video_meta`, `sourceUrl`, `videoId` are optional. The translated manifest
 supplies all of those for every complete folder — verified by compiling all 27
@@ -144,7 +144,7 @@ Two things that survey turned up:
 
 2. **`StemsManifest` is a subset of the worker schema.** It has no
    `multitrack`, `common_gain`, `integrity`, or `processing` — all four of
-   which `worker/MANIFEST.md` defines and the worker writes. That is a gap in
+   which `stemsplit/MANIFEST.md` defines and the worker writes. That is a gap in
    the UI types, not in the manifests: at runtime the player gets the manifest
    from `res.json()` (typed `any`/`unknown`), so extra keys pass through
    harmlessly. Worth closing when the player starts reading integrity or

@@ -6,7 +6,7 @@ stem levels and poisons the unity-sum null test, versus float-preserving output.
 
 Dual-mode script:
   * On the Windows host (sys.platform == "win32"): launches the k25-nextgen
-    local-server Docker image (demucs 4.0.1 + CUDA) with this spikes/ tree
+    local-server Docker image (demucs 4.0.1 + CUDA) with this evidence/spikes/ tree
     mounted at /spike, and re-executes itself inside the container.
   * Inside the container (linux): extracts canonical audio, runs Demucs twice
     (legacy int24/rescale vs float32/clip-none), sums stems at unity, and
@@ -42,7 +42,7 @@ def sh(cmd, **kw):
 
 # --------------------------------------------------------------------------- host
 def host_main():
-    spike = Path(__file__).resolve().parent          # ...\spikes\demucs-gain
+    spike = Path(__file__).resolve().parent          # ...\evidence\spikes\demucs-gain
     spikes_root = spike.parent
     cache = spike / "work" / "torch-cache"
     cache.mkdir(parents=True, exist_ok=True)

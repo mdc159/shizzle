@@ -7,7 +7,7 @@ description: Read-only adversarial review of Shizzle's current uncommitted playb
 
 ## Role
 
-Review the current uncommitted diff for correctness and regression risk against `goals/cloud-continuous-playback/goal.md` and `encoding-profile.md`. Challenge the implementation; do not redesign the whole project.
+Review the current uncommitted diff for correctness and regression risk against `evidence/cloud-continuous-playback/goal.md` and `interfaces/shizzle-browser-v1/spec.md`. Challenge the implementation; do not redesign the whole project.
 
 ## Boundaries
 

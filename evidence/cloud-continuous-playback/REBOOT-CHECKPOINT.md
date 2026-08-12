@@ -40,7 +40,7 @@ Immediate sequence:
 - Media: private S3 through signed CloudFront delivery.
 - Current RunPod endpoint: `tevdw8022hs8hn`; it was last observed with
   `workersMax=0` and therefore cannot allocate a worker until re-enabled.
-- Worker weights are not currently baked into `worker/Dockerfile`.
+- Worker weights are not currently baked into `stemsplit/Dockerfile`.
 - Publish worker images through the `mdc159/shizzle-worker` GitHub Actions
   workflow.
 - Clear any ambient `AWS_ENDPOINT_URL` before real AWS commands.

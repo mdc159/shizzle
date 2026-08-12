@@ -14,10 +14,10 @@ consumes it via its own ffmpeg decode at 44 100 Hz; the null-test reference was
 produced through that identical ffmpeg path (`-ar 44100 -c:a pcm_f32le`), so
 resampler differences are excluded from the residual.
 
-Scripts: `spikes/demucs-gain/run.py`, `spikes/aac-abx/make_renditions.py`
+Scripts: `evidence/spikes/demucs-gain/run.py`, `evidence/spikes/aac-abx/make_renditions.py`
 (both dual-mode: run on Windows, they re-execute themselves inside the Docker
-image). Raw metrics: `spikes/demucs-gain/analysis.json`,
-`spikes/aac-abx/analysis-aac.json`.
+image). Raw metrics: `evidence/spikes/demucs-gain/analysis.json`,
+`evidence/spikes/aac-abx/analysis-aac.json`.
 
 ---
 
@@ -108,7 +108,7 @@ stem-codec damage is audible.
   either ~2 dB additional headroom in the common gain or the planned master
   limiter (design phase 5); otherwise unity playback of AAC stems will clip.
 
-### Rendition inventory (`spikes/aac-abx/`)
+### Rendition inventory (`evidence/spikes/aac-abx/`)
 
 - `out/REF.m4a` — labeled reference (float-stem remix, ALAC)
 - `out/A.m4a`, `out/B.m4a`, `out/C.m4a` — the three renditions, randomized
@@ -129,12 +129,12 @@ stem-codec damage is audible.
   choices are rescale|clamp only); run B uses the documented Python-API
   replication instead — same model call, only the save differs.
 - The k25-nextgen Docker image had no baked model cache; htdemucs_6s weights
-  download to a mounted cache (`spikes/demucs-gain/work/torch-cache/`).
+  download to a mounted cache (`evidence/spikes/demucs-gain/work/torch-cache/`).
 - An earlier rendition build printed the blind mapping into a console log; the
   blind files were re-randomized and re-encoded with mapping output suppressed.
 
 ## PENDING
 
-**PENDING: Mike's blind listen** — play `spikes/aac-abx/out/` on the real rig
+**PENDING: Mike's blind listen** — play `evidence/spikes/aac-abx/out/` on the real rig
 per `LISTEN.md`, record distinguishability + ranking, then unblind with
 `answer_key.json` and replace this line with the verdict.

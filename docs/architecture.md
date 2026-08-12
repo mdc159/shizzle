@@ -32,7 +32,7 @@ The VPS starts there and applies the already-finished delivery transformation
 without a song-specific alternate path.
 
 The exact file layout and manifest are defined in
-[`docs/lossless-stem-handoff.md`](../../lossless-stem-handoff.md).
+[`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md).
 
 ## 3. System architecture
 
@@ -91,7 +91,7 @@ Given `lossless-stem-v1` and the cloud source video, the fixed pipeline:
 7. Exposes signed, file-scoped CloudFront URLs through the authenticated API.
 
 The exact format, bitrate, FFmpeg commands, tolerances, and audit checks are in
-[`goals/cloud-continuous-playback/encoding-profile.md`](../../../goals/cloud-continuous-playback/encoding-profile.md).
+[`../interfaces/shizzle-browser-v1/spec.md`](../interfaces/shizzle-browser-v1/spec.md).
 
 ## 6. Finished playback architecture
 
@@ -172,16 +172,16 @@ do not alter or gate ingestion, delivery, or playback architecture.
 
 ## 11. Authoritative records
 
-- [`README.md`](../../../README.md): simple current workflow and project status.
-- [`docs/HANDOFF.md`](../../HANDOFF.md): live operational state and immediate
+- [`README.md`](../README.md): simple current workflow and project status.
+- [`HANDOFF.md`](HANDOFF.md): live operational state and immediate
   upstream work.
-- [`docs/lossless-stem-handoff.md`](../../lossless-stem-handoff.md): exact
+- [`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md): exact
   RunPod output and VPS input interface.
-- [`encoding-profile.md`](../../../goals/cloud-continuous-playback/encoding-profile.md):
+- [`../interfaces/shizzle-browser-v1/spec.md`](../interfaces/shizzle-browser-v1/spec.md):
   finished delivery contract.
-- [`evidence.md`](../../../goals/cloud-continuous-playback/evidence.md): retained
+- [`../evidence/cloud-continuous-playback/evidence.md`](../evidence/cloud-continuous-playback/evidence.md): retained
   measurements and failure-driven decisions.
-- [`docs/provenance.md`](../../provenance.md): source-code provenance.
-- [`docs/playback-troubleshooting.md`](../../playback-troubleshooting.md):
+- [`provenance.md`](provenance.md): source-code provenance.
+- [`playback-troubleshooting.md`](playback-troubleshooting.md):
   symptom-driven diagnostics and experiment index.
-- `spikes/`: troubleshooting experiments; informative, not current requirements.
+- `evidence/spikes/`: troubleshooting experiments; informative, not current requirements.

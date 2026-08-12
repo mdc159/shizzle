@@ -3,9 +3,9 @@
 These experiments are retained for troubleshooting. They are not unfinished
 requirements and should not be rerun as a default library campaign.
 
-Current project status and next work are in `../README.md` and
-`../docs/HANDOFF.md`. For symptom-driven use, start with
-`../docs/playback-troubleshooting.md`.
+Current project status and next work are in `../../README.md` and
+`../../docs/HANDOFF.md`. For symptom-driven use, start with
+`../../docs/playback-troubleshooting.md`.
 
 | Experiment | What it established | Where to use it |
 |---|---|---|
@@ -37,6 +37,6 @@ Current project status and next work are in `../README.md` and
 The 27-track playback library and `shizzle-browser-v1` delivery path are
 finished. The active work is URL/upload acquisition and dependable cloud GPU
 separation into the exact `lossless-stem-v1` package defined in
-[`../docs/lossless-stem-handoff.md`](../docs/lossless-stem-handoff.md).
+[`../../interfaces/lossless-stem-v1/spec.md`](../../interfaces/lossless-stem-v1/spec.md).
 Experiments in this directory are consulted only when diagnosing a matching
 issue.

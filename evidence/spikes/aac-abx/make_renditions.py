@@ -8,7 +8,7 @@ unity into a single stereo remix -- simulating the delivery pipeline where
 stems are stored lossy and summed at playback. The remix files themselves are
 encoded ALAC (lossless) so only stem-codec artifacts are audible.
 
-Outputs (spikes/aac-abx/out/):
+Outputs (evidence/spikes/aac-abx/out/):
   REF.m4a           remix of the raw float stems (labeled reference, ALAC)
   A.m4a B.m4a C.m4a the three renditions under randomized blind names (ALAC)
   answer_key.json   blind-name -> codec mapping (do not open before listening)
@@ -50,7 +50,7 @@ def sh(cmd, **kw):
 
 
 def host_main():
-    spike = Path(__file__).resolve().parent          # ...\spikes\aac-abx
+    spike = Path(__file__).resolve().parent          # ...\evidence\spikes\aac-abx
     spikes_root = spike.parent
     sh([
         "docker", "run", "--rm",

@@ -1,11 +1,11 @@
 # Legacy library import — results
 
 > Troubleshooting record for the one-time seed import and publisher behavior.
-> Current library status is in `../docs/HANDOFF.md`; this is not a current import
+> Current library status is in `../../docs/HANDOFF.md`; this is not a current import
 > queue or completion list.
 
 Phase 3 work, 2026-08-02. Two deliverables: the server-side publisher module
-(`server/src/shizzle_server/publish.py`) and the one-time import of the k25
+(`library/src/shizzle_server/publish.py`) and the one-time import of the k25
 legacy library into the Phase 3 track layout.
 
 **Headline: all 27 retained library tracks were imported and verified playable.**
@@ -16,8 +16,8 @@ a redundant duplicate of an accepted track; details in §3.
 
 ## 1. Publisher module (Phase 3.4)
 
-`server/src/shizzle_server/publish.py`, tested by
-`server/tests/test_publish.py` (24 moto-backed tests, all green).
+`library/src/shizzle_server/publish.py`, tested by
+`library/tests/test_publish.py` (24 moto-backed tests, all green).
 
 The contract, in order:
 
@@ -27,7 +27,7 @@ The contract, in order:
    `test_published_generation_is_never_overwritten`, which re-stages *different*
    bytes and confirms the published object is unchanged and zero copies ran.
 2. **Verification** of every object the worker reported in `uploads[]`
-   (`{file, key, sha256, size_bytes}` from `worker/s3_ops.upload_file`). Size
+   (`{file, key, sha256, size_bytes}` from `stemsplit/s3_ops.upload_file`). Size
    from `head_object` always; sha256 per `ChecksumPolicy`:
    - `AUTO` (default) — stored `ChecksumSHA256` when S3 has one, else stream
      the object back and hash it;
@@ -55,7 +55,7 @@ The contract, in order:
 
 ### Finding for the worker (not changed — out of lane)
 
-`worker/s3_ops.upload_file` calls `s3.upload_file` without
+`stemsplit/s3_ops.upload_file` calls `s3.upload_file` without
 `ChecksumAlgorithm="SHA256"`, so AWS stores no SHA256 for staged objects and
 the publisher's default `AUTO` policy has to stream every staged object back to
 the VPS to verify it. For a ~300 MiB track that is ~300 MiB of egress per
@@ -79,7 +79,7 @@ Full write-up: `docs/legacy-manifest-v3.md`. Highlights:
 | Bytes | 7,822,113,584 (7.29 GiB) |
 
 **`default_gain: 0` is on every one of the 31 retained v3 legacy manifests.**
-`worker/MANIFEST.md` warns the v2 `default_gain` name "must never return"; this
+`stemsplit/MANIFEST.md` warns the v2 `default_gain` name "must never return"; this
 survey shows the field did not just have a bad name, it shipped with the value
 that means *silence* under the linear reading its name implies. Whatever the k25
 player did with it, it was not multiplying by it. Translation sets
@@ -87,7 +87,7 @@ player did with it, it was not multiplying by it. Translation sets
 (`the-pot-2d88b7a5`) carries `default_gain: 1.0`, which maps to `0.0 dB`
 exactly.
 
-Other gaps versus `worker/MANIFEST.md`:
+Other gaps versus `stemsplit/MANIFEST.md`:
 
 - **`common_gain` absent** — cannot be reconstructed without re-separating.
   Omitted from imported manifests.
@@ -118,7 +118,7 @@ Other gaps versus `worker/MANIFEST.md`:
 
 ## 3. Redundant incomplete source folders
 
-`scripts/import_legacy_library.py` classifies a folder as **degraded** when its
+`ops/import_legacy_library.py` classifies a folder as **degraded** when its
 manifest references objects the bucket does not contain, and skips it by default
 (`--include-degraded` overrides, emitting `stems[]` with only the surviving
 files — which for these folders is *no stems at all*, a dead library entry).
@@ -191,10 +191,10 @@ scratch is the translated `manifest.json`, written **last**.
 
 | File | What |
 |---|---|
-| `server/src/shizzle_server/publish.py` | new — publisher module |
-| `server/tests/test_publish.py` | new — 24 tests |
-| `server/src/shizzle_server/db/repository.py` | added `track_id_for_import()` and `TrackRepository.upsert_imported()` (rows with no job behind them) |
-| `scripts/import_legacy_library.py` | new — the importer |
+| `library/src/shizzle_server/publish.py` | new — publisher module |
+| `library/tests/test_publish.py` | new — 24 tests |
+| `library/src/shizzle_server/db/repository.py` | added `track_id_for_import()` and `TrackRepository.upsert_imported()` (rows with no job behind them) |
+| `ops/import_legacy_library.py` | new — the importer |
 | `docs/legacy-manifest-v3.md` | new — schema survey and diff |
 
 ---
@@ -211,7 +211,7 @@ All of the following were run against the real bucket and the real Postgres.
 | No dangling manifest references | every `video`/`stems[].file`/`multitrack`/`merged_audio` looked up at the destination | **0 missing** |
 | Legacy `stems.json` did not leak into the new layout | destination listing | **absent everywhere** |
 | Legacy `default_gain` did not survive | per-stem check on all 27 manifests | **0 occurrences**; all `default_gain_db == 0.0` |
-| Manifests satisfy the UI contract | all 27 compiled against the real `ui/src/types/karaoke.ts` with `tsc --strict --noEmit`, then the compiled JS run under Node with per-field assertions | **exit 0 both times; 27 manifests asserted** |
+| Manifests satisfy the UI contract | all 27 compiled against the real `player/src/types/karaoke.ts` with `tsc --strict --noEmit`, then the compiled JS run under Node with per-field assertions | **exit 0 both times; 27 manifests asserted** |
 | Content types correct | `head_object` on all 268 objects | **0 wrong** |
 | Retained `karaoke/` source set | re-listed the retained legacy prefix | **283 objects / 7,822,113,584 bytes** |
 | Re-running the import is idempotent | ran the same two folders twice, then the full set again | second run: **0 copies, 0 bytes, rows updated in place**, no duplicates |
@@ -254,7 +254,7 @@ a regression**: `/api/library` lists all 27 correctly, but its `publicUrl`
 
 - **The compose Postgres volume was already initialized under the wrong role.**
   `shizzle_pgdata` existed from an earlier run that hit the documented
-  `COMPOSE_PROJECT_NAME` / global-`POSTGRES_*` leak in `infra/compose.yml`: the
+  `COMPOSE_PROJECT_NAME` / global-`POSTGRES_*` leak in `deploy/vps/compose.yml`: the
   cluster was created with role/db `gbrain`, so `shizzle` could not log in. Fixed
   non-destructively by creating the `shizzle` role and database inside the
   existing cluster — the pre-existing `gbrain` database (1 leftover job, 1

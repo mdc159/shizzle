@@ -4,14 +4,14 @@ Date: 2026-08-02 (evening PDT). Claim under test: *"cert + DNS + production
 CloudFront is scriptable against zone Z07938355FL89IEW1HFO."*
 
 > Troubleshooting record for DNS, certificate, and CDN configuration. Use
-> `../docs/HANDOFF.md` for current production status.
+> `../../docs/HANDOFF.md` for current production status.
 
 Verdict: **mostly proven in one run.** Distribution + DNS legs are scripted
 and executed; the cert leg is written but blocked by an IAM gap (the `agent`
 key cannot call `acm:RequestCertificate`), and DNS-validated issuance would
 anyway wait on registry delegation, which was still propagating during the
 run. All remaining steps are committed as ready-to-run scripts in
-`infra/cloudfront/`.
+`deploy/aws/`.
 
 ## Registration status timeline (all times PDT)
 
@@ -40,7 +40,7 @@ negative TTL (86400s zone value, capped much lower by Google in practice).
 | ACM certificate | **NOT created — blocked on IAM** (see below) |
 
 Distribution shape (config committed as
-`infra/cloudfront/distribution-config.template.json`):
+`deploy/aws/distribution-config.template.json`):
 
 - Origin `s3-media`: spike bucket via new OAC — **SWAP-AT-PHASE-4** to the
   production media bucket.
@@ -131,7 +131,7 @@ propagation wait (plus whatever Caddy answers on :80 once reachable).
 | Swap spike key group for production signing key pair | SWAP-AT-PHASE-4 |
 | `/api/*` + `/ws/*` end-to-end through CloudFront | BLOCKED-ON-DNS-PROPAGATION (CloudFront can't resolve `vps.shizzle.systems` until delegation is public) + BLOCKED-ON-VPS (Caddy must answer on :80) |
 
-Scripts and committed config live in `X:\GitHub\shizzle\infra\cloudfront\`
+Scripts and committed config live in `X:\GitHub\shizzle\deploy\aws\`
 (see its README for run order). Nothing was git-committed per the brief.
 
 DONE: builder | Production distro ELKN8VGSX0M64 + DNS legs scripted and executed; cert leg written but BLOCKED-ON-IAM (agent user lacks acm:RequestCertificate); alias attach is a proven two-step, scripts staged

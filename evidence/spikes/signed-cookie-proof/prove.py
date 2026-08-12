@@ -13,7 +13,7 @@ calls are needed at runtime -- signing is purely local.
 Usage:
     python prove.py [--domain d2wr9nfx0lr3a2.cloudfront.net]
                     [--key-pair-id KRNC9VLVC15DN]
-                    [--private-key ../../secrets/cloudfront-spike/private_key.pem]
+                    [--private-key ../../../secrets/cloudfront-spike/private_key.pem]
                     [--path /media/vocals.m4a]
 """
 
@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 DEFAULT_DOMAIN = "d2wr9nfx0lr3a2.cloudfront.net"
 DEFAULT_KEY_PAIR_ID = "KRNC9VLVC15DN"
-DEFAULT_KEY_PATH = Path(__file__).resolve().parents[2] / "secrets" / "cloudfront-spike" / "private_key.pem"
+DEFAULT_KEY_PATH = Path(__file__).resolve().parents[3] / "secrets" / "cloudfront-spike" / "private_key.pem"
 DEFAULT_PATH = "/media/vocals.m4a"
 
 

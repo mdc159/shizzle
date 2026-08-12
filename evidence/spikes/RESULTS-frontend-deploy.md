@@ -2,7 +2,7 @@
 
 > Troubleshooting deployment receipt. Viewport/device language records the test
 > that was run at the time; use it only when investigating a matching deployment
-> or layout issue. Current state is in `../docs/HANDOFF.md`.
+> or layout issue. Current state is in `../../docs/HANDOFF.md`.
 
 Date: 2026-08-02 (VPS timestamps 2026-08-03 UTC). Builder pass.
 
@@ -29,7 +29,7 @@ all existing tokens automatically (design §7).
 VPS `root@72.60.173.171` (Hostinger KVM), `/opt/shizzle/prod/`, compose project
 `shizzle` (`compose.prod.yml`):
 
-- **caddy** — serves the built UI (`ui/dist`) at shizzle.systems with automatic
+- **caddy** — serves the built UI (`player/dist`) at shizzle.systems with automatic
   HTTPS (the existing Let's Encrypt cert was preserved: `caddy_data` is reused
   as the external `shizzle-probe_caddy_data` volume). Reverse-proxies `/api` +
   `/ws` to the api container, and same-origin `/cdn/*` to the CloudFront
@@ -46,7 +46,7 @@ VPS `root@72.60.173.171` (Hostinger KVM), `/opt/shizzle/prod/`, compose project
 Code committed on `master` (`10d62e7`): passcode auth (`auth.py`), CloudFront
 signed cookies (`cloudfront.py`, lifted from spike 0.2), cloud-media manifest
 route (`media.py`, routes), UI passcode gate + bearer-token `authFetch` +
-same-origin `/cdn` media wiring, `infra/vps/compose.prod.yml` + `Caddyfile.prod`.
+same-origin `/cdn` media wiring, `deploy/vps/compose.prod.yml` + `Caddyfile.prod`.
 Server: 93 pytest pass, ruff clean, `routes.py` mypy at pre-existing baseline,
 new modules mypy-clean. UI: eslint/tsc/build/knip clean.
 
@@ -103,8 +103,8 @@ touch**; deviation: chromium not the `chrome` channel):
 - **console errors: 0, page errors: 0.**
 
 Screenshots:
-- `spikes/frontend-deploy-ipad.png` — the video playing full-screen (1640×2360).
-- `spikes/frontend-deploy-mixer.png` — the six stem faders.
+- `evidence/spikes/frontend-deploy-ipad.png` — the video playing full-screen (1640×2360).
+- `evidence/spikes/frontend-deploy-mixer.png` — the six stem faders.
 
 ## What does NOT work yet (honest gaps)
 
@@ -135,7 +135,7 @@ Screenshots:
 
 ## Untouched (per brief)
 
-RunPod, `worker/`, `spikes/RESULTS-runpod*` — not touched. The legacy import was
+RunPod, `stemsplit/`, `evidence/spikes/RESULTS-runpod*` — not touched. The legacy import was
 idempotent and copied nothing (media already in S3; only DB rows written).
 
 DONE: builder | shizzle.systems live + iPad-ready — passcode gate, 27-track library, full video+6-stem playback via CloudFront signed cookies (206/Range), stem faders; verified outside-in + headless iPad viewport, 0 errors. Gaps: remote QR pairing + new-track ingest not wired.

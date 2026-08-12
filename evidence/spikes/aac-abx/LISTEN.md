@@ -30,7 +30,7 @@ have written down your verdicts — that's the unblinding.
    - For each of A/B/C: "distinguishable from REF: yes / no / unsure"
    - A ranking of A/B/C by preference, ties allowed.
 5. Then open `out/answer_key.json` and record the verdict in
-   `spikes/RESULTS-0.3-0.4.md` (replace the PENDING line).
+   `../RESULTS-0.3-0.4.md` (replace the PENDING line).
 
 **Decision rule (suggested):** if you cannot reliably distinguish AAC 256k
 from REF on the real rig, ship 256k; else if 320k is indistinguishable, ship

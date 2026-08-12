@@ -3,7 +3,7 @@
 Date: 2026-08-02 · Region: us-east-1 · Account: 826783599575 (user/agent)
 > Troubleshooting experiment for authorization, CORS, and byte-range delivery.
 > It is not current completion work; start with
-> `../docs/playback-troubleshooting.md`.
+> `../../docs/playback-troubleshooting.md`.
 
 Goal at the time: prove end-to-end that CloudFront signed cookies can gate streaming media
 from a private S3 bucket with Range request support. **Outcome: proven, 5/5
@@ -65,7 +65,7 @@ Note: tags could not be applied to the CloudFront public key, key group, or
 OAC — those CloudFront sub-resources do not support tagging. The
 `shizzle-spike-` name prefix is the teardown handle for them.
 
-## 3. Proof matrix (`spikes/signed-cookie-proof/prove.py`, run 2026-08-02 ~18:04)
+## 3. Proof matrix (`evidence/spikes/signed-cookie-proof/prove.py`, run 2026-08-02 ~18:04)
 
 | # | Check | Expected | Got | Result |
 |---|---|---|---|---|
@@ -113,8 +113,8 @@ Signing is purely local (Python `cryptography`); no AWS calls at request time.
 
 ## 5. Files
 
-- Proof script: `X:\GitHub\shizzle\spikes\signed-cookie-proof\prove.py`
-- Teardown commands: `X:\GitHub\shizzle\spikes\signed-cookie-proof\teardown.md`
+- Proof script: `X:\GitHub\shizzle\evidence\spikes\signed-cookie-proof\prove.py`
+- Teardown commands: `X:\GitHub\shizzle\evidence\spikes\signed-cookie-proof\teardown.md`
 - Key material: `X:\GitHub\shizzle\secrets\cloudfront-spike\` (gitignored)
 
 DONE: builder | Spike 0.2 proven 5/5 — signed cookies gate private-S3 CloudFront streaming with Range support; 36 inheritable tracks found in karaoke/pub/

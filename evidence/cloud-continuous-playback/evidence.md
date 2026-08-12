@@ -89,7 +89,7 @@ Mother Love Bone reported 1.55 seconds in `TimeRanges` while its decoder remaine
 
 Two browser-observability defects were found by canary testing and corrected before the broader rollout: intentional source teardown no longer emits a false `Empty src attribute` media failure, and recovery/incident counters now reset at track boundaries. Telemetry capacity was also increased from 120 to 600 events/minute with a 1,000-event ordered client queue and `Retry-After` backpressure after a measured seek storm generated roughly 200 events/minute.
 
-The controlled library rollout is checkpointed by `scripts/migrate_and_audit_delivery_library.py`. It publishes one inactive immutable candidate, re-downloads and fully decodes all seven objects, activates with compare-and-swap only after a clean audit, and stops on the first failure.
+The controlled library rollout is checkpointed by `ops/migrate_and_audit_delivery_library.py`. It publishes one inactive immutable candidate, re-downloads and fully decodes all seven objects, activates with compare-and-swap only after a clean audit, and stops on the first failure.
 
 ## Final tracked desktop stress run
 
