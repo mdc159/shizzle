@@ -1,6 +1,6 @@
 # Shizzle production Caddyfile (VPS: /opt/shizzle/Caddyfile).
 #
-# - Serves the built UI (ui/dist -> /srv/ui) at shizzle.systems with automatic
+# - Serves the built UI (player/dist -> /srv/ui) at shizzle.systems with automatic
 #   HTTPS (Let's Encrypt; cert reused from the preserved caddy_data volume).
 # - Reverse-proxies /api and /ws to the api container.
 # - Reverse-proxies the same-origin /cdn path to the production CloudFront

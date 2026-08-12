@@ -4,7 +4,7 @@
 # into the hosted zone. Idempotent-ish: reuses an existing non-failed cert for
 # the domain if one exists.
 #
-# Writes the certificate ARN to infra/cloudfront/cert-arn.txt for later steps.
+# Writes the certificate ARN to deploy/aws/cert-arn.txt for later steps.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./env.sh

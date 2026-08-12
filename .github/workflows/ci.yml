@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+    branches: [master]
+
+jobs:
+  library:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --directory library
+      - run: uv run --directory library pytest -q -m "not postgres"
+      - run: uv run --directory library ruff check .
+      - run: uv run --directory library mypy src
+
+  stemsplit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --directory stemsplit
+      - run: uv run --directory stemsplit pytest -q
+
+  player:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: player
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shizzle VPS bootstrap — idempotent. Run as root on the VPS:
-#   ssh root@72.60.173.171 'bash -s' < infra/vps/setup.sh
+#   ssh root@72.60.173.171 'bash -s' < deploy/vps/setup.sh
 # Safe to re-run: every step checks before it changes.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
