@@ -13,7 +13,7 @@
 # Media (private S3 karaoke-pimpshizzle) is delivered through CloudFront with
 # signed cookies; Caddy reverse-proxies the same-origin /cdn path to the
 # distribution so the cookies (set on shizzle.systems) ride along. See
-# Caddyfile.prod and library/src/shizzle_server/cloudfront.py.
+# Caddyfile.prod and library/src/shizzle_server/api/cloudfront.py.
 #
 # caddy_data is the EXTERNAL probe volume — it holds the real Let's Encrypt
 # cert/account for shizzle.systems; reusing it avoids re-issuance + rate limits.

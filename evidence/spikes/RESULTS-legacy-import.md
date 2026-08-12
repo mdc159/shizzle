@@ -5,7 +5,7 @@
 > queue or completion list.
 
 Phase 3 work, 2026-08-02. Two deliverables: the server-side publisher module
-(`library/src/shizzle_server/publish.py`) and the one-time import of the k25
+(`library/src/shizzle_server/publish/publisher.py`) and the one-time import of the k25
 legacy library into the Phase 3 track layout.
 
 **Headline: all 27 retained library tracks were imported and verified playable.**
@@ -16,7 +16,7 @@ a redundant duplicate of an accepted track; details in §3.
 
 ## 1. Publisher module (Phase 3.4)
 
-`library/src/shizzle_server/publish.py`, tested by
+`library/src/shizzle_server/publish/publisher.py`, tested by
 `library/tests/test_publish.py` (24 moto-backed tests, all green).
 
 The contract, in order:
@@ -191,7 +191,7 @@ scratch is the translated `manifest.json`, written **last**.
 
 | File | What |
 |---|---|
-| `library/src/shizzle_server/publish.py` | new — publisher module |
+| `library/src/shizzle_server/publish/publisher.py` | new — publisher module |
 | `library/tests/test_publish.py` | new — 24 tests |
 | `library/src/shizzle_server/db/repository.py` | added `track_id_for_import()` and `TrackRepository.upsert_imported()` (rows with no job behind them) |
 | `ops/import_legacy_library.py` | new — the importer |

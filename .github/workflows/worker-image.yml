@@ -7,11 +7,6 @@ on:
       - stemsplit/**
       - .github/workflows/worker-image.yml
   workflow_dispatch:
-    inputs:
-      version:
-        description: Optional immutable version tag
-        required: false
-        type: string
 
 jobs:
   build:
@@ -36,8 +31,9 @@ jobs:
         with:
           context: stemsplit
           push: true
-          tags: |
-            ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
-            ${{ inputs.version && format('ghcr.io/mdc159/shizzle-worker:{0}', inputs.version) || '' }}
+          # The commit-sha tag is the only tag: human-alias tags are
+          # re-pushable and therefore not immutable. handoff.json records
+          # the image per separation; the digest is the true identity.
+          tags: ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
       - name: Report digest
         run: docker buildx imagetools inspect ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}

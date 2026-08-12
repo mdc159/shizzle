@@ -25,7 +25,7 @@ tracks/<track-id>/<generation>/separation/
     bass.wav
     guitar.wav
     piano.wav
-    other.wav
+    shizzle.wav
 ```
 
 ## Stem format
