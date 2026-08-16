@@ -1,14 +1,19 @@
 # Shizzle production stack — the VPS control plane + static UI + media proxy.
 #
-# Lives at /opt/shizzle/ on the box and is run from there:
-#   docker compose -p shizzle -f compose.prod.yml up -d --build
+# Pull-mode deploys run through .github/workflows/deploy-vps.yml. The GHCR API
+# package must be public, or the box must docker login to ghcr.io with a
+# read-only PAT. Compose reads ${SHIZZLE_API_TAG} from the project-directory
+# .env file, not from service env_file entries. For a local source build, use
+# the compose.build.yml overlay documented in README.md.
 #
-# Deploy layout (rsynced next to this file):
-#   /opt/shizzle/library/     server source (built into shizzle-api)
-#   /opt/shizzle/player/         built player/dist (served by Caddy)
-#   /opt/shizzle/Caddyfile   production Caddyfile (this dir's Caddyfile.prod)
-#   /opt/shizzle/.env        real secrets (passcode, POSTGRES_*, AWS_*, CF_*)
-#   /opt/shizzle/secrets/    cloudfront private key (mounted, never committed)
+# Lives at /opt/shizzle/prod on the box and is run from there:
+#   docker compose -p shizzle -f compose.prod.yml up -d
+#
+# Deploy layout:
+#   /opt/shizzle/prod/player/       built player/dist (served by Caddy)
+#   /opt/shizzle/prod/Caddyfile     production Caddyfile
+#   /opt/shizzle/prod/.env          secrets plus SHIZZLE_API_TAG
+#   /opt/shizzle/prod/secrets/      cloudfront private key (never committed)
 #
 # Media (private S3 karaoke-pimpshizzle) is delivered through CloudFront with
 # signed cookies; Caddy reverse-proxies the same-origin /cdn path to the
@@ -38,10 +43,7 @@ services:
     restart: unless-stopped
 
   api:
-    build:
-      context: ./library
-      dockerfile: Dockerfile.api
-    image: shizzle-api
+    image: ghcr.io/mdc159/shizzle/api:${SHIZZLE_API_TAG:?set SHIZZLE_API_TAG in .env}
     container_name: shizzle-api
     # Single schema writer: migrate, then serve.
     command: sh -c "alembic upgrade head && uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001"
@@ -64,7 +66,7 @@ services:
     restart: unless-stopped
 
   orchestrator:
-    image: shizzle-api
+    image: ghcr.io/mdc159/shizzle/api:${SHIZZLE_API_TAG:?set SHIZZLE_API_TAG in .env}
     container_name: shizzle-orchestrator
     command: python -m shizzle_server.orchestrator
     env_file:

@@ -1,0 +1,6 @@
+# Usage: docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+services:
+  api:
+    build:
+      context: ./library
+      dockerfile: Dockerfile.api

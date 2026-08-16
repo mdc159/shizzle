@@ -20,6 +20,11 @@ CloudFront rather than relayed through the VPS.
 
 ## Deployment and health
 
+Production deploys run from the environment-gated
+[deploy-vps workflow](../../.github/workflows/deploy-vps.yml). It publishes an
+immutable API image, ships the player, updates `SHIZZLE_API_TAG` in the box's
+`.env`, and checks the public application before succeeding.
+
 Use the production compose project name explicitly:
 
 ```text
@@ -28,8 +33,17 @@ docker compose -p shizzle ps
 docker compose -p shizzle logs --tail 200 api orchestrator
 ```
 
-Verify the public root, authenticated API, database, orchestrator heartbeat,
-telemetry endpoint, and CloudFront media Range behavior after a deployment.
+For a manual local-source build, place `library/` beside the compose files and
+use the build overlay:
+
+```text
+docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
+```
+
+Rollback by re-running the previous green deploy workflow run. For break-glass
+recovery, set `SHIZZLE_API_TAG` in `/opt/shizzle/prod/.env` to a retained
+`sha-<commit>` tag and run `docker compose -p shizzle -f compose.prod.yml up -d`.
 
 ## Current work
 

@@ -1,0 +1,89 @@
+name: deploy-vps
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  build-image:
+    uses: ./.github/workflows/api-image.yml
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    needs: build-image
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://shizzle.systems
+    env:
+      TAG: sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - name: Build player
+        working-directory: player
+        run: npm ci && npm run build
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+      - name: Ship release
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          tar -C player -czf /tmp/shizzle-player.tar.gz dist
+          ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/prod/incoming && mkdir -p /opt/shizzle/prod/incoming'
+          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.prod.yml deploy/vps/Caddyfile.prod root@"$VPS_HOST":/opt/shizzle/prod/incoming/
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE'
+          set -euo pipefail
+          TAG=$1
+          cd /opt/shizzle/prod
+          tar -xzf incoming/shizzle-player.tar.gz -C incoming
+          install -m 644 incoming/compose.prod.yml ./compose.prod.yml
+          install -m 644 incoming/Caddyfile.prod ./Caddyfile
+          sed -i '/^SHIZZLE_API_TAG=/d' .env
+          echo "SHIZZLE_API_TAG=$TAG" >> .env
+          mkdir -p player
+          rsync -a --delete incoming/dist/ player/
+          docker compose -p shizzle -f compose.prod.yml pull api
+          docker compose -p shizzle -f compose.prod.yml up -d
+          docker image ls ghcr.io/mdc159/shizzle/api --format '{{.CreatedAt}} {{.ID}}' \
+            | sort -r | tail -n +4 | awk '{print $NF}' | xargs -r docker image rm
+          REMOTE
+      - name: Check production health
+        run: |
+          set -o pipefail
+          for attempt in {1..12}; do
+            if curl -fsS https://shizzle.systems/ >/dev/null \
+              && curl -fsS https://shizzle.systems/api/health \
+                | jq -e '.status=="ok" and .db==true and .orchestratorAlive==true' >/dev/null \
+              && [ "$(curl -s -o /dev/null -w '%{http_code}' https://shizzle.systems/cdn/tracks/x)" = 403 ]; then
+              exit 0
+            fi
+            echo "Health check attempt $attempt failed; retrying in 10 seconds"
+            sleep 10
+          done
+          exit 1
