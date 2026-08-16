@@ -60,16 +60,30 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          set -o pipefail
-          status=0
-          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE' | tee /tmp/deploy-output || status=${PIPESTATUS[0]}
+          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE'
           set -euo pipefail
+          umask 077
           TAG=$1
           cd /opt/shizzle/prod
           docker pull "ghcr.io/mdc159/shizzle/api:$TAG"
           tar -xzf incoming/shizzle-player.tar.gz -C incoming
-          PREV_TAG=$(grep -oP '(?<=^SHIZZLE_API_TAG=).*' .env || echo '')
-          trap 'printf "PREV_TAG=%s\n" "$PREV_TAG"' EXIT
+          PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' .env | tail -n 1)
+          ROLLBACK_ARCHIVE=.rollback-release.tar.gz
+          ROLLBACK_MARKER=.rollback-release-tag
+          rm -f "$ROLLBACK_MARKER" "$ROLLBACK_MARKER.tmp" "$ROLLBACK_ARCHIVE.tmp"
+          if [ -n "$PREV_TAG" ]; then
+            for required_path in .env compose.prod.yml Caddyfile player; do
+              if [ ! -e "$required_path" ]; then
+                echo "Cannot snapshot previous release: missing $required_path" >&2
+                exit 1
+              fi
+            done
+            tar -czf "$ROLLBACK_ARCHIVE.tmp" -- .env compose.prod.yml Caddyfile player
+            mv "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
+            printf '%s\n' "$TAG" > "$ROLLBACK_MARKER.tmp"
+            mv "$ROLLBACK_MARKER.tmp" "$ROLLBACK_MARKER"
+            echo "Captured complete rollback snapshot for $PREV_TAG"
+          fi
           install -m 644 incoming/compose.prod.yml ./compose.prod.yml
           install -m 644 incoming/Caddyfile.prod ./Caddyfile
           sed -i '/^SHIZZLE_API_TAG=/d' .env
@@ -78,10 +92,8 @@ jobs:
           rsync -a --delete incoming/dist/ player/
           docker compose -p shizzle -f compose.prod.yml up -d
           REMOTE
-          prev_tag=$(grep '^PREV_TAG=' /tmp/deploy-output | tail -n 1 | cut -d= -f2- || true)
-          printf 'prev_tag=%s\n' "$prev_tag" >> "$GITHUB_OUTPUT"
-          exit "$status"
       - name: Check production health
+        id: health
         run: |
           set -o pipefail
           for attempt in {1..12}; do
@@ -95,25 +107,66 @@ jobs:
             sleep 10
           done
           exit 1
-      - name: Revert on failed health
-        if: failure()
+      - name: Restore previous release on failure
+        if: failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
-          PREV_TAG: ${{ steps.deploy.outputs.prev_tag }}
         run: |
-          if [ -z "$PREV_TAG" ]; then
-            echo "::notice::No previous API tag was captured; skipping first-deploy revert"
-            exit 0
-          fi
-          echo "::warning::Reverting API and orchestrator to $PREV_TAG. Player assets, Caddyfile, and compose.prod.yml remain from the failed release."
-          ssh root@"$VPS_HOST" bash -s -- "$PREV_TAG" <<'REMOTE'
+          set -o pipefail
+          echo "::warning::Deployment failed; restoring the complete previous release"
+          restored=0
+          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE' && restored=1
           set -euo pipefail
-          PREV_TAG=$1
+          TAG=$1
           cd /opt/shizzle/prod
-          sed -i '/^SHIZZLE_API_TAG=/d' .env
-          echo "SHIZZLE_API_TAG=$PREV_TAG" >> .env
-          docker compose -p shizzle -f compose.prod.yml up -d
+          ROLLBACK_ARCHIVE=.rollback-release.tar.gz
+          ROLLBACK_MARKER=.rollback-release-tag
+          if [ ! -f "$ROLLBACK_ARCHIVE" ] \
+            || [ ! -f "$ROLLBACK_MARKER" ] \
+            || [ "$(cat "$ROLLBACK_MARKER")" != "$TAG" ]; then
+            echo "No rollback snapshot exists for $TAG; this may be the first deployment" >&2
+            exit 2
+          fi
+          RESTORE_DIR=$(mktemp -d /opt/shizzle/prod/.restore.XXXXXX)
+          trap 'rm -rf "$RESTORE_DIR"' EXIT
+          tar -xzf "$ROLLBACK_ARCHIVE" -C "$RESTORE_DIR"
+          for required_path in .env compose.prod.yml Caddyfile player; do
+            if [ ! -e "$RESTORE_DIR/$required_path" ]; then
+              echo "Rollback snapshot is incomplete: missing $required_path" >&2
+              exit 1
+            fi
+          done
+          PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' "$RESTORE_DIR/.env" | tail -n 1)
+          rm -rf .env.restore compose.prod.yml.restore Caddyfile.restore player.restore
+          cp -a "$RESTORE_DIR/.env" .env.restore
+          cp -a "$RESTORE_DIR/compose.prod.yml" compose.prod.yml.restore
+          cp -a "$RESTORE_DIR/Caddyfile" Caddyfile.restore
+          mv "$RESTORE_DIR/player" player.restore
+          mv -f .env.restore .env
+          mv -f compose.prod.yml.restore compose.prod.yml
+          mv -f Caddyfile.restore Caddyfile
+          rm -rf player
+          mv player.restore player
+          docker compose -p shizzle -f compose.prod.yml up -d --force-recreate --remove-orphans
+          echo "Restored complete release $PREV_TAG"
           REMOTE
+          if [ "$restored" -ne 1 ]; then
+            echo "::error::The previous release could not be restored"
+            exit 1
+          fi
+          for attempt in {1..12}; do
+            if curl -fsS https://shizzle.systems/ >/dev/null \
+              && curl -fsS https://shizzle.systems/api/health \
+                | jq -e '.status=="ok" and .db==true and .orchestratorAlive==true' >/dev/null \
+              && [ "$(curl -s -o /dev/null -w '%{http_code}' https://shizzle.systems/cdn/tracks/x)" = 403 ]; then
+              echo "Previous release restored and verified"
+              exit 0
+            fi
+            echo "Restored-release health check attempt $attempt failed; retrying in 10 seconds"
+            sleep 10
+          done
+          echo "::error::Previous release was restored but failed production health verification"
+          exit 1
       - name: Retain three API images
         if: success()
         env:
