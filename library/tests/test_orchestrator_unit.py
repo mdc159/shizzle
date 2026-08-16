@@ -358,6 +358,29 @@ async def test_accepted_dispatch_id_reads_matching_worker_receipt(
     assert await cloud.accepted_dispatch_id(ctx, idempotency_key=dispatch_key) is None
 
 
+async def test_accepted_dispatch_id_reads_legacy_base_receipt(settings, monkeypatch):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    track_id = track_id_for_job(ctx.job.id)
+    receipt = {
+        "runpod_job_id": "rp-legacy",
+        "track_id": str(track_id),
+        "generation": cloud.GENERATION,
+    }
+
+    class Body:
+        def read(self):
+            return json.dumps(receipt).encode()
+
+    class S3:
+        def get_object(self, *, Bucket, Key):  # noqa: ANN001, N803
+            assert Bucket == settings.s3_media_bucket
+            assert Key == f"{cloud.separation_prefix(track_id)}/dispatch.json"
+            return {"Body": Body()}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    assert await cloud.accepted_dispatch_id(ctx, idempotency_key=None) == "rp-legacy"
+
+
 # --- WS4: dispatched reconciliation (FakeRunPodClient) ------------------------
 # These exercise handle_dispatched through the real loop: park-on-None, phase
 # recording on change, queue/stall watchdogs, and fresh re-dispatch after a
@@ -907,10 +930,52 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
         runpod=fake,
         worker_id="dispatch-timeout",
     )
-    assert await handle_dispatched(aged) is None
+    with pytest.raises(StageError) as exc:
+        await handle_dispatched(aged)
+    assert exc.value.code == ErrorCode.RUNPOD_TIMEOUT
+    assert exc.value.retryable is False
     assert len(fake.dispatched) == 1
     events = [event.event for event in await job_repo.list_events(upload_job.id)]
-    assert events.count("runpod_dispatch_reconciliation_pending") == 1
+    assert events.count("runpod_dispatch_reconciliation_failed") == 1
+
+
+async def test_legacy_unconfirmed_package_uses_base_prefix(
+    settings, job_repo, upload_job, monkeypatch
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.append_event(
+        upload_job.id, "dispatch_unconfirmed", {"attempt": 0}
+    )
+    job = await job_repo.claim_next(worker_id="legacy-recovery", lease_seconds=60)
+
+    async def no_receipt(_ctx, *, idempotency_key):
+        assert idempotency_key is None
+        return None
+
+    async def legacy_package_ready(_ctx, *, idempotency_key):
+        assert idempotency_key is None
+        return True
+
+    monkeypatch.setattr(cloud, "accepted_dispatch_id", no_receipt)
+    monkeypatch.setattr(cloud, "package_ready", legacy_package_ready)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=FakeRunPodClient([]),
+        worker_id="legacy-recovery",
+    )
+
+    assert await handle_dispatched(ctx) == JobStage.verifying
+    assert ctx.detail["package_prefix"] == cloud.separation_prefix(
+        track_id_for_job(upload_job.id)
+    )
 
 
 async def test_accepted_dispatch_survives_confirmation_failure(

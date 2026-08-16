@@ -43,6 +43,7 @@ export const PipelineDrawer: React.FC = () => {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [orchestratorAlive, setOrchestratorAlive] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<JobStatus | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
@@ -52,10 +53,10 @@ export const PipelineDrawer: React.FC = () => {
   const refreshAbort = useRef<{ jobs: AbortController; health: AbortController } | null>(null);
 
   const refresh = useCallback(async () => {
-    refreshAbort.current?.jobs.abort();
-    refreshAbort.current?.health.abort();
+    if (refreshAbort.current) return;
     const controllers = { jobs: new AbortController(), health: new AbortController() };
     refreshAbort.current = controllers;
+    setLoading(true);
     const jobsTimeout = window.setTimeout(() => controllers.jobs.abort(), REQUEST_TIMEOUT_MS);
     const healthTimeout = window.setTimeout(() => controllers.health.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -69,7 +70,10 @@ export const PipelineDrawer: React.FC = () => {
       if (refreshAbort.current !== controllers) return;
 
       const errors: string[] = [];
-      if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value);
+      if (jobsResult.status === 'fulfilled') {
+        setJobs(jobsResult.value);
+        setJobsLoaded(true);
+      }
       else errors.push(jobsResult.reason instanceof Error ? jobsResult.reason.message : 'Failed to load jobs');
       if (healthResult.status === 'fulfilled') setOrchestratorAlive(healthResult.value.orchestratorAlive);
       else errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
@@ -136,11 +140,11 @@ export const PipelineDrawer: React.FC = () => {
           </SheetDescription>
         </SheetHeader>
 
-        {loading && jobs.length === 0 ? (
+        {loading && !jobsLoaded ? (
           <div className="flex items-center justify-center gap-3 p-12 text-zinc-500">
             <Loader2 className="h-6 w-6 animate-spin" /> Loading pipeline...
           </div>
-        ) : error && jobs.length === 0 ? (
+        ) : error && !jobsLoaded ? (
           <div className="flex items-center justify-center gap-2 p-12 text-red-400">
             <AlertCircle className="h-5 w-5" /> {error}
           </div>

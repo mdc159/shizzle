@@ -271,24 +271,34 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if isinstance(pending_dispatch.detail, dict)
             else {}
         )
-        dispatch_key = str(detail.get("idempotency_key", "unknown"))
+        raw_dispatch_key = detail.get("idempotency_key")
+        dispatch_key = raw_dispatch_key if isinstance(raw_dispatch_key, str) else None
         accepted_runpod_id = await cloud.accepted_dispatch_id(
             ctx, idempotency_key=dispatch_key
         )
         if accepted_runpod_id is not None:
-            await _confirm_dispatch(
-                ctx,
-                idempotency_key=dispatch_key,
-                runpod_job_id=accepted_runpod_id,
-            )
+            if dispatch_key is None:
+                await ctx.jobs.record_dispatch(
+                    job.id,
+                    worker_id=ctx.worker_id,
+                    runpod_job_id=accepted_runpod_id,
+                )
+            else:
+                await _confirm_dispatch(
+                    ctx,
+                    idempotency_key=dispatch_key,
+                    runpod_job_id=accepted_runpod_id,
+                )
+            recovery_detail = {
+                "runpod_job_id": accepted_runpod_id,
+                "source": cloud.DISPATCH_RECEIPT,
+            }
+            if dispatch_key is not None:
+                recovery_detail["idempotency_key"] = dispatch_key
             await ctx.jobs.append_event(
                 job.id,
                 "runpod_dispatch_recovered",
-                {
-                    "idempotency_key": dispatch_key,
-                    "runpod_job_id": accepted_runpod_id,
-                    "source": cloud.DISPATCH_RECEIPT,
-                },
+                recovery_detail,
             )
             ctx.park_seconds = ctx.settings.runpod_poll_seconds
             return None
@@ -305,8 +315,10 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     "runpod_dispatch_recovered",
                     {"idempotency_key": dispatch_key, "source": "handoff.json"},
                 )
-            ctx.detail["package_prefix"] = cloud.attempt_prefix(
-                track_id, dispatch_key
+            ctx.detail["package_prefix"] = (
+                cloud.attempt_prefix(track_id, dispatch_key)
+                if dispatch_key is not None
+                else cloud.separation_prefix(track_id)
             )
             return JobStage.verifying
         pending_for = _age_seconds(pending_dispatch.created_at) or 0.0
@@ -315,26 +327,29 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             + ctx.settings.runpod_worker_stall_seconds
         )
         if pending_for > fail_closed_after:
-            already_waiting = any(
-                event.event == "runpod_dispatch_reconciliation_pending"
-                and isinstance(event.detail, dict)
-                and event.detail.get("idempotency_key") == dispatch_key
-                for event in events
+            failure_detail: dict[str, Any] = {
+                "pending_seconds": round(pending_for, 1),
+                "manual_action": "resubmit source after confirming no RunPod job is active",
+            }
+            if dispatch_key is not None:
+                failure_detail["idempotency_key"] = dispatch_key
+            await ctx.jobs.append_event(
+                job.id,
+                "runpod_dispatch_reconciliation_failed",
+                failure_detail,
             )
-            if not already_waiting:
-                await ctx.jobs.append_event(
-                    job.id,
-                    "runpod_dispatch_reconciliation_pending",
-                    {
-                        "idempotency_key": dispatch_key,
-                        "pending_seconds": round(pending_for, 1),
-                    },
-                )
             logger.error(
-                "job %s: RunPod dispatch identity is still pending after %.0fs; "
-                "holding the reservation to prevent duplicate GPU work",
+                "job %s: RunPod dispatch identity unresolved after %.0fs; "
+                "failing closed for explicit operator recovery",
                 job.id,
                 pending_for,
+            )
+            raise StageError(
+                ErrorCode.RUNPOD_TIMEOUT,
+                "RunPod may have accepted the dispatch, but no receipt or package "
+                "appeared before the reconciliation deadline; manual resubmission "
+                "is required after confirming no remote job is active",
+                retryable=False,
             )
         ctx.park_seconds = ctx.settings.runpod_poll_seconds
         return None

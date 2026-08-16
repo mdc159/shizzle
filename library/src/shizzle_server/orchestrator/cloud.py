@@ -66,14 +66,19 @@ def attempt_prefix(track_id: uuid.UUID | str, idempotency_key: str) -> str:
 
 
 def dispatch_receipt_key(
-    track_id: uuid.UUID | str, idempotency_key: str
+    track_id: uuid.UUID | str, idempotency_key: str | None
 ) -> str:
     """Worker-written marker that binds a reservation to its RunPod job id."""
-    return f"{attempt_prefix(track_id, idempotency_key)}/{DISPATCH_RECEIPT}"
+    prefix = (
+        attempt_prefix(track_id, idempotency_key)
+        if idempotency_key is not None
+        else separation_prefix(track_id)
+    )
+    return f"{prefix}/{DISPATCH_RECEIPT}"
 
 
 async def accepted_dispatch_id(
-    ctx: StageContext, *, idempotency_key: str
+    ctx: StageContext, *, idempotency_key: str | None
 ) -> str | None:
     """Recover an accepted RunPod id from the worker's early S3 receipt.
 
@@ -101,11 +106,16 @@ async def accepted_dispatch_id(
         return None
 
     expected = {
-        "idempotency_key": idempotency_key,
         "track_id": str(track_id),
         "generation": GENERATION,
-        "package_prefix": attempt_prefix(track_id, idempotency_key),
     }
+    if idempotency_key is not None:
+        expected.update(
+            {
+                "idempotency_key": idempotency_key,
+                "package_prefix": attempt_prefix(track_id, idempotency_key),
+            }
+        )
     if any(receipt.get(field) != value for field, value in expected.items()):
         logger.warning(
             "job %s: ignoring stale or mismatched dispatch receipt at %s",
@@ -120,10 +130,17 @@ async def accepted_dispatch_id(
     return runpod_job_id
 
 
-async def package_ready(ctx: StageContext, *, idempotency_key: str) -> bool:
+async def package_ready(
+    ctx: StageContext, *, idempotency_key: str | None
+) -> bool:
     """Check the handoff-last marker for a dispatch whose RunPod id was lost."""
     track_id = track_id_for_job(ctx.job.id)
-    key = f"{attempt_prefix(track_id, idempotency_key)}/handoff.json"
+    prefix = (
+        attempt_prefix(track_id, idempotency_key)
+        if idempotency_key is not None
+        else separation_prefix(track_id)
+    )
+    key = f"{prefix}/handoff.json"
     try:
         head = await asyncio.to_thread(
             _head_or_none,

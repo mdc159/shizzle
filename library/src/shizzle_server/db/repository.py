@@ -78,8 +78,7 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
         elif (
             event.event == _DISPATCH_CONFIRMED_EVENT
             and pending is not None
-            and pending_key is not None
-            and event_key == pending_key
+            and (pending_key is None or event_key == pending_key)
         ):
             pending = None
             pending_key = None

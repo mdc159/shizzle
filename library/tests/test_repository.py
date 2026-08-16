@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -12,6 +13,7 @@ from shizzle_server.db.models import Job, JobStage, SourceType, utcnow
 from shizzle_server.db.repository import (
     InvalidTransition,
     TrackGenerationConflict,
+    pending_runpod_dispatch,
     track_id_for_job,
 )
 
@@ -236,9 +238,10 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
     assert changed.worker_heartbeat_at >= first_heartbeat
 
     changed_heartbeat = changed.worker_heartbeat_at
+    await asyncio.sleep(0.001)
     assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is False
     refreshed = await job_repo.get_job(upload_job.id)
-    assert refreshed is not None and refreshed.worker_heartbeat_at >= changed_heartbeat
+    assert refreshed is not None and refreshed.worker_heartbeat_at > changed_heartbeat
     events = await job_repo.list_events(upload_job.id)
     assert [event.event for event in events] == [
         "created",
@@ -364,3 +367,12 @@ async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
         worker_id="worker-after-upgrade",
         idempotency_key=f"{upload_job.id.hex}:0",
     )
+
+    await job_repo.record_dispatch(
+        upload_job.id,
+        worker_id="worker-after-upgrade",
+        runpod_job_id="legacy-runpod-id",
+    )
+    assert pending_runpod_dispatch(
+        await job_repo.list_events(upload_job.id)
+    ) is None
