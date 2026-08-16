@@ -1,0 +1,110 @@
+language: "en-US"
+tone_instructions: >
+  Terse, engineering-grade. Cite invariant IDs from docs/INVARIANTS.md when
+  relevant (e.g. "violates B3"). No praise padding. Advisory only — never
+  imply a change is blocked.
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  path_filters:
+    - "!**/uv.lock"
+    - "!player/package-lock.json"
+    - "!player/dist/**"
+    - "!deploy/aws/*.rendered.json"
+    - "!**/__pycache__/**"
+  path_instructions:
+    - path: "stemsplit/**"
+      instructions: >
+        RunPod GPU worker for the lossless-stem-v1 interface. Enforce
+        handoff-last ordering (A1): handoff.json must be uploaded only after
+        every stem PUT has returned — flag any code path that writes or renames
+        it earlier. Every dispatch attempt must write beneath its own immutable
+        attempts/<sha256(idempotency_key)> prefix (A6); older workers must never
+        clobber newer receipts. Check S3 atomicity assumptions (A1, A10): every
+        upload carries a locally computed sha256, and the shared progress
+        callback closure is mutated by several transfer-manager threads, so
+        every read-modify-write must hold its lock and progress must stay
+        monotonic (A11). Stems must stay pcm_f32le stereo 44100 with identical
+        sample counts and no per-stem normalization (A3). The flat-module
+        layout (lossless_worker.py, s3_ops.py, etc. as siblings, no package
+        structure) is intentional for the worker image — do not suggest
+        packaging or directory reorganization.
+    - path: "library/src/shizzle_server/orchestrator/**"
+      instructions: >
+        Durable orchestrator stage loop. Enforce the B-series invariants from
+        docs/INVARIANTS.md: lease ownership must be checked inside the locked
+        transaction (B2), and the dispatch reservation must commit before any
+        external RunPod call (B3) — a timeout or 5xx must never trigger a
+        second dispatch; it reconciles the outstanding reservation instead.
+        Poll-failure events dedupe to one row per outage and any other event
+        resets the window (B6). A failed RunPod cancel must never mask the
+        original error — _cancel_best_effort logs and swallows (B7). Park frees
+        the lease without consuming an attempt or appending an event (B9).
+        Every unresolvable error path fails closed (B5, B10) and every stage
+        handler must be idempotent under crash-rerun (B11). Heartbeats are
+        written only on phase change (B8); a RunPod job already marked failed
+        dispatches fresh under a new idempotency key (B12).
+    - path: "library/src/shizzle_server/db/repository.py"
+      instructions: >
+        Durable orchestrator stage loop. Enforce the B-series invariants from
+        docs/INVARIANTS.md: lease ownership must be checked inside the locked
+        transaction (B2), and the dispatch reservation must commit before any
+        external RunPod call (B3) — a timeout or 5xx must never trigger a
+        second dispatch; it reconciles the outstanding reservation instead.
+        Poll-failure events dedupe to one row per outage and any other event
+        resets the window (B6). A failed RunPod cancel must never mask the
+        original error — _cancel_best_effort logs and swallows (B7). Park frees
+        the lease without consuming an attempt or appending an event (B9).
+        Every unresolvable error path fails closed (B5, B10) and every stage
+        handler must be idempotent under crash-rerun (B11). Heartbeats are
+        written only on phase change (B8); a RunPod job already marked failed
+        dispatches fresh under a new idempotency key (B12).
+    - path: "library/src/shizzle_server/publish/**"
+      instructions: >
+        Publication and delivery-profile policy. Enforce the C and D series
+        from docs/INVARIANTS.md: the manifest is the completion marker and is
+        written last, via server-side copy only (C2); published generations are
+        immutable — an existing destination manifest makes the publish a no-op
+        (C1); the format guard (m4a stems, 64 MiB cap, no raw PCM) must run
+        before any promotion (C3); track ids are deterministic uuid5 so reruns
+        converge (C4); generation activation is compare-and-swap with the
+        ledger event in the same transaction (C5). Duration/bitrate gates must
+        reference the named constants in delivery_profile.py
+        (TRACK_DURATION_TOLERANCE_SEC 0.100, STEM_DURATION_TOLERANCE_SEC 0.080,
+        STEM_INTER_DURATION_TOLERANCE_SEC 0.005, 2.5 Mb/s cap) — flag any magic
+        number or locally redefined tolerance (D1-D4). delivery_profile.py must
+        stay a pure policy module with no boto3/ffmpeg/db imports (D7); at most
+        one common attenuation, never per-stem and never a boost (D3).
+    - path: "library/alembic/**"
+      instructions: >
+        Database migrations. Enforce the F series from docs/INVARIANTS.md: a
+        single linear chain with numeric filename prefix equal to the revision
+        id and an explicit down_revision (F1); additive-only changes unless the
+        author explicitly signs off on a destructive or rewriting migration —
+        if you see a drop/rewrite, ask for that sign-off in review. Every
+        upgrade needs a paired, real (non no-op) downgrade (F1). The DSN comes
+        from DATABASE_URL and target_metadata is Base.metadata (F2). Only the
+        api container ever runs alembic upgrade head (F3); the migration itself
+        is under test via the contract suite's real `alembic upgrade head`
+        subprocess (F4) — flag any test fixture that uses create_all.
+    - path: ".github/workflows/**"
+      instructions: >
+        CI/CD workflows. Image tags must be sha-pinned
+        (ghcr.io/mdc159/shizzle/api:sha-<sha> or worker:sha-<sha>) — flag any
+        latest/vN tag or hand-pushed image. Every workflow needs least-privilege
+        permissions and a concurrency group. No secret echoing in any step,
+        and no StrictHostKeyChecking=no anywhere — the deploy pins the host key
+        via VPS_SSH_HOST_KEY. deploy-vps deploys only after the production
+        environment approval gate; check that gate isn't bypassed.
+    - path: "player/**"
+      instructions: >
+        Browser player. Light review: correctness and obvious accessibility
+        issues only. No styling bikeshed — do not comment on CSS preferences,
+        formatting, or component organization. Flag real bugs (state races,
+        broken playback logic, unhandled errors) and clear WCAG violations
+        (missing labels, keyboard traps, contrast only when egregious).
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "docs/INVARIANTS.md"
