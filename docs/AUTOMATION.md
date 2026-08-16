@@ -263,6 +263,17 @@ Not in CI today, by choice:
 - **Unguarded invariants want tests**: E2 (`source_ref` never exposed in API
   responses) and A7 (uploaded handoff has `_`-prefixed private keys stripped)
   have no asserting test — see INVARIANTS.md for the wanted-test notes.
+- **The live restore path has never executed against real Docker.** The
+  transaction tests fault-inject `deploy-release.sh`/`restore-release.sh`
+  thoroughly, but with a stubbed `docker`; the first real execution of a
+  rollback (compose downgrade against live Postgres) would happen during a
+  genuine failed deploy. A deploy-rehearsal lane (disposable sandbox running
+  the real scripts against a throwaway compose stack) is the follow-up that
+  retires this risk; until then it is an accepted residual.
+- **`runpod-repoint.yml` has never been dispatched.** Its input validation,
+  manifest check, and template-exclusivity preflight are code-reviewed but
+  unexecuted; the first dispatch (safe with `workers_max=0` — the pool stays
+  parked) doubles as its live validation.
 
 ## 7. Lift to a new repo (template checklist)
 
@@ -295,10 +306,26 @@ Settings sequence (order matters):
 3. Enable branch protection on master after the first CI run has produced the
    check names — require PRs and the actual job ids (`library`, `stemsplit`,
    `player`, `postgres-contract`); AI reviewers stay advisory, never required.
-4. **After the first image push, flip the GHCR package to public visibility.**
-   The private-package trap: the first push creates the package private by
-   default and the VPS `docker compose pull` fails auth until visibility is
-   changed (or a pull token is wired into the box).
+4. **After the first image push, confirm the GHCR package is public.** The
+   private-package trap: a package created by a first push defaults to private
+   and the VPS `docker compose pull` fails auth until visibility is changed
+   (or a pull token is wired into the box). Packages pushed by Actions from a
+   public repository inherit public visibility and link automatically — verify
+   rather than assume, since the repo's visibility decides which case applies.
+5. **Pass `secrets: inherit` wherever a caller invokes the reusable deploy
+   workflow.** A called workflow's `secrets` context contains only what the
+   caller passes — even when the called job declares
+   `environment: production`. The protection rules (approval gate) still
+   apply without it, which makes the failure deceptive: the gate fires, the
+   job runs, and every secret resolves empty. The deploy job's preflight step
+   now fails fast with the cause, but the caller wiring is where the fix
+   belongs.
+6. **Bootstrap the first release identity on the box before the first
+   automated deploy.** `deploy-release.sh` fails closed ("Refusing automated
+   first deployment") when the production `.env` records no
+   `SHIZZLE_API_IMAGE`/`SHIZZLE_API_TAG`, because it cannot promise a rollback
+   target it cannot identify. Record the active image once per installation
+   (see `deploy/vps/README.md`); every later deploy maintains it.
 
 Bootstrap order: environment + reviewer setup → secrets → first merge
 (exercises build + gated deploy + package creation) → package visibility →

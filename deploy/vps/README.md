@@ -67,7 +67,18 @@ transaction artifact remains. After investigating an interrupted transaction,
 restore it or explicitly remove all four artifacts before retrying; never let a
 new deployment overwrite an unclosed rollback snapshot.
 Automated deployment refuses an installation with no recorded prior API
-identity; bootstrap the first production release explicitly.
+identity ("Refusing automated first deployment"); bootstrap the first
+production release explicitly by recording the identity of whatever image the
+active stack is running:
+
+```text
+printf 'SHIZZLE_API_IMAGE=<active image reference>\n' >> /opt/shizzle/prod/.env
+```
+
+Use the exact image the running api/orchestrator containers report (`docker
+compose -p shizzle ps`), so a rollback of the first automated deployment
+restarts precisely the release that was active before it. Done once per
+installation; every later deployment maintains the value itself.
 
 ## Current work
 
