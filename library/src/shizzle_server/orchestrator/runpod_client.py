@@ -112,13 +112,20 @@ class HttpRunPodClient:
 
     async def _call(self, factory: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
         try:
-            return await self._breaker.call_async(factory)
+            response = await self._breaker.call_async(factory)
         except RuntimeError as exc:
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,
                 "RunPod circuit breaker is open",
                 retryable=True,
             ) from exc
+        if response.status_code >= 400:
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED,
+                f"RunPod returned HTTP {response.status_code}",
+                retryable=False,
+            )
+        return response
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -133,13 +140,14 @@ class HttpRunPodClient:
                 ErrorCode.RUNPOD_DISPATCH_FAILED, str(exc), retryable=True
             ) from exc
 
-        if response.status_code < 400:
+        if response.status_code < 400 or (
+            400 <= response.status_code < 500 and response.status_code != 429
+        ):
             return response
-        retryable = response.status_code == 429 or response.status_code >= 500
         raise StageError(
             ErrorCode.RUNPOD_DISPATCH_FAILED,
             f"RunPod returned HTTP {response.status_code}",
-            retryable=retryable,
+            retryable=True,
         )
 
 

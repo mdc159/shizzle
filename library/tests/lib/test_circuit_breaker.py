@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import time
 
@@ -207,3 +208,29 @@ class TestCircuitBreakerConfig:
         """Circuit breaker name appears in repr and status."""
         breaker = CircuitBreaker(name="api-service")
         assert "api-service" in repr(breaker)
+
+
+async def test_half_open_allows_only_one_async_recovery_probe() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, timeout_seconds=-1)
+
+    async def fail() -> None:
+        raise ValueError("down")
+
+    with pytest.raises(ValueError):
+        await breaker.call_async(fail)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def probe() -> str:
+        started.set()
+        await release.wait()
+        return "recovered"
+
+    task = asyncio.create_task(breaker.call_async(probe))
+    await started.wait()
+    with pytest.raises(RuntimeError, match="probe in flight"):
+        await breaker.call_async(probe)
+    release.set()
+    assert await task == "recovered"
+    assert breaker.state == CircuitState.CLOSED

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Shizzle lossless-stem worker — RunPod serverless container
 #
 # Emits exactly the lossless-stem-v1 package (six float32 WAVs + handoff.json
@@ -37,26 +38,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # PyTorch + CUDA 12.1 (large layer, cached early)
-RUN pip3 install --upgrade pip \
+RUN pip3 install --upgrade pip==26.2 \
     && pip3 install --index-url https://download.pytorch.org/whl/cu121 \
-    torch torchaudio
+    torch==2.2.2+cu121 torchaudio==2.2.2+cu121
 
 # Demucs and audio deps
 RUN pip3 install \
-    demucs \
-    soundfile \
-    numpy'<2'
+    demucs==4.0.1 \
+    soundfile==0.14.0 \
+    numpy==1.26.4
 
 # Bake the htdemucs_6s weights into the image. After this layer the model
 # loads with zero network access — the leading historical RunPod failure
 # (cold workers dying on multi-GB first-run downloads) cannot occur.
 RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s')"
-# Prove the bake: loading again with the HF Hub forced offline must succeed.
-RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-    python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s'); print('WEIGHTS-BAKED-OFFLINE-OK')"
+# Prove the bake under a genuinely air-gapped BuildKit step. This fails the
+# image build if Demucs attempts any first-run network fetch.
+RUN --network=none python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s'); print('WEIGHTS-BAKED-OFFLINE-OK')"
 
 # Handler deps
-RUN pip3 install runpod boto3 requests
+RUN pip3 install \
+    runpod==1.11.0 \
+    boto3==1.43.62 \
+    requests==2.34.2
 
 # Code last (most volatile layer)
 # Provenance self-id, injected by the CI build. Placed here — after the heavy

@@ -179,6 +179,7 @@ def test_transform_emits_player_timeline_contract(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(lossless_intake, "encode_stem", fake_encode)
     monkeypatch.setattr(lossless_intake, "derive_video", fake_video)
+    monkeypatch.setattr(lossless_intake, "audit_candidate", _passing_candidate_audits)
 
     manifest = lossless_intake.transform(pkg, source, tmp_path / "candidate", "T", "A")
     assert manifest["timeline"] == {
@@ -186,6 +187,8 @@ def test_transform_emits_player_timeline_contract(tmp_path: Path, monkeypatch):
         "duration_ms": int(round(pkg.duration_seconds * 1000)),
         "sample_rate_hz": 44100,
     }
+    assert manifest["delivery_profile"] == "shizzle-browser-v1"
+    assert len(manifest["integrity"]["objects"]) == 7
 
 
 @pytest.mark.skipif(
@@ -302,12 +305,59 @@ def test_silent_mix_integrity_is_standard_json(tmp_path: Path, monkeypatch):
         "derive_video",
         lambda _source, out, _duration, **_kwargs: out.write_bytes(b"video"),
     )
+    monkeypatch.setattr(lossless_intake, "audit_candidate", _passing_candidate_audits)
 
     manifest = lossless_intake.transform(
         pkg, tmp_path / "source.mp4", tmp_path / "candidate", "T", "A"
     )
     assert manifest["integrity"]["default_mix_true_peak_dbtp"] is None
     json.dumps(manifest, allow_nan=False)
+
+
+def _passing_candidate_audits(_candidate: Path, _duration: float) -> list[dict]:
+    artifacts = [f"stems/{role}.m4a" for role in ROLES] + ["video.mp4"]
+    return [
+        {
+            "artifact": artifact,
+            "bytes": 5,
+            "sha256": hashlib.sha256(artifact.encode()).hexdigest(),
+            "passed": True,
+            "full_decode": "pass",
+            "issues": [],
+        }
+        for artifact in artifacts
+    ]
+
+
+def test_candidate_audit_fails_closed_on_release_blocking_issue(
+    tmp_path: Path, monkeypatch
+):
+    def failed_audio(*_args, artifact: str, **_kwargs):
+        return {
+            "artifact": artifact,
+            "bytes": 1,
+            "sha256": "a" * 64,
+            "passed": False,
+            "full_decode": "fail",
+            "issues": [{"code": "audio-full-decode"}],
+        }
+
+    monkeypatch.setattr(lossless_intake, "audit_audio_file", failed_audio)
+    monkeypatch.setattr(
+        lossless_intake,
+        "audit_video_file",
+        lambda *_args, artifact, **_kwargs: {
+            "artifact": artifact,
+            "bytes": 1,
+            "sha256": "b" * 64,
+            "passed": True,
+            "full_decode": "pass",
+            "issues": [],
+        },
+    )
+
+    with pytest.raises(IntakeError, match="audio-full-decode"):
+        lossless_intake.audit_candidate(tmp_path, 1.0)
 
 
 def test_stage_ignores_stale_manifest_when_collecting_media(tmp_path: Path):

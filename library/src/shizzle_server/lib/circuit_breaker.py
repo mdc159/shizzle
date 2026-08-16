@@ -111,6 +111,7 @@ class CircuitBreaker(Generic[T]):
         self._successes_in_half_open = 0
         self._last_failure_time: float | None = None
         self._state = CircuitState.CLOSED
+        self._half_open_probe_in_flight = False
 
     @property
     def state(self) -> CircuitState:
@@ -137,14 +138,22 @@ class CircuitBreaker(Generic[T]):
         elapsed = time.time() - self._last_failure_time
         return elapsed > self.config.timeout_seconds
 
-    def _before_call(self) -> None:
-        """Reject open circuits or move them to half-open after the timeout."""
+    def _before_call(self) -> bool:
+        """Admit a call and report whether it owns the half-open probe slot."""
+        if self._state == CircuitState.HALF_OPEN:
+            if self._half_open_probe_in_flight:
+                raise RuntimeError(
+                    f"Circuit breaker '{self.name}' is half-open (probe in flight)"
+                )
+            self._half_open_probe_in_flight = True
+            return True
         if self._state != CircuitState.OPEN:
-            return
+            return False
         if self._should_attempt_reset():
             self._transition_to(CircuitState.HALF_OPEN)
+            self._half_open_probe_in_flight = True
             logger.debug(f"Circuit breaker '{self.name}' entering half-open state")
-            return
+            return True
         raise RuntimeError(
             f"Circuit breaker '{self.name}' is open (failed {self._failures} times)"
         )
@@ -176,25 +185,33 @@ class CircuitBreaker(Generic[T]):
             RuntimeError: If circuit is open
             Any exception: If func raises and circuit stays closed/half-open
         """
-        self._before_call()
+        half_open_probe = self._before_call()
         try:
             result = func(*args, **kwargs) if args or kwargs else func()
-            self._record_success()
+            if half_open_probe:
+                self._record_success()
             return result
         except Exception:
             self._record_failure()
             raise
+        finally:
+            if half_open_probe:
+                self._half_open_probe_in_flight = False
 
     async def call_async(self, factory: Callable[[], Awaitable[T]]) -> T:
         """Execute an awaitable factory with circuit breaker protection."""
-        self._before_call()
+        half_open_probe = self._before_call()
         try:
             result = await factory()
-            self._record_success()
+            if half_open_probe:
+                self._record_success()
             return result
         except Exception:
             self._record_failure()
             raise
+        finally:
+            if half_open_probe:
+                self._half_open_probe_in_flight = False
 
     def _record_failure(self) -> None:
         """Record a failure and potentially open the circuit."""
@@ -235,6 +252,7 @@ class CircuitBreaker(Generic[T]):
         self._failures = 0
         self._successes_in_half_open = 0
         self._last_failure_time = None
+        self._half_open_probe_in_flight = False
         logger.info(f"Circuit breaker '{self.name}' manually reset")
 
     def __repr__(self) -> str:

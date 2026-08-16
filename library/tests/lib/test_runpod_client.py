@@ -98,6 +98,23 @@ async def test_breaker_opens_after_five_failures() -> None:
     assert "circuit breaker" in exc.value.detail
 
 
+async def test_nonretryable_4xx_does_not_open_breaker() -> None:
+    calls = 0
+
+    def unauthorized(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401)
+
+    runpod = client(unauthorized)
+    for _ in range(6):
+        with pytest.raises(StageError) as exc:
+            await runpod.poll("job-1")
+        assert exc.value.retryable is False
+        assert "HTTP 401" in exc.value.detail
+    assert calls == 6
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [

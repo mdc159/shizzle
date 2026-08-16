@@ -35,7 +35,12 @@ from pathlib import Path
 from typing import Any
 
 from .delivery_profile import CANONICAL_STEM_IDS as STEM_ROLES
-from .delivery_profile import TRACK_DURATION_TOLERANCE_SEC
+from .delivery_profile import (
+    PROFILE_ID,
+    TRACK_DURATION_TOLERANCE_SEC,
+    profile_manifest_block,
+)
+from .media_audit import MediaAuditError, audit_audio_file, audit_video_file
 from .publisher import (
     Publisher,
     StagedObject,
@@ -323,6 +328,43 @@ def derive_video(
         )
 
 
+def audit_candidate(candidate: Path, duration: float) -> list[dict[str, Any]]:
+    """Fully decode and profile-audit all seven browser media artifacts."""
+    try:
+        audits = [
+            audit_audio_file(
+                candidate / "stems" / f"{role}.m4a",
+                artifact=f"stems/{role}.m4a",
+                expected_duration=duration,
+                preserve_existing_lossy=False,
+            )
+            for role in STEM_ROLES
+        ]
+        audits.append(
+            audit_video_file(
+                candidate / "video.mp4",
+                artifact="video.mp4",
+                expected_duration=duration,
+            )
+        )
+    except (OSError, MediaAuditError) as exc:
+        raise IntakeError(f"candidate audit could not prove browser media: {exc}") from exc
+
+    failed = [audit for audit in audits if not audit.get("passed")]
+    if failed:
+        issues = [
+            issue.get("code", "unknown")
+            for audit in failed
+            for issue in audit.get("issues", [])
+            if isinstance(issue, dict)
+        ]
+        raise IntakeError(
+            "candidate failed browser profile audit: "
+            + ", ".join(issues or [str(audit.get("artifact")) for audit in failed])
+        )
+    return audits
+
+
 # --- 4. transform: package -> candidate generation on disk --------------------
 
 def transform(pkg: Package, source_video: Path, candidate: Path,
@@ -373,8 +415,25 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
         )
     logger.info("generation average %.3f Mb/s (budget %.1f)", avg_bps / 1e6, TRACK_BUDGET_BPS / 1e6)
 
+    audits = audit_candidate(candidate, duration)
+    object_provenance = [
+        {
+            "file": audit["artifact"],
+            "action": "derived",
+            "reason": f"{INTERFACE} to {PROFILE_ID}",
+            "bytes": audit["bytes"],
+            "sha256": audit["sha256"],
+            "audit_passed": audit["passed"],
+            "full_decode": audit["full_decode"],
+            "issues": audit["issues"],
+        }
+        for audit in audits
+    ]
+
     return {
         "version": 3,
+        "delivery_profile": PROFILE_ID,
+        "delivery_profile_details": profile_manifest_block(),
         "title": title,
         "artist": artist,
         "duration": duration,
@@ -398,11 +457,30 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
         },
         "integrity": {
             "source": INTERFACE,
+            "profile": PROFILE_ID,
             "handoff_source_sha256": pkg.handoff["source"]["sha256"],
             "worker_image": pkg.handoff["separation"]["worker_image"],
             "default_mix_true_peak_dbtp": tp if math.isfinite(tp) else None,
+            "objects": object_provenance,
+            "audit": {
+                "profile": PROFILE_ID,
+                "passed": True,
+                "objects": audits,
+            },
         },
-        "processing": {"source": INTERFACE, "origin": pkg.handoff["source"]["object_key"]},
+        "processing": {
+            "source": INTERFACE,
+            "origin": pkg.handoff["source"]["object_key"],
+            "profile": PROFILE_ID,
+            "objects": [
+                {
+                    "file": item["file"],
+                    "action": item["action"],
+                    "reason": item["reason"],
+                }
+                for item in object_provenance
+            ],
+        },
     }
 
 
