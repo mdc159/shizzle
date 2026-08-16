@@ -1,0 +1,71 @@
+name: runpod-repoint
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Worker image tag (sha- followed by the full commit SHA)
+        required: true
+        type: string
+      workers_max:
+        description: Maximum workers
+        default: "0"
+        type: string
+      endpoint_id:
+        description: RunPod endpoint ID
+        default: tevdw8022hs8hn
+        type: string
+      template_id:
+        description: RunPod template ID
+        default: vh76gbm3uy
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runpod-repoint
+
+jobs:
+  repoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate image tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: '[[ "$IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]'
+      - name: Update template image
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TEMPLATE_ID: ${{ inputs.template_id }}
+        run: |
+          curl -fsS -X PATCH "https://rest.runpod.io/v1/templates/$TEMPLATE_ID" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg imageName "ghcr.io/mdc159/shizzle/worker:$IMAGE_TAG" '{imageName: $imageName}')"
+      - name: Update endpoint
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          ENDPOINT_ID: ${{ inputs.endpoint_id }}
+          TEMPLATE_ID: ${{ inputs.template_id }}
+          WORKERS_MAX: ${{ inputs.workers_max }}
+        run: |
+          curl -fsS -X POST "https://rest.runpod.io/v1/endpoints/$ENDPOINT_ID/update" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -H 'Content-Type: application/json' \
+            --data "$(jq -nc --arg templateId "$TEMPLATE_ID" --argjson workersMax "$WORKERS_MAX" \
+              '{templateId: $templateId, workersMax: $workersMax}')"
+      - name: Report configuration
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          ENDPOINT_ID: ${{ inputs.endpoint_id }}
+          TEMPLATE_ID: ${{ inputs.template_id }}
+        run: |
+          curl -fsS -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            "https://rest.runpod.io/v1/endpoints/$ENDPOINT_ID" > endpoint.json
+          curl -fsS -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            "https://rest.runpod.io/v1/templates/$TEMPLATE_ID" > template.json
+          jq -n --slurpfile endpoint endpoint.json --slurpfile template template.json \
+            '{id: $endpoint[0].id, templateId: $endpoint[0].templateId,
+              workersMax: $endpoint[0].workersMax, imageName: $template[0].imageName}'
