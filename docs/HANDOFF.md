@@ -1,7 +1,30 @@
 # Shizzle — Current Handoff
 
-Last updated: 2026-08-05
+Last updated: 2026-08-16
 Repository: `X:\GitHub\shizzle`
+
+## 2026-08-16 update — automation and deployment
+
+Everything below this section still describes the application correctly; how
+code reaches production changed today:
+
+- The production VPS was cut over to the current master layout (`library/`,
+  `player/`, repo compose and Caddyfile at `/opt/shizzle/prod`); migration
+  `0004_worker_heartbeats` is applied. Pre-cutover snapshots remain on the box
+  under `backups/` and `*.precutover` until the new stack has run clean.
+- Deployment is now fully automated and gated: every master merge runs the
+  four `ci.yml` checks, builds a digest-pinned `ghcr.io/mdc159/shizzle/api`
+  image, and queues a production deploy behind a GitHub Environment approval.
+  The deploy is transactional (rollback snapshot, migration, health checks,
+  automatic restore on failure). The api and orchestrator containers now run
+  the pulled digest-pinned image; build-on-box is a documented fallback only.
+- Master is protected by the four required checks, enforced for administrators;
+  the current branch rule does not itself require pull requests. PR-only landing
+  remains repository policy. Greptile, CodeRabbit, and cubic are advisory to
+  branch protection, while drive-pr-review-convergence still requires a
+  current-head Greptile review and evidence-backed dispositions.
+- The full system, its secrets, its failure modes, and the lift-to-a-new-repo
+  checklist are documented in [`AUTOMATION.md`](AUTOMATION.md).
 
 ## Read this first
 
@@ -95,9 +118,10 @@ the separator's native `other` output to `shizzle` as it writes the package.
 1. Change the worker output to match `lossless-stem-v1`; remove AAC encoding,
    video derivation, and delivery-manifest ownership from the RunPod side.
 2. Add the `htdemucs_6s` weight download to the worker image build.
-3. Publish a new image through the `mdc159/shizzle-worker` GitHub Actions
-   workflow.
-4. Point the RunPod template to the new immutable tag.
+3. Publish a new image through this repo's `worker-image.yml` workflow (it
+   pushes `ghcr.io/mdc159/shizzle/worker:sha-<commit>`).
+4. Point the RunPod template to the new immutable tag via the
+   `runpod-repoint.yml` dispatch (keeps the pool parked with `workers_max=0`).
 5. Re-enable a small bounded worker pool.
 6. Submit the golden fixture and require `COMPLETED` plus the exact lossless
    package in cloud storage.

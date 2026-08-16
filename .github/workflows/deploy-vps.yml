@@ -70,6 +70,21 @@ jobs:
             echo "::error::Master advanced to $current while deployment awaited approval"
             exit 1
           }
+      - name: Preflight deployment secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "$VPS_HOST" ] || missing="$missing VPS_HOST"
+          [ -n "$VPS_SSH_KEY" ] || missing="$missing VPS_SSH_KEY"
+          [ -n "$VPS_SSH_HOST_KEY" ] || missing="$missing VPS_SSH_HOST_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Empty deployment secrets:${missing}. A called workflow's secrets context holds only what the caller passes — the caller must use 'secrets: inherit', and the secrets must exist on the production environment."
+            exit 1
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.admit.outputs.target_sha }}
