@@ -24,6 +24,8 @@ case "$url" in
       exit 22
     elif [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = incomplete ]; then
       printf '%s\n' '{}'
+    elif [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = stale ]; then
+      printf '%s\n' '{"id":"endpoint-old","templateId":"template-old","workersMax":2}'
     elif [ -f "$RUNPOD_STATE" ]; then
       printf '%s\n' '{"id":"endpoint-old","templateId":"template-new","workersMax":4}'
     else
@@ -121,8 +123,23 @@ if run_repoint "$TAG" 4 endpoint-old template-old; then
   echo "failed endpoint update unexpectedly succeeded" >&2
   exit 1
 fi
-grep -F -- '-X DELETE' "$RUNPOD_LOG"
-grep -F '/templates/template-new' "$RUNPOD_LOG"
+if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
+  echo "ambiguous pre-commit failure deleted a potentially bound template" >&2
+  exit 1
+fi
+
+: > "$RUNPOD_LOG"
+rm -f "$RUNPOD_STATE"
+RUNPOD_FAIL=postcommit
+RUNPOD_RECONCILE=stale
+if run_repoint "$TAG" 4 endpoint-old template-old; then
+  echo "stale reconciliation unexpectedly succeeded" >&2
+  exit 1
+fi
+if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
+  echo "stale reconciliation deleted the potentially bound template" >&2
+  exit 1
+fi
 
 : > "$RUNPOD_LOG"
 rm -f "$RUNPOD_STATE"

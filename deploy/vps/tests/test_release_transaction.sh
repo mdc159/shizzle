@@ -118,6 +118,23 @@ grep -F 'alembic downgrade 0004_worker_heartbeats' "$DOCKER_LOG"
 grep -Fx old-caddy "$PROD/Caddyfile"
 grep -Fx old-player "$PROD/player/index.html"
 
+new_fixture downgrade-failure
+run_deploy
+DOCKER_FAIL=downgrade
+set +e
+run_restore
+restore_status=$?
+set -e
+DOCKER_FAIL=
+test "$restore_status" -eq 33
+grep -Fx old-compose "$PROD/compose.prod.yml"
+grep -Fx old-caddy "$PROD/Caddyfile"
+grep -Fx old-player "$PROD/player/index.html"
+if tail -n 1 "$DOCKER_LOG" | grep -F 'up -d'; then
+  echo "downgrade failure restarted application services" >&2
+  exit 1
+fi
+
 new_fixture interrupted-restore
 run_deploy
 mv "$PROD/player" "$PROD/player.failed"

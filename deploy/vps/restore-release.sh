@@ -35,11 +35,12 @@ for required_path in .env compose.prod.yml Caddyfile player; do
   test -e "$RESTORE_DIR/$required_path" || { echo "Rollback snapshot is incomplete: missing $required_path" >&2; exit 1; }
 done
 
+DOWNGRADE_STATUS=0
 case "$PHASE" in
   migration-started|services-starting)
     "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml stop api orchestrator
     "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml run --rm --no-deps api \
-      alembic downgrade "$PREV_DB_REV"
+      alembic downgrade "$PREV_DB_REV" || DOWNGRADE_STATUS=$?
     ;;
   snapshot-ready|files-activating) ;;
   *) echo "Unknown deployment phase: $PHASE" >&2; exit 1 ;;
@@ -58,5 +59,9 @@ if [ -e player ] || [ -L player ]; then
 fi
 mv "$RESTORE_DIR/player" player
 rm -rf -- player.failed
+if [ "$DOWNGRADE_STATUS" -ne 0 ]; then
+  echo "Database downgrade failed with status $DOWNGRADE_STATUS; restored prior files and left application services stopped" >&2
+  exit "$DOWNGRADE_STATUS"
+fi
 "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d --force-recreate --remove-orphans
 echo "Restored the previous release at database revision $PREV_DB_REV"

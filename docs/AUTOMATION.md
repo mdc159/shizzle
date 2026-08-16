@@ -32,7 +32,10 @@ and the successful master CI workflow calls `deploy-vps.yml`. The reusable
 registry digest to the environment-gated deploy. `runpod-repoint.yml` is
 manual-only: it clones the endpoint's current template with the new image and
 sets the new template plus `workers_max` in one endpoint update. The prior
-template remains available for explicit rollback.
+template remains available for explicit rollback. Once an endpoint update has
+been attempted, a failed or stale reconciliation preserves the new template;
+automatic deletion is unsafe because the update may have committed despite a
+lost response.
 
 ## 2. Secrets inventory
 
@@ -77,7 +80,10 @@ behavior) are NOT asserted by the workflow.
 
 - Automatic: a deploy or health failure downgrades Alembic to the recorded
   prior revision before restoring the complete prior file snapshot and image
-  identity. A real downgrade is mandatory under F1.
+  identity. A real downgrade is mandatory under F1. If the downgrade itself
+  fails, rollback still restores the prior files but leaves API and
+  orchestrator stopped and returns the original downgrade failure for manual
+  recovery; it never starts an old image against an unknown schema state.
 - Break-glass: edit `SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a known
   tag-plus-digest reference and run Compose on the box. Automated deployment
   refuses an installation with no prior API identity; bootstrap the first

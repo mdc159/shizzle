@@ -47,7 +47,7 @@ cleanup() {
           BOUND=1
           echo "Endpoint update result was ambiguous; preserved bound template $NEW_TEMPLATE_ID" >&2
         else
-          DELETE_UNBOUND=1
+          echo "Endpoint reconciliation may be stale; preserved template $NEW_TEMPLATE_ID" >&2
         fi
       else
         echo "Could not reconcile endpoint update; preserved template $NEW_TEMPLATE_ID" >&2
