@@ -4,6 +4,7 @@ duplicate completion). Real-Postgres concurrency lives in tests/contract/."""
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -321,6 +322,39 @@ async def test_upload_source_is_idempotent_on_size_match(fake_aws_credentials, t
         ctx.source_path.write_bytes(b"changed length source bytes!!")
         await cloud.upload_source(ctx)
         assert state["uploads"] == 2
+
+
+async def test_accepted_dispatch_id_reads_matching_worker_receipt(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    track_id = track_id_for_job(ctx.job.id)
+    dispatch_key = f"{ctx.job.id.hex}:0"
+    receipt = {
+        "runpod_job_id": "rp-from-worker",
+        "idempotency_key": dispatch_key,
+        "track_id": str(track_id),
+        "generation": cloud.GENERATION,
+    }
+
+    class Body:
+        def read(self):
+            return json.dumps(receipt).encode()
+
+    class S3:
+        def get_object(self, *, Bucket, Key):  # noqa: ANN001, N803
+            assert Bucket == settings.s3_media_bucket
+            assert Key == cloud.dispatch_receipt_key(track_id)
+            return {"Body": Body()}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    assert (
+        await cloud.accepted_dispatch_id(ctx, idempotency_key=dispatch_key)
+        == "rp-from-worker"
+    )
+
+    receipt["idempotency_key"] = "stale-attempt"
+    assert await cloud.accepted_dispatch_id(ctx, idempotency_key=dispatch_key) is None
 
 
 # --- WS4: dispatched reconciliation (FakeRunPodClient) ------------------------
@@ -756,7 +790,12 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
     async def package_not_ready(_ctx):
         return False
 
+    async def dispatch_not_started(_ctx, *, idempotency_key):
+        assert idempotency_key == f"{upload_job.id.hex}:0"
+        return None
+
     monkeypatch.setattr(cloud, "package_ready", package_not_ready)
+    monkeypatch.setattr(cloud, "accepted_dispatch_id", dispatch_not_started)
     job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
     fake = TimeoutOnce([{"status": "COMPLETED", "output": {}}])
     first = StageContext(
@@ -808,6 +847,32 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
     assert events.count("runpod_dispatch_started") == 1
     assert "runpod_dispatched" not in events
 
+    fail_closed_after = (
+        settings.runpod_queue_timeout_seconds
+        + settings.runpod_worker_stall_seconds
+        + 1
+    )
+    monkeypatch.setattr(
+        "shizzle_server.orchestrator.stages._age_seconds",
+        lambda _since: fail_closed_after,
+    )
+    await job_repo.park(
+        upload_job.id, worker_id="dispatch-timeout", recheck_in_seconds=0
+    )
+    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
+    aged = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="dispatch-timeout",
+    )
+    assert await handle_dispatched(aged) is None
+    assert len(fake.dispatched) == 1
+    events = [event.event for event in await job_repo.list_events(upload_job.id)]
+    assert events.count("runpod_dispatch_reconciliation_pending") == 1
+
 
 async def test_accepted_dispatch_survives_confirmation_failure(
     settings, job_repo, upload_job, monkeypatch
@@ -855,7 +920,12 @@ async def test_accepted_dispatch_survives_confirmation_failure(
     async def package_ready(_ctx):
         return True
 
+    async def no_dispatch_receipt(_ctx, *, idempotency_key):
+        assert idempotency_key == f"{upload_job.id.hex}:0"
+        return None
+
     monkeypatch.setattr(cloud, "package_ready", package_ready)
+    monkeypatch.setattr(cloud, "accepted_dispatch_id", no_dispatch_receipt)
     recovered = StageContext(
         job=job,
         settings=settings,
@@ -873,6 +943,58 @@ async def test_accepted_dispatch_survives_confirmation_failure(
     assert recovery[0].detail == {
         "idempotency_key": f"{upload_job.id.hex}:0",
         "source": "handoff.json",
+    }
+
+
+async def test_accepted_dispatch_recovers_remote_id_from_worker_receipt(
+    settings, job_repo, upload_job, monkeypatch
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    job = await job_repo.claim_next(worker_id="receipt-recovery", lease_seconds=60)
+    dispatch_key = f"{upload_job.id.hex}:0"
+    assert await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="receipt-recovery",
+        idempotency_key=dispatch_key,
+    )
+
+    async def package_not_ready(_ctx):
+        return False
+
+    async def accepted_dispatch(_ctx, *, idempotency_key):
+        assert idempotency_key == dispatch_key
+        return "rp-accepted"
+
+    monkeypatch.setattr(cloud, "package_ready", package_not_ready)
+    monkeypatch.setattr(cloud, "accepted_dispatch_id", accepted_dispatch)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=FakeRunPodClient([{"status": "IN_QUEUE"}]),
+        worker_id="receipt-recovery",
+    )
+
+    assert await handle_dispatched(ctx) is None
+    assert ctx.park_seconds == settings.runpod_poll_seconds
+    recovered = await job_repo.get_job(upload_job.id)
+    assert recovered.runpod_job_id == "rp-accepted"
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events].count("runpod_dispatched") == 1
+    receipt_events = [
+        event for event in events if event.event == "runpod_dispatch_recovered"
+    ]
+    assert len(receipt_events) == 1
+    assert receipt_events[0].detail == {
+        "idempotency_key": dispatch_key,
+        "runpod_job_id": "rp-accepted",
+        "source": "dispatch.json",
     }
 
 

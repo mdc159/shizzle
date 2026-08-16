@@ -9,6 +9,7 @@
     reported percentage monotonic and bounded.
 """
 
+import json
 import sys
 import threading
 from pathlib import Path
@@ -30,9 +31,13 @@ class _FakeServerless:
 class _FakeS3:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.puts: list[dict] = []
 
     def delete_object(self, *, _Bucket, Key) -> None:  # noqa: ANN001, N803
         self.deleted.append(Key)
+
+    def put_object(self, **kwargs) -> None:  # noqa: ANN003
+        self.puts.append(kwargs)
 
 
 def test_handler_does_not_delete_shared_handoff_marker(monkeypatch):
@@ -72,9 +77,11 @@ def test_handler_does_not_delete_shared_handoff_marker(monkeypatch):
 
     prefix = "tracks/T1/1/separation"
     result = handler({
+        "id": "rp-accepted",
         "input": {
             "track_id": "T1",
             "generation": 1,
+            "idempotency_key": "job-1:0",
             "bucket": "bkt",
             "input_key": "sources/T1/source.mp4",
             "output_prefix": prefix,
@@ -90,6 +97,16 @@ def test_handler_does_not_delete_shared_handoff_marker(monkeypatch):
     assert [k for k in uploaded if k.endswith(".wav")] == [
         f"{prefix}/stems/{role}.wav" for role in ROLES
     ]
+    assert len(fake_s3.puts) == 1
+    receipt = fake_s3.puts[0]
+    assert receipt["Key"] == f"{prefix}/dispatch.json"
+    assert receipt["ContentType"] == "application/json"
+    assert json.loads(receipt["Body"]) == {
+        "runpod_job_id": "rp-accepted",
+        "idempotency_key": "job-1:0",
+        "track_id": "T1",
+        "generation": 1,
+    }
     assert result["status"] == "COMPLETED"
 
 

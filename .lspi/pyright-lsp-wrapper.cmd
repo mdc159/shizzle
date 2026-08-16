@@ -1,19 +1,19 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 if "%~1"=="--version" (
   pyright --version
-  exit /b %errorlevel%
+  exit /b !errorlevel!
 )
 
 if "%~1"=="--help" (
   pyright-langserver --help
-  exit /b %errorlevel%
+  exit /b !errorlevel!
 )
 
 if "%~1"=="-h" (
   pyright-langserver --help
-  exit /b %errorlevel%
+  exit /b !errorlevel!
 )
 
 pyright-langserver %*

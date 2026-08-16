@@ -3,6 +3,7 @@
 [[servers]]
 id = "python"
 kind = "pyright"
+# This LSP consumes library/pyrightconfig.json; mypy remains the CI checker.
 extensions = ["py", "pyi"]
 language_id = "python"
 root_dir = "library"
@@ -20,6 +21,7 @@ warmup_timeout_ms = 1000
 [[servers]]
 id = "typescript"
 kind = "generic"
+# Intentionally PATH-resolved, like lspi's other globally installed servers.
 extensions = ["ts", "tsx", "js", "jsx"]
 language_id = "typescript"
 root_dir = "player"

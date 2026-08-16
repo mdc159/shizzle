@@ -41,8 +41,10 @@ def handler(job: dict) -> dict:
             runpod.serverless.progress_update(job, msg)
 
     params = job.get("input", {})
+    runpod_job_id = str(job.get("id", "")).strip()
     track_id = params["track_id"]
     generation = int(params.get("generation", 1))
+    idempotency_key = str(params.get("idempotency_key", "")).strip()
     bucket = params["bucket"]
     input_key = params["input_key"]
     prefix = params.get(
@@ -51,6 +53,21 @@ def handler(job: dict) -> dict:
 
     s3 = create_s3_client()
     handoff_key = f"{prefix}/handoff.json"
+    if runpod_job_id and idempotency_key:
+        receipt_key = f"{prefix}/dispatch.json"
+        receipt = {
+            "runpod_job_id": runpod_job_id,
+            "idempotency_key": idempotency_key,
+            "track_id": str(track_id),
+            "generation": generation,
+        }
+        heartbeat(f"dispatch: recording {runpod_job_id}")
+        s3.put_object(
+            Bucket=bucket,
+            Key=receipt_key,
+            Body=json.dumps(receipt, separators=(",", ":")).encode("utf-8"),
+            ContentType="application/json",
+        )
     # wave3 #2: do NOT delete the shared handoff.json marker here. A retry that
     # shares this prefix could be racing an earlier worker that already crossed
     # the interface; deleting would destroy its valid completion marker and the

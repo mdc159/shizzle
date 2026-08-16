@@ -263,6 +263,26 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             else {}
         )
         dispatch_key = str(detail.get("idempotency_key", "unknown"))
+        accepted_runpod_id = await cloud.accepted_dispatch_id(
+            ctx, idempotency_key=dispatch_key
+        )
+        if accepted_runpod_id is not None:
+            await _confirm_dispatch(
+                ctx,
+                idempotency_key=dispatch_key,
+                runpod_job_id=accepted_runpod_id,
+            )
+            await ctx.jobs.append_event(
+                job.id,
+                "runpod_dispatch_recovered",
+                {
+                    "idempotency_key": dispatch_key,
+                    "runpod_job_id": accepted_runpod_id,
+                    "source": cloud.DISPATCH_RECEIPT,
+                },
+            )
+            ctx.park_seconds = ctx.settings.runpod_poll_seconds
+            return None
         if await cloud.package_ready(ctx):
             already_recovered = any(
                 event.event == "runpod_dispatch_recovered"
@@ -283,17 +303,32 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             + ctx.settings.runpod_worker_stall_seconds
         )
         if pending_for > fail_closed_after:
-            raise StageError(
-                ErrorCode.RUNPOD_DISPATCH_FAILED,
-                "RunPod dispatch may have been accepted but its job id was not "
-                "durably confirmed; automatic redispatch is disabled to prevent "
-                "duplicate GPU work. Reconcile the RunPod job or S3 handoff manually.",
-                retryable=False,
+            already_waiting = any(
+                event.event == "runpod_dispatch_reconciliation_pending"
+                and isinstance(event.detail, dict)
+                and event.detail.get("idempotency_key") == dispatch_key
+                for event in events
+            )
+            if not already_waiting:
+                await ctx.jobs.append_event(
+                    job.id,
+                    "runpod_dispatch_reconciliation_pending",
+                    {
+                        "idempotency_key": dispatch_key,
+                        "pending_seconds": round(pending_for, 1),
+                    },
+                )
+            logger.error(
+                "job %s: RunPod dispatch identity is still pending after %.0fs; "
+                "holding the reservation to prevent duplicate GPU work",
+                job.id,
+                pending_for,
             )
         ctx.park_seconds = ctx.settings.runpod_poll_seconds
         return None
 
     dispatch_key = f"{job.id.hex}:{job.attempt}"
+    payload["idempotency_key"] = dispatch_key
     reserved = await ctx.jobs.reserve_dispatch(
         job.id,
         worker_id=ctx.worker_id,

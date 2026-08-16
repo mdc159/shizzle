@@ -15,6 +15,7 @@ Spec: approved plan ``async-wiggling-yao.md`` design decisions 1, 2, 4, 5, 6.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import uuid
@@ -44,6 +45,7 @@ GENERATION = 1
 # The lossless worker writes its outputs under this deterministic prefix (no
 # result payload needed to find the package — decision 3).
 SEPARATION_SEGMENT = "separation"
+DISPATCH_RECEIPT = "dispatch.json"
 
 
 def source_key(track_id: uuid.UUID | str) -> str:
@@ -54,6 +56,58 @@ def source_key(track_id: uuid.UUID | str) -> str:
 def separation_prefix(track_id: uuid.UUID | str) -> str:
     """Where the worker drops the lossless-stem-v1 package + handoff.json."""
     return f"tracks/{track_id}/{GENERATION}/{SEPARATION_SEGMENT}"
+
+
+def dispatch_receipt_key(track_id: uuid.UUID | str) -> str:
+    """Worker-written marker that binds a reservation to its RunPod job id."""
+    return f"{separation_prefix(track_id)}/{DISPATCH_RECEIPT}"
+
+
+async def accepted_dispatch_id(
+    ctx: StageContext, *, idempotency_key: str
+) -> str | None:
+    """Recover an accepted RunPod id from the worker's early S3 receipt.
+
+    RunPod assigns the remote id and returns it from ``POST /run``. If that
+    response or the following database write is lost, the worker is the only
+    other participant that sees the id. It writes this receipt before doing GPU
+    work so a reclaimed orchestrator lease can durably attach the remote job.
+    """
+    track_id = track_id_for_job(ctx.job.id)
+    key = dispatch_receipt_key(track_id)
+    try:
+        receipt = await asyncio.to_thread(
+            _read_json_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch reconciliation failed to read {key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    if receipt is None:
+        return None
+
+    expected = {
+        "idempotency_key": idempotency_key,
+        "track_id": str(track_id),
+        "generation": GENERATION,
+    }
+    if any(receipt.get(field) != value for field, value in expected.items()):
+        logger.warning(
+            "job %s: ignoring stale or mismatched dispatch receipt at %s",
+            ctx.job.id,
+            key,
+        )
+        return None
+    runpod_job_id = receipt.get("runpod_job_id")
+    if not isinstance(runpod_job_id, str) or not runpod_job_id:
+        logger.warning("job %s: dispatch receipt has no RunPod id", ctx.job.id)
+        return None
+    return runpod_job_id
 
 
 async def package_ready(ctx: StageContext) -> bool:
@@ -239,6 +293,19 @@ def _head_or_none(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
         if _is_not_found(exc):
             return None
         raise
+
+
+def _read_json_or_none(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+    except Exception as exc:
+        if _is_not_found(exc):
+            return None
+        raise
+    payload = json.loads(response["Body"].read())
+    if not isinstance(payload, dict):
+        raise ValueError(f"{key} must contain a JSON object")
+    return payload
 
 
 def _download_source(s3: Any, bucket: str, key: str, dest: Path) -> None:

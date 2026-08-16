@@ -334,8 +334,9 @@ async def test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover
     assert job.worker_phase == "dispatched"
     events = await job_repo.list_events(upload_job.id)
     assert [event.event for event in events].count("runpod_dispatch_started") == 1
-    confirmed = [event for event in events if event.event == "runpod_dispatched"][-1]
-    assert confirmed.detail == {
+    confirmations = [event for event in events if event.event == "runpod_dispatched"]
+    assert len(confirmations) == 1
+    assert confirmations[0].detail == {
         "runpod_job_id": "runpod-accepted",
         "idempotency_key": dispatch_key,
     }
