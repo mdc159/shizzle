@@ -1,0 +1,26 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": false,
+  "statusCheck": true,
+  "fixWithAI": true,
+  "autoApprove": {
+    "enabled": false
+  },
+  "summarySection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "issuesTableSection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "confidenceScoreSection": {
+    "included": true,
+    "collapsible": false,
+    "defaultOpen": true
+  },
+  "instructions": "Act as Shizzle's primary whole-diff validator. Focus on cross-file correctness, state transitions, concurrency, deployment transaction safety, migrations, retries, partial failure, and invariant violations. Cite docs/INVARIANTS.md identifiers when applicable. Do not comment on style, formatting, or optional refactors. A final review is triggered manually only after the candidate passes CI and local failure-path validation."
+}

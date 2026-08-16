@@ -108,13 +108,32 @@ All three reviewers consume the same source of truth:
   `path_instructions` mirror the invariant series per area, and the
   `knowledge_base.code_guidelines` block makes CodeRabbit ingest
   `docs/INVARIANTS.md` directly, so reviews cite invariant IDs ("violates B3").
-- **Greptile** — has no repo config file; its rules come from org-level custom
-  context set via the Greptile API. The `path_instructions` texts from
-  `.coderabbit.yaml` are mirrored there verbatim so both reviewers enforce the
-  same invariants.
+- **Greptile** — the primary whole-diff validator. `.greptile/config.json`
+  limits it to logic/syntax findings, points it at repository context, and
+  disables review-on-every-push. `.greptile/files.json` supplies this document
+  and `INVARIANTS.md` as canonical context. Trigger the final review manually
+  only after a coherent candidate passes CI and failure-path validation.
 - **cubic** — configured through its dashboard custom rules. The seven paste
   texts below are the standalone versions of the same path instructions; the
   owner pastes each into the dashboard.
+
+### Coordinated review policy
+
+- CodeRabbit is a free-plan advisory intake reviewer. It reviews the initial PR
+  when quota is available; automatic incremental review is disabled. Never wait
+  for quota or require a final-head CodeRabbit run.
+- Cubic is advisory. Consume available P0/P1 findings, but do not wait for its
+  completion or restart the loop for P2 polish.
+- Greptile is primary. After batching all validated intake findings and passing
+  required CI, manually trigger one final whole-diff review. Target confidence
+  5/5. Confidence 4/5 is acceptable only when there are no reproduced P0/P1
+  findings and every P2 has an explicit disposition. A score of 3/5 or lower,
+  or Greptile's explicit do-not-merge recommendation, is not ready.
+- Allow at most two repair batches. If a reproduced P0/P1 remains after the
+  confirmation review, stop for human adjudication instead of greplooping.
+- Reviewer findings are deduplicated into one ledger and fixed in batches. The
+  coordinator owns readiness; reviewers provide evidence and never command one
+  another.
 
 ## 5. cubic paste-text
 

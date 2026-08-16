@@ -6,6 +6,13 @@ tone_instructions: >
 reviews:
   profile: "assertive"
   request_changes_workflow: false
+  # Preserve the free-plan review for one useful intake pass. Later pushes are
+  # batched and Greptile performs the manually triggered final review.
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: false
+    auto_pause_after_reviewed_commits: 1
   path_filters:
     - "!**/uv.lock"
     - "!player/package-lock.json"
