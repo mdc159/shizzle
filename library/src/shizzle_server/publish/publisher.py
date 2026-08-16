@@ -168,7 +168,10 @@ class InvalidStemObject(PublishError):
 ALLOWED_STEM_SUFFIXES = (".m4a",)
 #: Sane per-stem cap. A 320k AAC stem of a ~8 minute track is ~19 MiB; raw
 #: WAV of the same track is ~95 MiB.
-MAX_STEM_BYTES = 20 * 1024**2
+# 30 minutes at the fixed 256 kb/s AAC target is about 55 MiB before container
+# overhead. Keep enough headroom for every API-accepted track while remaining
+# far below the roughly 600 MiB size of an accidental raw float32 WAV stem.
+MAX_STEM_BYTES = 64 * 1024**2
 _STEM_DIR = "stems/"
 
 

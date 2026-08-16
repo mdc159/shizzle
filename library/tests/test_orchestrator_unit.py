@@ -489,31 +489,29 @@ async def test_cloud_dispatched_e2e_records_progress_and_completes(
     assert (await track_repo.get(job.track_id)) is not None
 
 
-async def test_cloud_dispatched_stall_cancels_and_schedules_retry(
+async def test_cloud_dispatched_stable_phase_remains_live(
     settings, job_repo, upload_job, monkeypatch
 ):
-    """Frozen heartbeat (phase never changes) trips the stall watchdog:
-    cancel is called and a retry is scheduled (attempt increments)."""
+    """Repeated successful polls in one phase refresh liveness without events."""
     _stub_cloud_intake(monkeypatch)
     settings.runpod_poll_seconds = 0.02
-    settings.runpod_worker_stall_seconds = 0.05
+    settings.runpod_worker_stall_seconds = 1.0
     fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "working"}}])
     orch, task = await _run_cloud_orch(settings, fake)
     try:
-        # Wait for the first retry (attempt 1) scheduled by the stall error.
-        async def _retry_scheduled():
-            events = await job_repo.list_events(upload_job.id)
-            return any(e.event == "retry_scheduled" for e in events) or None
+        async def _polled_repeatedly():
+            return len(fake.polled) >= 3 or None
 
-        await asyncio.wait_for(_poll_predicate(_retry_scheduled), timeout=15)
+        await asyncio.wait_for(_poll_predicate(_polled_repeatedly), timeout=15)
     finally:
         orch.request_stop()
         await asyncio.wait_for(task, timeout=10)
 
-    assert len(fake.cancelled) >= 1
+    assert fake.cancelled == []
     job = await job_repo.get_job(upload_job.id)
-    assert job.attempt >= 1
-    assert job.error_code == "RUNPOD_TIMEOUT"
+    assert job.attempt == 0
+    assert job.worker_phase == "working"
+    assert job.error_code is None
 
 
 async def test_cloud_dispatched_runpod_failed_redispatches_fresh(
@@ -554,7 +552,10 @@ async def test_cloud_dispatched_park_does_not_increment_attempt(
     fake = FakeRunPodClient([{"status": "IN_QUEUE", "output": {}}])
     orch, task = await _run_cloud_orch(settings, fake)
     try:
-        await asyncio.sleep(0.4)  # several park/recheck cycles
+        async def _polled_repeatedly():
+            return len(fake.polled) >= 3 or None
+
+        await asyncio.wait_for(_poll_predicate(_polled_repeatedly), timeout=15)
     finally:
         orch.request_stop()
         await asyncio.wait_for(task, timeout=10)

@@ -577,6 +577,11 @@ def test_validate_stem_object_rejects_oversized_m4a():
     assert reason is not None and "cap" in reason
 
 
+def test_stem_cap_covers_maximum_upload_duration_at_fixed_bitrate():
+    encoded_bytes = 256_000 / 8 * (30 * 60)
+    assert encoded_bytes * 1.05 <= MAX_STEM_BYTES
+
+
 def test_validate_stem_object_ignores_non_stem_objects():
     # Video/multitrack/manifest are not stems; the WAV-era 573 MB failure mode
     # was specifically per-stem audio.
