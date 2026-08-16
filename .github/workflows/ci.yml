@@ -110,3 +110,7 @@ jobs:
     uses: ./.github/workflows/deploy-vps.yml
     with:
       target_sha: ${{ github.sha }}
+    # A called workflow's secrets context holds only what the caller passes;
+    # the production environment secrets (VPS_HOST, VPS_SSH_KEY,
+    # VPS_SSH_HOST_KEY) resolve empty in the deploy job without this.
+    secrets: inherit
