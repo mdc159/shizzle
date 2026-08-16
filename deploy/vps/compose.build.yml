@@ -1,4 +1,6 @@
-# Usage: docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+# Usage:
+# SHIZZLE_API_TAG=local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+# SHIZZLE_API_TAG=local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
 services:
   api:
     build:
