@@ -17,6 +17,7 @@ not optional properties.
 ## A. Handoff / interface contract (lossless-stem-v1)
 
 ### A1 — handoff.json is written last
+
 **Invariant:** The worker MUST upload `handoff.json` only after every object it
 references is durably in S3. A visible handoff implies a complete attempt.
 - Where: `interfaces/lossless-stem-v1/spec.md:118`, `stemsplit/lossless_handler.py:108`, `library/src/shizzle_server/publish/lossless_intake.py:69`
@@ -25,6 +26,7 @@ references is durably in S3. A visible handoff implies a complete attempt.
   PUT returns.
 
 ### A2 — exactly six stems, sixth role `shizzle`
+
 **Invariant:** A lossless-stem-v1 package MUST contain exactly six canonical
 stem roles — `vocals, drums, bass, guitar, piano, shizzle` — with the sixth role
 named `shizzle` (renamed from the separator's `other`); no other role set is
@@ -35,6 +37,7 @@ accepted.
   intake) without the other two.
 
 ### A3 — stems are sample-identical lossless stereo
+
 **Invariant:** Every stem MUST be stereo, 44100 Hz, `pcm_f32le`, starting at
 sample 0, with identical sample counts across all six stems; no per-stem
 normalization or lossy encode may be applied.
@@ -44,6 +47,7 @@ normalization or lossy encode may be applied.
   the worker.
 
 ### A4 — handoff claims are re-proven against bytes
+
 **Invariant:** Every handoff claim MUST be re-proven against the actual bytes
 (size + sha256 + ffprobe); the handoff document is never trusted.
 - Where: `library/src/shizzle_server/publish/lossless_intake.py:186`, `library/src/shizzle_server/publish/lossless_intake.py:232`
@@ -52,6 +56,7 @@ normalization or lossy encode may be applied.
   of recomputing it from the downloaded object.
 
 ### A5 — stem paths cannot escape the package
+
 **Invariant:** Declared stem paths MUST NOT escape the package directory.
 - Where: `library/src/shizzle_server/publish/lossless_intake.py:134`, `library/src/shizzle_server/publish/lossless_intake.py:179`
 - Guarded by: `library/tests/test_lossless_intake.py::test_download_package_rejects_path_traversal`, `library/tests/test_lossless_intake.py::test_verification_path_containment_rejects_escape`
@@ -59,6 +64,7 @@ normalization or lossy encode may be applied.
   a containment check.
 
 ### A6 — each dispatch attempt under its own immutable prefix
+
 **Invariant:** Each dispatch attempt MUST write beneath its own immutable
 `attempts/<sha256(idempotency_key)>` prefix, so an older worker can never
 clobber a newer attempt's receipts or stems.
@@ -68,6 +74,7 @@ clobber a newer attempt's receipts or stems.
   deriving the prefix from anything but the idempotency key hash.
 
 ### A7 — uploaded handoff is schema-strict
+
 **Invariant:** The uploaded handoff.json MUST be schema-strict:
 `_`-prefixed private keys are stripped before upload.
 - Where: `stemsplit/lossless_handler.py:31`, `stemsplit/lossless_worker.py:238`
@@ -75,22 +82,31 @@ clobber a newer attempt's receipts or stems.
   `_`-prefixed keys.
 
 ### A8 — RunPod owns nothing past the interface
+
 **Invariant:** The RunPod worker MUST own nothing past the lossless-stem-v1
 interface — no AAC encode, no video, no delivery manifest.
 - Where: `interfaces/lossless-stem-v1/spec.md:35`, `stemsplit/lossless_worker.py:3`, `stemsplit/Dockerfile.lossless:4`
 - Structural: enforced by what the worker image contains and what the handler
   uploads. Violation smell: an ffmpeg AAC/MP4 invocation in `stemsplit/`.
 
-### A9 — worker image has no network egress
-**Invariant:** The worker image MUST separate with no network egress except
-object storage; htdemucs_6s weights are baked at build time (proven by the
-`RUN --network=none` check in the Dockerfile).
+### A9 — worker model weights are baked offline
+
+**Invariant:** The worker image MUST bake the htdemucs_6s weights at build
+time: the Dockerfile's `RUN --network=none` model-load check fails the build
+if any weight would need a network download.
 - Where: `stemsplit/Dockerfile.lossless:7`, `stemsplit/Dockerfile.lossless:56`
-- Enforced by the image build itself (the offline weights check fails the build
-  if any weight is missing). Violation smell: removing the `--network=none`
-  line or adding a runtime model download.
+- Enforced by the image build itself (the offline weights check fails the
+  build if any weight is missing). Violation smell: removing the
+  `--network=none` check or adding a runtime model download.
+
+Runtime aspiration, NOT machine-enforced: at runtime the worker should reach
+only object storage (plus RunPod progress reporting) and nothing else. The
+build-time check proves offline model availability only — it does not impose
+a network policy on containers created from the image. Real egress control
+must be enforced at the RunPod/network layer.
 
 ### A10 — uploads carry locally computed sha256
+
 **Invariant:** Every worker upload MUST carry a locally computed sha256; the
 publisher verifies server-side before promotion.
 - Where: `stemsplit/s3_ops.py:3`, `stemsplit/s3_ops.py:176`, `stemsplit/s3_ops.py:93`
@@ -99,6 +115,7 @@ publisher verifies server-side before promotion.
   that promotes without re-verifying.
 
 ### A11 — transfer progress callback is lock-guarded
+
 **Invariant:** The multipart progress callback closure is mutated by several
 transfer-manager threads, so every read-modify-write MUST be lock-guarded and
 progress MUST be monotonic.
@@ -109,6 +126,7 @@ progress MUST be monotonic.
 ## B. Orchestrator lease / dispatch
 
 ### B1 — claim uses FOR UPDATE SKIP LOCKED
+
 **Invariant:** Job claim MUST use `SELECT ... FOR UPDATE SKIP LOCKED`; an
 expired foreign lease is reclaimed with a `lease_reclaimed` event.
 - Where: `library/src/shizzle_server/db/repository.py:199`
@@ -117,6 +135,7 @@ expired foreign lease is reclaimed with a `lease_reclaimed` event.
   expired.
 
 ### B2 — lease ownership checked inside the locked transaction
+
 **Invariant:** Lease ownership MUST be checked INSIDE the locked transaction:
 reserve/record dispatch reject unless `status == dispatched` AND
 `lease_owner == worker_id` AND the lease is unexpired; renew/release/park are
@@ -127,6 +146,7 @@ scoped the same way.
   pair without re-reading owner and expiry under lock.
 
 ### B3 — reservation commits before the external call
+
 **Invariant:** The dispatch reservation MUST commit BEFORE the external API
 call; a reclaimed lease reconciles the outstanding reservation instead of
 paying for another worker, and timeout/5xx responses never trigger a second
@@ -137,6 +157,7 @@ dispatch.
   a retry path that allocates a new idempotency key for a timeout.
 
 ### B4 — confirmation survives lease loss
+
 **Invariant:** Confirmation deliberately does NOT require the original lease;
 the latest reservation key MUST block stale-dispatcher overwrite.
 - Where: `library/src/shizzle_server/db/repository.py:331`
@@ -145,6 +166,7 @@ the latest reservation key MUST block stale-dispatcher overwrite.
   dispatcher's confirmation clear a newer reservation.
 
 ### B5 — legacy dispatch_unconfirmed fails closed
+
 **Invariant:** Legacy `dispatch_unconfirmed` events MUST fail closed across
 rolling upgrades (block redispatch rather than pay for a duplicate worker).
 - Where: `library/src/shizzle_server/db/repository.py:60`
@@ -152,6 +174,7 @@ rolling upgrades (block redispatch rather than pay for a duplicate worker).
 - Violation smell: treating an unconfirmed legacy dispatch as retryable.
 
 ### B6 — poll-failure events dedupe per outage
+
 **Invariant:** Poll-failure events MUST dedupe to one `runpod_poll_failed` row
 per outage; any other event resets the dedup window.
 - Where: `library/src/shizzle_server/orchestrator/stages.py:191`, `library/src/shizzle_server/orchestrator/stages.py:207`
@@ -159,6 +182,7 @@ per outage; any other event resets the dedup window.
 - Violation smell: appending a poll-failed event on every retry tick.
 
 ### B7 — cancel never masks the original error
+
 **Invariant:** A failed RunPod cancel MUST NEVER mask the original error:
 `_cancel_best_effort` logs and swallows cancel failures so the original
 transient poll error propagates.
@@ -167,6 +191,7 @@ transient poll error propagates.
 - Violation smell: an unguarded `await runpod.cancel(...)` in an error path.
 
 ### B8 — heartbeats only on phase change
+
 **Invariant:** Worker-phase heartbeats MUST be written only on phase change
 (bounded history per job).
 - Where: `library/src/shizzle_server/db/repository.py:419`
@@ -174,6 +199,7 @@ transient poll error propagates.
 - Violation smell: a DB write per progress tick.
 
 ### B9 — park frees the lease, costs no attempt
+
 **Invariant:** Parking MUST free the lease WITHOUT consuming an attempt or
 appending an event; stages signal it purely via `ctx.park_seconds`.
 - Where: `library/src/shizzle_server/db/repository.py:259`, `library/src/shizzle_server/orchestrator/stages.py:303`
@@ -182,6 +208,7 @@ appending an event; stages signal it purely via `ctx.park_seconds`.
   path.
 
 ### B10 — unresolvable dispatch identity fails closed
+
 **Invariant:** An unresolvable dispatch identity MUST fail closed after
 `queue_timeout + worker_stall` — explicit operator recovery, never silent
 redispatch.
@@ -190,6 +217,7 @@ redispatch.
 - Violation smell: any automatic retry after a dispatch identity is lost.
 
 ### B11 — stage handlers idempotent under crash-rerun
+
 **Invariant:** Stage handlers MUST be idempotent under crash-rerun (marker and
 manifest guarded on disk; deterministic-id idempotent publish transaction).
 - Where: `library/src/shizzle_server/orchestrator/stages.py:1`
@@ -198,6 +226,7 @@ manifest guarded on disk; deterministic-id idempotent publish transaction).
   reservation.
 
 ### B12 — failed RunPod job dispatches fresh
+
 **Invariant:** A RunPod job already marked failed MUST be treated as absent —
 retry dispatches fresh under a NEW idempotency key.
 - Where: `library/src/shizzle_server/orchestrator/stages.py:157`, `library/src/shizzle_server/orchestrator/stages.py:171`
@@ -208,6 +237,7 @@ retry dispatches fresh under a NEW idempotency key.
 ## C. Publication immutability
 
 ### C1 — generations are immutable
+
 **Invariant:** Published generations MUST be immutable and never overwritten
 (CloudFront caches them); if the destination manifest already exists the
 publish is a no-op returning `already_published`.
@@ -217,6 +247,7 @@ publish is a no-op returning `already_published`.
   prefix.
 
 ### C2 — manifest written last
+
 **Invariant:** The manifest MUST be written LAST as the completion marker;
 death mid-promotion leaves a manifest-less prefix and a rerun redoes the
 idempotent copies.
@@ -226,14 +257,16 @@ idempotent copies.
   download/re-upload instead of server-side copy.
 
 ### C3 — format guard before promotion
+
 **Invariant:** The format guard MUST run before promotion: no raw PCM
 (`.m4a` required for stems), `MAX_STEM_BYTES` 64 MiB per stem.
 - Where: `library/src/shizzle_server/publish/publisher.py:174`, `library/src/shizzle_server/publish/publisher.py:178`, `library/src/shizzle_server/publish/publisher.py:605`
-- Guarded by: the `library/tests/test_publish.py::test_validate_stem_object_*` family (`accepts_normal_m4a`, `rejects_wav`, `rejects_oversized_m4a`, `ignores_non_stem_objects`, `handles_unknown_size`, `raises_with_every_problem_listed`), `library/tests/test_publish.py::test_publish_refuses_wav_stems_and_promotes_nothing`, `library/tests/test_publish.py::test_publish_refuses_oversized_stem`
+- Guarded by: `library/tests/test_publish.py::test_validate_stem_object_accepts_normal_m4a`, `library/tests/test_publish.py::test_validate_stem_object_rejects_wav`, `library/tests/test_publish.py::test_validate_stem_object_rejects_oversized_m4a`, `library/tests/test_publish.py::test_validate_stem_object_ignores_non_stem_objects`, `library/tests/test_publish.py::test_validate_stem_object_handles_unknown_size`, `library/tests/test_publish.py::test_validate_stem_objects_raises_with_every_problem_listed`, `library/tests/test_publish.py::test_publish_refuses_wav_stems_and_promotes_nothing`, `library/tests/test_publish.py::test_publish_refuses_oversized_stem`
 - Violation smell: promoting a staged set before `validate_stem_objects`, or
   raising the byte cap.
 
 ### C4 — deterministic uuid5 track ids
+
 **Invariant:** Track ids MUST be deterministic uuid5 values, so a crashed/rerun
 publish or duplicate completion converges instead of double-publishing.
 - Where: `library/src/shizzle_server/db/repository.py:36`, `library/src/shizzle_server/db/repository.py:88`, `library/src/shizzle_server/db/repository.py:574`
@@ -241,6 +274,7 @@ publish or duplicate completion converges instead of double-publishing.
 - Violation smell: deriving a track id from a uuid4, timestamp, or job id.
 
 ### C5 — generation activation is compare-and-swap
+
 **Invariant:** Generation activation MUST be a compare-and-swap under
 `with_for_update`, with the ledger event committed in the SAME transaction.
 - Where: `library/src/shizzle_server/db/repository.py:745`
@@ -249,6 +283,7 @@ publish or duplicate completion converges instead of double-publishing.
   appending the ledger event in a second transaction.
 
 ### C6 — DB pointer flips only after a complete candidate
+
 **Invariant:** The database pointer MUST flip only after the complete candidate
 passes; a failed candidate stays outside the library; retry is idempotent.
 - Where: `docs/architecture.md:137`
@@ -258,6 +293,7 @@ passes; a failed candidate stays outside the library; retry is idempotent.
 ## D. Delivery-profile gates
 
 ### D1 — track duration tolerance 0.100 s
+
 **Invariant:** `TRACK_DURATION_TOLERANCE_SEC` MUST be 0.100 (at least one full
 30 fps frame of headroom; 0.050 tripped on H.264 GOP quantization).
 derive_video's post-encode probe and the profile stream check are the SAME
@@ -268,6 +304,7 @@ invariant via the shared constant.
   literal `0.1`/`0.05` in a probe comparison.
 
 ### D2 — stem tolerances 0.080 / 0.005 s
+
 **Invariant:** `STEM_DURATION_TOLERANCE_SEC` MUST be 0.080 (AAC
 priming/padding headroom) while `STEM_INTER_DURATION_TOLERANCE_SEC` 0.005 is
 the hard identical-timeline invariant between stems.
@@ -277,6 +314,7 @@ the hard identical-timeline invariant between stems.
   video with the inter-stem tolerance.
 
 ### D3 — one common attenuation, never a boost
+
 **Invariant:** There MUST be at most ONE common attenuation across stems —
 never per-stem, never a boost — with a true-peak ceiling of -1.0 dBTP.
 - Where: `library/src/shizzle_server/publish/lossless_intake.py:56`, `docs/architecture.md:125`
@@ -284,6 +322,7 @@ never per-stem, never a boost — with a true-peak ceiling of -1.0 dBTP.
 - Violation smell: per-stem gain, or a gain above 1.0.
 
 ### D4 — browser generation ≤ 2.5 Mb/s average
+
 **Invariant:** A complete browser generation MUST NOT exceed 2,500,000 b/s
 average total bitrate.
 - Where: `library/src/shizzle_server/publish/delivery_profile.py:58`, `library/src/shizzle_server/publish/lossless_intake.py:57`
@@ -292,6 +331,7 @@ average total bitrate.
   average.
 
 ### D5 — new encodes AAC-LC 256k@44.1k, existing preserved
+
 **Invariant:** New encodes MUST be AAC-LC 256 kbps at 44.1 kHz; existing
 passing material is preserved, never lossily up-transcoded (warning, not
 error).
@@ -301,6 +341,7 @@ error).
   material, or a new encode at 48 kHz.
 
 ### D6 — delivery video audio-less, bounded keyframes/start
+
 **Invariant:** Delivery video MUST be audio-less, with
 `VIDEO_MAX_KEYFRAME_INTERVAL_SEC` 2.05 and `START_TOLERANCE_SEC` 0.020.
 - Where: `library/src/shizzle_server/publish/delivery_profile.py:43`, `library/src/shizzle_server/publish/delivery_profile.py:297`
@@ -309,6 +350,7 @@ error).
   interval above 2.05 s.
 
 ### D7 — delivery_profile.py is pure policy
+
 **Invariant:** `delivery_profile.py` MUST stay a PURE policy module — no
 boto3/ffmpeg/db imports — and all consumers use the one profile.
 - Where: `library/src/shizzle_server/publish/delivery_profile.py:1`
@@ -319,6 +361,7 @@ boto3/ffmpeg/db imports — and all consumers use the one profile.
 ## E. Credentials never persisted
 
 ### E1 — no credentials in telemetry
+
 **Invariant:** Query credentials MUST NEVER appear in telemetry or durable
 browser evidence — the validator rejects credential-shaped keys recursively
 (authorization/cookie/password/passcode/token/url) and caps sizes.
@@ -328,6 +371,7 @@ browser evidence — the validator rejects credential-shaped keys recursively
   size caps, or logging raw query strings.
 
 ### E2 — source_ref never exposed in API responses
+
 **Invariant:** `source_ref` (the raw submitted URL) is stored on the job row
 but MUST NEVER be exposed in API responses (`JobResponse` omits it).
 - Where: `library/src/shizzle_server/api/models.py:18`, `library/src/shizzle_server/db/models.py:99`
@@ -335,6 +379,7 @@ but MUST NEVER be exposed in API responses (`JobResponse` omits it).
   with a credential-bearing URL and assert every response body lacks it.
 
 ### E3 — secrets only in env
+
 **Invariant:** Secrets MUST live only in gitignored `.env` / the production
 environment — never printed or committed — and worker images are published only
 through the Actions workflow.
@@ -343,6 +388,7 @@ through the Actions workflow.
   hand-pushed image tag.
 
 ### E4 — passcode bound into every token signature
+
 **Invariant:** The passcode MUST be bound into every token signature, so
 rotating it revokes all tokens without a token store.
 - Where: `library/src/shizzle_server/api/auth.py:3`, `library/src/shizzle_server/settings.py:63`
@@ -350,6 +396,7 @@ rotating it revokes all tokens without a token store.
 - Violation smell: signing tokens over expiry alone.
 
 ### E5 — CloudFront URLs file-scoped under tracks/
+
 **Invariant:** CloudFront signed URLs MUST be file-scoped and the signed key
 MUST be under `tracks/`.
 - Where: `library/src/shizzle_server/api/cloudfront.py:76`
@@ -360,6 +407,7 @@ MUST be under `tracks/`.
 ## F. Migration / DB conventions
 
 ### F1 — single linear migration chain
+
 **Invariant:** Migrations MUST form a single linear chain with numeric prefix ==
 revision id, explicit `down_revision`, and a paired real downgrade.
 - Where: `library/alembic/versions/` — revisions 0001 through 0004
@@ -367,12 +415,14 @@ revision id, explicit `down_revision`, and a paired real downgrade.
   downgrade.
 
 ### F2 — alembic DSN and metadata
+
 **Invariant:** Alembic MUST take its DSN from `DATABASE_URL` and use
 `target_metadata = Base.metadata`.
 - Where: `library/alembic/env.py:17`
 - Violation smell: a hardcoded URL or drift between models and metadata.
 
 ### F3 — single schema writer
+
 **Invariant:** ONLY the api container runs `alembic upgrade head`; the
 orchestrator never migrates.
 - Where: `deploy/vps/compose.prod.yml` (api command)
@@ -380,6 +430,7 @@ orchestrator never migrates.
   entrypoint.
 
 ### F4 — the migration itself is under test
+
 **Invariant:** The contract suite MUST apply the schema via a real
 `alembic upgrade head` subprocess, never `create_all`.
 - Where: `library/tests/contract/conftest.py:7`
@@ -387,12 +438,14 @@ orchestrator never migrates.
 - Violation smell: `create_all` anywhere in test fixtures.
 
 ### F5 — job events append-only and ordered
+
 **Invariant:** Job events MUST be append-only and ordered.
 - Where: `library/src/shizzle_server/db/repository.py:194`
 - Guarded by: `library/tests/test_repository.py::test_events_append_only_ordering`
 - Violation smell: an UPDATE or DELETE on the events table.
 
 ### F6 — idempotency key unique per job
+
 **Invariant:** The idempotency key MUST be unique per job.
 - Guarded by: `library/tests/test_repository.py::test_idempotency_key_unique`
 - Violation smell: relaxing the unique constraint or reusing a key across

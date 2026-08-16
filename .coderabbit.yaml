@@ -44,13 +44,19 @@ reviews:
         handler must be idempotent under crash-rerun (B11). Heartbeats are
         written only on phase change (B8); a RunPod job already marked failed
         dispatches fresh under a new idempotency key (B12).
+    # Mirrored copy: the instruction below is duplicated verbatim in the
+    # repository.py paste block in docs/AUTOMATION.md §5 — edit both together.
     - path: "library/src/shizzle_server/db/repository.py"
       instructions: >
         Durable orchestrator stage loop. Enforce the B-series invariants from
-        docs/INVARIANTS.md: lease ownership must be checked inside the locked
+        docs/INVARIANTS.md: job claims use SELECT ... FOR UPDATE SKIP LOCKED
+        and reclaiming an expired foreign lease records a lease_reclaimed
+        event (B1); lease ownership must be checked inside the locked
         transaction (B2), and the dispatch reservation must commit before any
         external RunPod call (B3) — a timeout or 5xx must never trigger a
         second dispatch; it reconciles the outstanding reservation instead.
+        Confirmation deliberately does not require the original lease — the
+        latest reservation key must block stale-dispatcher overwrite (B4).
         Poll-failure events dedupe to one row per outage and any other event
         resets the window (B6). A failed RunPod cancel must never mask the
         original error — _cancel_best_effort logs and swallows (B7). Park frees
