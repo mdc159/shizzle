@@ -166,8 +166,16 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          ssh root@"$VPS_HOST" 'cd /opt/shizzle/prod && rm -f .rollback-release.tar.gz .rollback-release-target .rollback-db-revision .deploy-phase' \
-            || echo "::warning::Production is healthy, but transaction artifacts could not be removed"
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if ssh root@"$VPS_HOST" 'cd /opt/shizzle/prod && rm -f .rollback-release.tar.gz .rollback-release-target .rollback-db-revision .deploy-phase'; then
+              exit 0
+            fi
+            echo "::warning::Transaction finalization attempt $attempt failed"
+            sleep 5
+          done
+          echo "::error::Production is healthy, but transaction artifacts could not be removed; refusing a successful deployment result"
+          exit 1
       - name: Retain three API images
         if: success()
         env:

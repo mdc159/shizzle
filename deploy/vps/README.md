@@ -58,6 +58,10 @@ docker compose -p shizzle -f compose.prod.yml up -d --force-recreate --no-deps a
 Before selecting an older image whose migration set predates the current
 database revision, use the current image to downgrade explicitly to a revision
 known by that older image.
+Automated deployment fails closed while any `.rollback-*` or `.deploy-phase`
+transaction artifact remains. After investigating an interrupted transaction,
+restore it or explicitly remove all four artifacts before retrying; never let a
+new deployment overwrite an unclosed rollback snapshot.
 Automated deployment refuses an installation with no recorded prior API
 identity; bootstrap the first production release explicitly.
 

@@ -21,6 +21,12 @@ esac
 
 cd "$PROD_DIR"
 umask 077
+for stale_artifact in .rollback-release.tar.gz .rollback-release-target .rollback-db-revision .deploy-phase; do
+  if [ -e "$stale_artifact" ] || [ -L "$stale_artifact" ]; then
+    echo "Refusing deployment with stale transaction artifact: $stale_artifact" >&2
+    exit 1
+  fi
+done
 for required_path in .env compose.prod.yml Caddyfile player incoming/compose.prod.yml incoming/Caddyfile.prod incoming/shizzle-player.tar.gz; do
   if [ ! -e "$required_path" ]; then
     echo "Cannot deploy: missing $required_path" >&2
@@ -90,5 +96,5 @@ mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
 printf '%s\n' services-starting > "$DEPLOY_PHASE.tmp"
 mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
 "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d \
-  --force-recreate --no-deps api orchestrator caddy
+  --force-recreate --remove-orphans --no-deps api orchestrator caddy
 echo "Activated $IMAGE_REF from database revision $PREV_DB_REV"

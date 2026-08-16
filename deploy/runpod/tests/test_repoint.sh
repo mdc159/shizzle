@@ -20,7 +20,9 @@ printf '%s\n' "$*" >> "$RUNPOD_LOG"
 url=${!#}
 case "$url" in
   */endpoints/endpoint-old)
-    if [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = incomplete ]; then
+    if [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = fail ]; then
+      exit 22
+    elif [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = incomplete ]; then
       printf '%s\n' '{}'
     elif [ -f "$RUNPOD_STATE" ]; then
       printf '%s\n' '{"id":"endpoint-old","templateId":"template-new","workersMax":4}'
@@ -95,6 +97,19 @@ if run_repoint "$TAG" 4 endpoint-old template-old; then
 fi
 if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
   echo "incomplete reconciliation deleted a potentially bound template" >&2
+  exit 1
+fi
+
+: > "$RUNPOD_LOG"
+rm -f "$RUNPOD_STATE"
+RUNPOD_FAIL=postcommit
+RUNPOD_RECONCILE=fail
+if run_repoint "$TAG" 4 endpoint-old template-old; then
+  echo "failed reconciliation unexpectedly succeeded" >&2
+  exit 1
+fi
+if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
+  echo "failed reconciliation deleted a potentially bound template" >&2
   exit 1
 fi
 

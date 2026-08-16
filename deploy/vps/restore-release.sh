@@ -52,7 +52,7 @@ cp -a "$RESTORE_DIR/Caddyfile" Caddyfile.restore
 mv -f .env.restore .env
 mv -f compose.prod.yml.restore compose.prod.yml
 mv -f Caddyfile.restore Caddyfile
-if [ -e player ]; then
+if [ -e player ] || [ -L player ]; then
   rm -rf -- player.failed
   mv player player.failed
 fi

@@ -67,7 +67,7 @@ grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$PROD/.env"
 grep -Fx new-compose "$PROD/compose.prod.yml"
 grep -Fx new-player "$PROD/player/index.html"
 grep -F 'alembic upgrade head' "$DOCKER_LOG"
-grep -F 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"
+grep -F 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
 
 ln -s / "$TMP/root-link"
 if SHIZZLE_PROD_DIR="$TMP/root-link" bash "$DEPLOY" "$IMAGE" "$TARGET" 2> "$TMP/root.err"; then
@@ -84,6 +84,12 @@ grep -F 'Refusing unsafe production directory: /' "$TMP/root-restore.err"
 new_fixture missing-identity
 sed -i '/SHIZZLE_API_TAG=/d' "$PROD/.env"
 if run_deploy; then echo "missing identity unexpectedly deployed" >&2; exit 1; fi
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture stale-transaction
+touch "$PROD/.rollback-release-target"
+if run_deploy; then echo "stale transaction unexpectedly deployed" >&2; exit 1; fi
 grep -Fx old-compose "$PROD/compose.prod.yml"
 test ! -e "$PROD/.rollback-release.tar.gz"
 
@@ -118,5 +124,14 @@ mv "$PROD/player" "$PROD/player.failed"
 run_restore
 grep -Fx old-player "$PROD/player/index.html"
 test ! -e "$PROD/player.failed"
+
+new_fixture dangling-player
+run_deploy
+rm -rf "$PROD/player"
+ln -s missing-player-target "$PROD/player"
+run_restore
+grep -Fx old-player "$PROD/player/index.html"
+test ! -e "$PROD/player.failed"
+test ! -L "$PROD/player.failed"
 
 printf 'release transaction scenarios passed\n'
