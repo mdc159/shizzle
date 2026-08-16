@@ -9,6 +9,7 @@ idempotent (see repository.publish_track).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from ..db.models import Job, JobStage, SourceType, utcnow
-from ..db.repository import JobRepository, track_id_for_job
+from ..db.repository import (
+    InvalidTransition,
+    JobRepository,
+    pending_runpod_dispatch,
+    track_id_for_job,
+)
 from ..errors import ErrorCode, StageError
 from ..settings import Settings
 from . import cloud
@@ -55,6 +61,34 @@ async def _cancel_best_effort(
             runpod_job_id,
             reason,
         )
+
+
+async def _confirm_dispatch(
+    ctx: StageContext, *, idempotency_key: str, runpod_job_id: str
+) -> None:
+    """Retry the small DB confirmation window after RunPod accepts a job."""
+    delays = (0.0, 0.1, 0.5)
+    for index, delay in enumerate(delays):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await ctx.jobs.confirm_dispatch(
+                ctx.job.id,
+                idempotency_key=idempotency_key,
+                runpod_job_id=runpod_job_id,
+            )
+            return
+        except InvalidTransition:
+            raise
+        except Exception:
+            if index == len(delays) - 1:
+                raise
+            logger.warning(
+                "job %s: retrying persistence of RunPod id %s",
+                ctx.job.id,
+                runpod_job_id,
+                exc_info=True,
+            )
 
 
 @dataclass
@@ -219,38 +253,69 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
 
         return None  # unknown status — park and re-poll next interval
 
-    # No live RunPod job (fresh, or the previous one died): dispatch.
+    # No live RunPod job (fresh, or the previous one died): reconcile or dispatch.
     events = await ctx.jobs.list_events(job.id)
-    needs_grace = False
-    for event in events:
-        if event.event == "dispatch_unconfirmed":
-            needs_grace = True
-        elif event.event == "dispatch_unconfirmed_grace":
-            needs_grace = False
-    if needs_grace:
-        # A lost response may still have started the worker. Double-run is safe
-        # (package writes are overwrite-idempotent, handoff-last); this grace
-        # only bounds wasted GPU before a fresh dispatch.
-        await ctx.jobs.append_event(job.id, "dispatch_unconfirmed_grace")
-        ctx.park_seconds = 2 * ctx.settings.runpod_poll_seconds
+    pending_dispatch = pending_runpod_dispatch(events)
+    if pending_dispatch is not None:
+        detail = (
+            pending_dispatch.detail
+            if isinstance(pending_dispatch.detail, dict)
+            else {}
+        )
+        dispatch_key = str(detail.get("idempotency_key", "unknown"))
+        if await cloud.package_ready(ctx):
+            already_recovered = any(
+                event.event == "runpod_dispatch_recovered"
+                and isinstance(event.detail, dict)
+                and event.detail.get("idempotency_key") == dispatch_key
+                for event in events
+            )
+            if not already_recovered:
+                await ctx.jobs.append_event(
+                    job.id,
+                    "runpod_dispatch_recovered",
+                    {"idempotency_key": dispatch_key, "source": "handoff.json"},
+                )
+            return JobStage.verifying
+        pending_for = _age_seconds(pending_dispatch.created_at) or 0.0
+        fail_closed_after = (
+            ctx.settings.runpod_queue_timeout_seconds
+            + ctx.settings.runpod_worker_stall_seconds
+        )
+        if pending_for > fail_closed_after:
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED,
+                "RunPod dispatch may have been accepted but its job id was not "
+                "durably confirmed; automatic redispatch is disabled to prevent "
+                "duplicate GPU work. Reconcile the RunPod job or S3 handoff manually.",
+                retryable=False,
+            )
+        ctx.park_seconds = ctx.settings.runpod_poll_seconds
         return None
 
+    dispatch_key = f"{job.id.hex}:{job.attempt}"
+    reserved = await ctx.jobs.reserve_dispatch(
+        job.id,
+        worker_id=ctx.worker_id,
+        idempotency_key=dispatch_key,
+    )
+    if not reserved:
+        ctx.park_seconds = ctx.settings.runpod_poll_seconds
+        return None
     try:
         runpod_id = await ctx.runpod.dispatch(
             job_id=job.id,
-            idempotency_key=f"{job.id.hex}:{job.attempt}",
+            idempotency_key=dispatch_key,
             payload=payload,
         )
-    except StageError as exc:
-        if exc.code is ErrorCode.RUNPOD_TIMEOUT:
-            await ctx.jobs.append_event(
-                job.id,
-                "dispatch_unconfirmed",
-                {"attempt": job.attempt, "error": exc.detail[:500]},
-            )
+    except StageError:
+        # The reservation remains outstanding. Even a timeout or 5xx can mean
+        # RunPod accepted the request, so reconciliation never redispatches it.
         raise
-    await ctx.jobs.record_dispatch(
-        job.id, worker_id=ctx.worker_id, runpod_job_id=runpod_id
+    await _confirm_dispatch(
+        ctx,
+        idempotency_key=dispatch_key,
+        runpod_job_id=runpod_id,
     )
     return None
 

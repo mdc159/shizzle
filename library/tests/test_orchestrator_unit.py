@@ -736,8 +736,8 @@ async def test_worker_completed_wraps_non_object_output(
     assert completed[0].detail == {"output": "done"}
 
 
-async def test_dispatch_timeout_gets_one_two_interval_grace(
-    settings, job_repo, upload_job
+async def test_dispatch_timeout_reservation_prevents_redispatch(
+    settings, job_repo, upload_job, monkeypatch
 ):
     class TimeoutOnce(FakeRunPodClient):
         async def dispatch(self, *, job_id, idempotency_key, payload):
@@ -753,7 +753,11 @@ async def test_dispatch_timeout_gets_one_two_interval_grace(
     await job_repo.advance(
         upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
     )
-    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
+    async def package_not_ready(_ctx):
+        return False
+
+    monkeypatch.setattr(cloud, "package_ready", package_not_ready)
+    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
     fake = TimeoutOnce([{"status": "COMPLETED", "output": {}}])
     first = StageContext(
         job=job,
@@ -761,48 +765,115 @@ async def test_dispatch_timeout_gets_one_two_interval_grace(
         pipeline=None,  # type: ignore[arg-type]
         jobs=job_repo,
         runpod=fake,
-        worker_id="grace-test",
+        worker_id="dispatch-timeout",
     )
     with pytest.raises(StageError, match="lost response"):
         await handle_dispatched(first)
 
     await job_repo.schedule_retry(
         upload_job.id,
-        worker_id="grace-test",
+        worker_id="dispatch-timeout",
         error_code=ErrorCode.RUNPOD_TIMEOUT,
         error_detail="lost response",
         retry_in_seconds=0,
     )
-    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
-    grace = StageContext(
+    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
+    reconcile = StageContext(
         job=job,
         settings=settings,
         pipeline=None,  # type: ignore[arg-type]
         jobs=job_repo,
         runpod=fake,
-        worker_id="grace-test",
+        worker_id="dispatch-timeout",
     )
-    assert await handle_dispatched(grace) is None
-    assert grace.park_seconds == 2 * settings.runpod_poll_seconds
+    assert await handle_dispatched(reconcile) is None
+    assert reconcile.park_seconds == settings.runpod_poll_seconds
     assert len(fake.dispatched) == 1
 
     await job_repo.park(
-        upload_job.id, worker_id="grace-test", recheck_in_seconds=0
+        upload_job.id, worker_id="dispatch-timeout", recheck_in_seconds=0
     )
-    job = await job_repo.claim_next(worker_id="grace-test", lease_seconds=60)
-    retry = StageContext(
+    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
+    reconcile_again = StageContext(
         job=job,
         settings=settings,
         pipeline=None,  # type: ignore[arg-type]
         jobs=job_repo,
         runpod=fake,
-        worker_id="grace-test",
+        worker_id="dispatch-timeout",
     )
-    assert await handle_dispatched(retry) is None
-    assert len(fake.dispatched) == 2
+    assert await handle_dispatched(reconcile_again) is None
+    assert len(fake.dispatched) == 1
     events = [event.event for event in await job_repo.list_events(upload_job.id)]
-    assert events.count("dispatch_unconfirmed") == 1
-    assert events.count("dispatch_unconfirmed_grace") == 1
+    assert events.count("runpod_dispatch_started") == 1
+    assert "runpod_dispatched" not in events
+
+
+async def test_accepted_dispatch_survives_confirmation_failure(
+    settings, job_repo, upload_job, monkeypatch
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    job = await job_repo.claim_next(worker_id="confirm-failure", lease_seconds=60)
+    fake = FakeRunPodClient([{"status": "COMPLETED", "output": {}}])
+    original_confirm = job_repo.confirm_dispatch
+    confirmation_attempts = 0
+
+    async def fail_confirmation(*_args, **_kwargs):
+        nonlocal confirmation_attempts
+        confirmation_attempts += 1
+        raise RuntimeError("database unavailable after RunPod accepted dispatch")
+
+    monkeypatch.setattr(job_repo, "confirm_dispatch", fail_confirmation)
+    first = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="confirm-failure",
+    )
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await handle_dispatched(first)
+
+    assert confirmation_attempts == 3
+    assert len(fake.dispatched) == 1
+    monkeypatch.setattr(job_repo, "confirm_dispatch", original_confirm)
+    await job_repo.schedule_retry(
+        upload_job.id,
+        worker_id="confirm-failure",
+        error_code=ErrorCode.INTERNAL,
+        error_detail="database unavailable",
+        retry_in_seconds=0,
+    )
+    job = await job_repo.claim_next(worker_id="confirm-failure", lease_seconds=60)
+
+    async def package_ready(_ctx):
+        return True
+
+    monkeypatch.setattr(cloud, "package_ready", package_ready)
+    recovered = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="confirm-failure",
+    )
+    assert await handle_dispatched(recovered) == JobStage.verifying
+    assert len(fake.dispatched) == 1
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events].count("runpod_dispatch_started") == 1
+    recovery = [event for event in events if event.event == "runpod_dispatch_recovered"]
+    assert len(recovery) == 1
+    assert recovery[0].detail == {
+        "idempotency_key": f"{upload_job.id.hex}:0",
+        "source": "handoff.json",
+    }
 
 
 async def test_cloud_verifying_missing_handoff_is_retryable(

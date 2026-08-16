@@ -286,3 +286,80 @@ async def test_record_dispatch_rejects_expired_or_missing_lease(job_repo, upload
             await job_repo.record_dispatch(
                 upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
             )
+
+
+async def test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover(
+    job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    dispatch_key = f"{upload_job.id.hex}:0"
+
+    assert await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-a",
+        idempotency_key=dispatch_key,
+    )
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-a",
+        idempotency_key=dispatch_key,
+    )
+
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+    reclaimed = await job_repo.claim_next(worker_id="worker-b", lease_seconds=60)
+    assert reclaimed is not None and reclaimed.lease_owner == "worker-b"
+
+    # The original caller may still persist the accepted RunPod id. The
+    # reservation key, rather than lease ownership, prevents stale overwrite.
+    assert await job_repo.confirm_dispatch(
+        upload_job.id,
+        idempotency_key=dispatch_key,
+        runpod_job_id="runpod-accepted",
+    )
+    assert not await job_repo.confirm_dispatch(
+        upload_job.id,
+        idempotency_key=dispatch_key,
+        runpod_job_id="runpod-accepted",
+    )
+    job = await job_repo.get_job(upload_job.id)
+    assert job.runpod_job_id == "runpod-accepted"
+    assert job.worker_phase == "dispatched"
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events].count("runpod_dispatch_started") == 1
+    confirmed = [event for event in events if event.event == "runpod_dispatched"][-1]
+    assert confirmed.detail == {
+        "runpod_job_id": "runpod-accepted",
+        "idempotency_key": dispatch_key,
+    }
+
+
+async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
+    job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.append_event(
+        upload_job.id,
+        "dispatch_unconfirmed",
+        {"attempt": 0, "error": "response lost before upgrade"},
+    )
+    await job_repo.append_event(upload_job.id, "dispatch_unconfirmed_grace")
+    await job_repo.claim_next(worker_id="worker-after-upgrade", lease_seconds=60)
+
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-after-upgrade",
+        idempotency_key=f"{upload_job.id.hex}:0",
+    )

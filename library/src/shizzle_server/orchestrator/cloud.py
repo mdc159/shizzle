@@ -56,6 +56,26 @@ def separation_prefix(track_id: uuid.UUID | str) -> str:
     return f"tracks/{track_id}/{GENERATION}/{SEPARATION_SEGMENT}"
 
 
+async def package_ready(ctx: StageContext) -> bool:
+    """Check the handoff-last marker for a dispatch whose RunPod id was lost."""
+    track_id = track_id_for_job(ctx.job.id)
+    key = f"{separation_prefix(track_id)}/handoff.json"
+    try:
+        head = await asyncio.to_thread(
+            _head_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch reconciliation failed to inspect {key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    return head is not None
+
+
 # --- WS1: upload source to S3 ------------------------------------------------
 
 
