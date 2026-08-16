@@ -41,7 +41,9 @@ cleanup() {
     if [ "$UPDATE_STARTED" -eq 1 ]; then
       DELETE_UNBOUND=0
       if "$CURL_BIN" -fsS "${auth[@]}" "$API_BASE/endpoints/$ENDPOINT_ID" > endpoint-reconcile.json; then
-        if [ "$(jq -r '.templateId' endpoint-reconcile.json)" = "$NEW_TEMPLATE_ID" ]; then
+        if ! RECONCILED_TEMPLATE=$(jq -er '.templateId | select(type == "string" and length > 0)' endpoint-reconcile.json); then
+          echo "Endpoint reconciliation returned no valid template ID; preserved template $NEW_TEMPLATE_ID" >&2
+        elif [ "$RECONCILED_TEMPLATE" = "$NEW_TEMPLATE_ID" ]; then
           BOUND=1
           echo "Endpoint update result was ambiguous; preserved bound template $NEW_TEMPLATE_ID" >&2
         else
@@ -62,7 +64,8 @@ cleanup() {
 trap cleanup EXIT
 
 "$CURL_BIN" -fsS "${auth[@]}" "$API_BASE/endpoints/$ENDPOINT_ID" > endpoint-before.json
-"$CURL_BIN" -fsS "${auth[@]}" "$API_BASE/templates/$SOURCE_TEMPLATE_ID" > template-before.json
+"$CURL_BIN" -fsS "${auth[@]}" \
+  "$API_BASE/templates/$SOURCE_TEMPLATE_ID?includeEndpointBoundTemplates=true" > template-before.json
 test "$(jq -r '.templateId' endpoint-before.json)" = "$SOURCE_TEMPLATE_ID" || {
   echo "Endpoint $ENDPOINT_ID no longer uses source template $SOURCE_TEMPLATE_ID" >&2
   exit 1

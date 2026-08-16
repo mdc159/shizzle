@@ -20,12 +20,14 @@ printf '%s\n' "$*" >> "$RUNPOD_LOG"
 url=${!#}
 case "$url" in
   */endpoints/endpoint-old)
-    if [ -f "$RUNPOD_STATE" ]; then
+    if [ -f "$RUNPOD_STATE" ] && [ "${RUNPOD_RECONCILE:-}" = incomplete ]; then
+      printf '%s\n' '{}'
+    elif [ -f "$RUNPOD_STATE" ]; then
       printf '%s\n' '{"id":"endpoint-old","templateId":"template-new","workersMax":4}'
     else
       printf '%s\n' '{"id":"endpoint-old","templateId":"template-old","workersMax":2}'
     fi ;;
-  */templates/template-old)
+  */templates/template-old?includeEndpointBoundTemplates=true)
     printf '%s\n' '{"id":"template-old","name":"old","imageName":"old:image","isServerless":true,"containerDiskInGb":10,"volumeInGb":0,"env":{}}' ;;
   */templates)
     printf '%s\n' '{"id":"template-new","imageName":"ghcr.io/mdc159/shizzle/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' ;;
@@ -49,13 +51,22 @@ export RUNPOD_LOG RUNPOD_STATE
 run_repoint() {
   PATH="$BIN:$PATH" RUNPOD_API_KEY=test RUNPOD_API_BASE=https://fake/v1 \
     RUNPOD_CURL_BIN=curl RUNPOD_DOCKER_BIN=docker GITHUB_RUN_ID=1 \
-    RUNPOD_FAIL="${RUNPOD_FAIL:-}" bash "$SCRIPT" "$@"
+    RUNPOD_FAIL="${RUNPOD_FAIL:-}" RUNPOD_RECONCILE="${RUNPOD_RECONCILE:-}" \
+    MANIFEST_EXIT="${MANIFEST_EXIT:-0}" bash "$SCRIPT" "$@"
 }
 
 if run_repoint bad-tag 4 endpoint-old template-old; then
   echo "invalid tag unexpectedly reached the API" >&2
   exit 1
 fi
+test ! -s "$RUNPOD_LOG"
+
+MANIFEST_EXIT=1
+if run_repoint "$TAG" 4 endpoint-old template-old; then
+  echo "missing worker image unexpectedly reached the API" >&2
+  exit 1
+fi
+MANIFEST_EXIT=0
 test ! -s "$RUNPOD_LOG"
 
 if run_repoint "$TAG" 4 '../endpoint' template-old; then
@@ -75,7 +86,22 @@ if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
 fi
 
 : > "$RUNPOD_LOG"
+rm -f "$RUNPOD_STATE"
+RUNPOD_FAIL=postcommit
+RUNPOD_RECONCILE=incomplete
+if run_repoint "$TAG" 4 endpoint-old template-old; then
+  echo "incomplete reconciliation unexpectedly succeeded" >&2
+  exit 1
+fi
+if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
+  echo "incomplete reconciliation deleted a potentially bound template" >&2
+  exit 1
+fi
+
+: > "$RUNPOD_LOG"
+rm -f "$RUNPOD_STATE"
 RUNPOD_FAIL=endpoint
+RUNPOD_RECONCILE=
 if run_repoint "$TAG" 4 endpoint-old template-old; then
   echo "failed endpoint update unexpectedly succeeded" >&2
   exit 1
@@ -86,6 +112,7 @@ grep -F '/templates/template-new' "$RUNPOD_LOG"
 : > "$RUNPOD_LOG"
 rm -f "$RUNPOD_STATE"
 RUNPOD_FAIL=postcommit
+RUNPOD_RECONCILE=
 if run_repoint "$TAG" 4 endpoint-old template-old; then
   echo "lost response unexpectedly succeeded" >&2
   exit 1

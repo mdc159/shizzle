@@ -96,3 +96,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run lint
+
+  deploy-production:
+    name: Deploy production after green master CI
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [library, stemsplit, postgres-contract, player]
+    permissions:
+      contents: read
+      packages: write # Publish the digest-pinned API image.
+    uses: ./.github/workflows/deploy-vps.yml
+    with:
+      target_sha: ${{ github.sha }}

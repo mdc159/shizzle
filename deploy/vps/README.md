@@ -21,7 +21,7 @@ CloudFront rather than relayed through the VPS.
 ## Deployment and health
 
 Production deploys run from the environment-gated
-[deploy-vps workflow](../../.github/workflows/deploy-vps.yml). It publishes an
+[deploy-vps workflow](../../.github/workflows/deploy-vps.yml). It publishes a
 digest-pinned API image, ships the player, updates `SHIZZLE_API_IMAGE` in the box's
 `.env`, and checks the public application before succeeding. The host deploy
 path transfers release assets with `scp` and extracts them with `tar`.
@@ -40,14 +40,24 @@ API and orchestrator share the locally built image:
 
 ```text
 SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml run --rm --no-deps api alembic upgrade head
 SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
 ```
 
 Rollback is transactional: the deploy records the prior files and Alembic
 revision, and a failed startup or health check downgrades the database before
-restoring the prior release. For break-glass recovery, set
-`SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a retained tag-plus-digest
-reference and run `docker compose -p shizzle -f compose.prod.yml up -d`.
+restoring the prior release. For forward break-glass recovery, set
+`SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a retained tag-plus-digest,
+then migrate and recreate the services explicitly:
+
+```text
+docker compose -p shizzle -f compose.prod.yml run --rm --no-deps api alembic upgrade head
+docker compose -p shizzle -f compose.prod.yml up -d --force-recreate --no-deps api orchestrator caddy
+```
+
+Before selecting an older image whose migration set predates the current
+database revision, use the current image to downgrade explicitly to a revision
+known by that older image.
 Automated deployment refuses an installation with no recorded prior API
 identity; bootstrap the first production release explicitly.
 

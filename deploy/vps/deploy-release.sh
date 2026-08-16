@@ -6,10 +6,10 @@ TARGET_SHA=${2:?usage: deploy-release.sh IMAGE_REF TARGET_SHA}
 PROD_DIR=${SHIZZLE_PROD_DIR:-/opt/shizzle/prod}
 DOCKER_BIN=${SHIZZLE_DOCKER_BIN:-docker}
 
+PROD_DIR=$(readlink -f -- "$PROD_DIR") || { echo "Cannot resolve production directory" >&2; exit 2; }
 case "$PROD_DIR" in
   ""|/) echo "Refusing unsafe production directory: $PROD_DIR" >&2; exit 2 ;;
 esac
-PROD_DIR=$(readlink -f "$PROD_DIR")
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   echo "TARGET_SHA must be exactly 40 lowercase hexadecimal characters" >&2
   exit 2
@@ -41,7 +41,7 @@ PREV_DB_REV=$(
   "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml exec -T postgres sh -c \
     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version"'
 )
-if ! [[ "$PREV_DB_REV" =~ ^[0-9a-f]+$ ]]; then
+if ! [[ "$PREV_DB_REV" =~ ^[A-Za-z0-9_.-]+$ ]]; then
   echo "Cannot capture the previous database revision: $PREV_DB_REV" >&2
   exit 1
 fi
@@ -89,5 +89,6 @@ mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
 "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml run --rm --no-deps api alembic upgrade head
 printf '%s\n' services-starting > "$DEPLOY_PHASE.tmp"
 mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
-"$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d --remove-orphans
+"$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d \
+  --force-recreate --no-deps api orchestrator caddy
 echo "Activated $IMAGE_REF from database revision $PREV_DB_REV"

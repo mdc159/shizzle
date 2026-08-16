@@ -27,10 +27,11 @@ concurrency:
 
 jobs:
   build:
+    name: Build digest-pinned API image
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write # Publish the API image to GHCR.
     outputs:
       image_tag: sha-${{ inputs.target_sha }}
       image_digest: ${{ steps.build.outputs.digest }}

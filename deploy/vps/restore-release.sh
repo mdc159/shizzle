@@ -5,10 +5,11 @@ TARGET_SHA=${1:?usage: restore-release.sh TARGET_SHA}
 PROD_DIR=${SHIZZLE_PROD_DIR:-/opt/shizzle/prod}
 DOCKER_BIN=${SHIZZLE_DOCKER_BIN:-docker}
 
+[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be exactly 40 lowercase hexadecimal characters" >&2; exit 2; }
+PROD_DIR=$(readlink -f -- "$PROD_DIR") || { echo "Cannot resolve production directory" >&2; exit 2; }
 case "$PROD_DIR" in
   ""|/) echo "Refusing unsafe production directory: $PROD_DIR" >&2; exit 2 ;;
 esac
-PROD_DIR=$(readlink -f "$PROD_DIR")
 cd "$PROD_DIR"
 umask 077
 
@@ -22,7 +23,7 @@ done
 test "$(cat "$ROLLBACK_TARGET")" = "$TARGET_SHA" || { echo "Rollback target does not match $TARGET_SHA" >&2; exit 1; }
 PREV_DB_REV=$(cat "$ROLLBACK_DB_REV")
 PHASE=$(cat "$DEPLOY_PHASE")
-if ! [[ "$PREV_DB_REV" =~ ^[0-9a-f]+$ ]]; then
+if ! [[ "$PREV_DB_REV" =~ ^[A-Za-z0-9_.-]+$ ]]; then
   echo "Invalid rollback database revision: $PREV_DB_REV" >&2
   exit 1
 fi
@@ -44,15 +45,18 @@ case "$PHASE" in
   *) echo "Unknown deployment phase: $PHASE" >&2; exit 1 ;;
 esac
 
-rm -rf -- .env.restore compose.prod.yml.restore Caddyfile.restore player.restore
+rm -rf -- .env.restore compose.prod.yml.restore Caddyfile.restore
 cp -a "$RESTORE_DIR/.env" .env.restore
 cp -a "$RESTORE_DIR/compose.prod.yml" compose.prod.yml.restore
 cp -a "$RESTORE_DIR/Caddyfile" Caddyfile.restore
-mv "$RESTORE_DIR/player" player.restore
 mv -f .env.restore .env
 mv -f compose.prod.yml.restore compose.prod.yml
 mv -f Caddyfile.restore Caddyfile
-rm -rf -- player
-mv player.restore player
+if [ -e player ]; then
+  rm -rf -- player.failed
+  mv player player.failed
+fi
+mv "$RESTORE_DIR/player" player
+rm -rf -- player.failed
 "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d --force-recreate --remove-orphans
 echo "Restored the previous release at database revision $PREV_DB_REV"

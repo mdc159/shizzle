@@ -17,7 +17,7 @@ flowchart LR
     HM --> M[master]
     M --> WI["worker-image.yml:<br/>ghcr.io/mdc159/shizzle/worker:sha-SHA"]
     M --> CI2["ci.yml push checks"]
-    CI2 --> DV["deploy-vps.yml<br/>workflow_run: success"]
+    CI2 --> DV["deploy-vps.yml<br/>reusable call after all jobs pass"]
     DV --> BI["build-image job<br/>(reusable api-image.yml)<br/>ghcr.io/mdc159/shizzle/api:sha-SHA"]
     BI --> GATE{"production Environment<br/>approval: mdc159"}
     GATE --> DEP["deploy transaction:<br/>tag@sha256 digest + migration<br/>health or DB+file rollback"]
@@ -27,7 +27,7 @@ flowchart LR
 Every PR must pass the four `ci.yml` jobs (`library`, `stemsplit`, `player`,
 `postgres-contract`) before merge; the AI reviewers are advisory and never
 block. On merge to master, `worker-image.yml` publishes the GPU worker image
-and successful master CI triggers `deploy-vps.yml`. The reusable
+and the successful master CI workflow calls `deploy-vps.yml`. The reusable
 `api-image.yml` publishes `ghcr.io/mdc159/shizzle/api:sha-<sha>` and passes its
 registry digest to the environment-gated deploy. `runpod-repoint.yml` is
 manual-only: it clones the endpoint's current template with the new image and
@@ -51,8 +51,9 @@ under `/opt/shizzle/prod` per invariant E3.
 
 **On merge to master:**
 
-1. A successful `ci` push run on the current `master` SHA triggers
-   `deploy-vps.yml`; stale or non-push CI results are rejected. Job
+1. After all four jobs pass on a `master` push, `ci.yml` calls
+   `deploy-vps.yml`; pull-request and non-master runs cannot call it. The called
+   workflow rechecks the supplied SHA against current `master`. Job
    `build-image` calls reusable `api-image.yml`, which builds and pushes the
    SHA tag and exposes its registry digest.
 2. Job `deploy` pauses at the GitHub Environment `production` gate until

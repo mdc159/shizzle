@@ -19,7 +19,7 @@ if [ "${1:-}" = pull ]; then
 fi
 if [ "${1:-}" != compose ]; then exit 0; fi
 case " $* " in
-  *" exec -T postgres "*) printf '%s\n' 0004; exit 0 ;;
+  *" exec -T postgres "*) printf '%s\n' 0004_worker_heartbeats; exit 0 ;;
   *" config -q "*) exit 0 ;;
   *" alembic upgrade head "*) [ "${DOCKER_FAIL:-}" != migration ] || exit 32; exit 0 ;;
   *" alembic downgrade "*) [ "${DOCKER_FAIL:-}" != downgrade ] || exit 33; exit 0 ;;
@@ -67,6 +67,19 @@ grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$PROD/.env"
 grep -Fx new-compose "$PROD/compose.prod.yml"
 grep -Fx new-player "$PROD/player/index.html"
 grep -F 'alembic upgrade head' "$DOCKER_LOG"
+grep -F 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"
+
+ln -s / "$TMP/root-link"
+if SHIZZLE_PROD_DIR="$TMP/root-link" bash "$DEPLOY" "$IMAGE" "$TARGET" 2> "$TMP/root.err"; then
+  echo "root-resolving deploy directory was accepted" >&2
+  exit 1
+fi
+grep -F 'Refusing unsafe production directory: /' "$TMP/root.err"
+if SHIZZLE_PROD_DIR="$TMP/root-link" bash "$RESTORE" "$TARGET" 2> "$TMP/root-restore.err"; then
+  echo "root-resolving restore directory was accepted" >&2
+  exit 1
+fi
+grep -F 'Refusing unsafe production directory: /' "$TMP/root-restore.err"
 
 new_fixture missing-identity
 sed -i '/SHIZZLE_API_TAG=/d' "$PROD/.env"
@@ -87,15 +100,23 @@ DOCKER_FAIL=migration
 if run_deploy; then echo "migration failure unexpectedly deployed" >&2; exit 1; fi
 DOCKER_FAIL=
 run_restore
-grep -F 'alembic downgrade 0004' "$DOCKER_LOG"
+grep -F 'alembic downgrade 0004_worker_heartbeats' "$DOCKER_LOG"
 grep -F 'stop api orchestrator' "$DOCKER_LOG"
 grep -Fx old-compose "$PROD/compose.prod.yml"
 
-new_fixture health-failure
+new_fixture post-deploy-health-failure
 run_deploy
+# Simulate the workflow invoking restore after its external health gate fails.
 run_restore
-grep -F 'alembic downgrade 0004' "$DOCKER_LOG"
+grep -F 'alembic downgrade 0004_worker_heartbeats' "$DOCKER_LOG"
 grep -Fx old-caddy "$PROD/Caddyfile"
 grep -Fx old-player "$PROD/player/index.html"
+
+new_fixture interrupted-restore
+run_deploy
+mv "$PROD/player" "$PROD/player.failed"
+run_restore
+grep -Fx old-player "$PROD/player/index.html"
+test ! -e "$PROD/player.failed"
 
 printf 'release transaction scenarios passed\n'
