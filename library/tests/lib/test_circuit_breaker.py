@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -233,4 +235,38 @@ async def test_half_open_allows_only_one_async_recovery_probe() -> None:
         await breaker.call_async(probe)
     release.set()
     assert await task == "recovered"
+    assert breaker.state == CircuitState.CLOSED
+
+
+def test_half_open_allows_only_one_threaded_recovery_probe() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, timeout_seconds=-1)
+
+    with pytest.raises(ValueError):
+        breaker.call(lambda: int("down"))
+
+    started = threading.Event()
+    release = threading.Event()
+    probe_count = 0
+    probe_count_lock = threading.Lock()
+
+    def probe() -> str:
+        nonlocal probe_count
+        with probe_count_lock:
+            probe_count += 1
+        started.set()
+        assert release.wait(timeout=5)
+        return "recovered"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(breaker.call, probe)
+        assert started.wait(timeout=5)
+        second = executor.submit(breaker.call, probe)
+        try:
+            with pytest.raises(RuntimeError, match="probe in flight"):
+                second.result(timeout=5)
+        finally:
+            release.set()
+        assert first.result(timeout=5) == "recovered"
+
+    assert probe_count == 1
     assert breaker.state == CircuitState.CLOSED

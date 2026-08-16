@@ -376,3 +376,28 @@ async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
     assert pending_runpod_dispatch(
         await job_repo.list_events(upload_job.id)
     ) is None
+
+
+async def test_keyed_confirmation_does_not_clear_legacy_pending_dispatch(
+    job_repo, upload_job
+):
+    await job_repo.append_event(
+        upload_job.id,
+        "dispatch_unconfirmed",
+        {"attempt": 0, "error": "response lost before upgrade"},
+    )
+    await job_repo.append_event(
+        upload_job.id,
+        "runpod_dispatched",
+        {"idempotency_key": "another-attempt", "runpod_job_id": "runpod-other"},
+    )
+
+    events = await job_repo.list_events(upload_job.id)
+    assert pending_runpod_dispatch(events) is not None
+
+    await job_repo.append_event(
+        upload_job.id,
+        "runpod_dispatched",
+        {"runpod_job_id": "legacy-runpod-id"},
+    )
+    assert pending_runpod_dispatch(await job_repo.list_events(upload_job.id)) is None
