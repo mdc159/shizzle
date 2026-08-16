@@ -79,8 +79,8 @@ export async function getLibrary(): Promise<Track[]> {
 }
 
 /** Fetch recent pipeline jobs. */
-export async function getJobs(): Promise<JobStatus[]> {
-  const response = await authFetch('/api/jobs');
+export async function getJobs(signal?: AbortSignal): Promise<JobStatus[]> {
+  const response = await authFetch('/api/jobs', { signal });
   if (!response.ok) throw new Error(`Failed to fetch jobs: ${response.statusText}`);
   return (await response.json()).jobs;
 }

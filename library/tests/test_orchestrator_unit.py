@@ -335,6 +335,7 @@ async def test_accepted_dispatch_id_reads_matching_worker_receipt(
         "idempotency_key": dispatch_key,
         "track_id": str(track_id),
         "generation": cloud.GENERATION,
+        "package_prefix": cloud.attempt_prefix(track_id, dispatch_key),
     }
 
     class Body:
@@ -344,7 +345,7 @@ async def test_accepted_dispatch_id_reads_matching_worker_receipt(
     class S3:
         def get_object(self, *, Bucket, Key):  # noqa: ANN001, N803
             assert Bucket == settings.s3_media_bucket
-            assert Key == cloud.dispatch_receipt_key(track_id)
+            assert Key == cloud.dispatch_receipt_key(track_id, dispatch_key)
             return {"Body": Body()}
 
     monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
@@ -738,6 +739,43 @@ async def test_transient_poll_failure_dedupes_one_event_per_outage(
     assert len(fake.polled) == 3  # the dedup is on events, not on polls
 
 
+async def test_successful_poll_resets_outage_even_when_phase_is_unchanged(
+    settings, job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
+    )
+    await job_repo.record_worker_progress(upload_job.id, phase="working")
+    settings.runpod_worker_stall_seconds = 10_000
+    fake = FakeRunPodClient([
+        StageError(ErrorCode.RUNPOD_TIMEOUT, "first outage", retryable=True),
+        {"status": "IN_PROGRESS", "output": {"phase": "working"}},
+        StageError(ErrorCode.RUNPOD_TIMEOUT, "second outage", retryable=True),
+    ])
+
+    for _ in range(3):
+        ctx = StageContext(
+            job=await job_repo.get_job(upload_job.id),
+            settings=settings,
+            pipeline=None,  # type: ignore[arg-type]
+            jobs=job_repo,
+            runpod=fake,
+            worker_id="poll-test",
+        )
+        assert await handle_dispatched(ctx) is None
+
+    events = [event.event for event in await job_repo.list_events(upload_job.id)]
+    assert events.count("runpod_poll_failed") == 2
+    assert events.count("runpod_poll_recovered") == 1
+
+
 async def test_worker_completed_wraps_non_object_output(
     settings, job_repo, upload_job
 ):
@@ -787,7 +825,8 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
     await job_repo.advance(
         upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
     )
-    async def package_not_ready(_ctx):
+    async def package_not_ready(_ctx, *, idempotency_key):
+        assert idempotency_key == f"{upload_job.id.hex}:0"
         return False
 
     async def dispatch_not_started(_ctx, *, idempotency_key):
@@ -917,7 +956,8 @@ async def test_accepted_dispatch_survives_confirmation_failure(
     )
     job = await job_repo.claim_next(worker_id="confirm-failure", lease_seconds=60)
 
-    async def package_ready(_ctx):
+    async def package_ready(_ctx, *, idempotency_key):
+        assert idempotency_key == f"{upload_job.id.hex}:0"
         return True
 
     async def no_dispatch_receipt(_ctx, *, idempotency_key):
@@ -935,6 +975,9 @@ async def test_accepted_dispatch_survives_confirmation_failure(
         worker_id="confirm-failure",
     )
     assert await handle_dispatched(recovered) == JobStage.verifying
+    assert recovered.detail["package_prefix"] == cloud.attempt_prefix(
+        track_id_for_job(upload_job.id), f"{upload_job.id.hex}:0"
+    )
     assert len(fake.dispatched) == 1
     events = await job_repo.list_events(upload_job.id)
     assert [event.event for event in events].count("runpod_dispatch_started") == 1
@@ -963,7 +1006,8 @@ async def test_accepted_dispatch_recovers_remote_id_from_worker_receipt(
         idempotency_key=dispatch_key,
     )
 
-    async def package_not_ready(_ctx):
+    async def package_not_ready(_ctx, *, idempotency_key):
+        assert idempotency_key == dispatch_key
         return False
 
     async def accepted_dispatch(_ctx, *, idempotency_key):

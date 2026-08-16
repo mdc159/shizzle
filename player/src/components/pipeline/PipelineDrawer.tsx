@@ -14,6 +14,7 @@ import {
 
 const BASELINE_S = 40; // Dashboard v0 placeholder until job duration is exposed.
 const POLL_MS = 5000;
+const REQUEST_TIMEOUT_MS = 10_000;
 const STAGES: JobStatus['status'][] = [
   'pending',
   'downloading',
@@ -48,19 +49,38 @@ export const PipelineDrawer: React.FC = () => {
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const eventRequest = useRef(0);
+  const refreshAbort = useRef<{ jobs: AbortController; health: AbortController } | null>(null);
 
   const refresh = useCallback(async () => {
+    refreshAbort.current?.jobs.abort();
+    refreshAbort.current?.health.abort();
+    const controllers = { jobs: new AbortController(), health: new AbortController() };
+    refreshAbort.current = controllers;
+    const jobsTimeout = window.setTimeout(() => controllers.jobs.abort(), REQUEST_TIMEOUT_MS);
+    const healthTimeout = window.setTimeout(() => controllers.health.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const [nextJobs, healthResponse] = await Promise.all([getJobs(), fetch('/api/health')]);
-      if (!healthResponse.ok) throw new Error(`Health check failed: ${healthResponse.statusText}`);
-      const health: { orchestratorAlive: boolean } = await healthResponse.json();
-      setJobs(nextJobs);
-      setOrchestratorAlive(health.orchestratorAlive);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load pipeline');
+      const [jobsResult, healthResult] = await Promise.allSettled([
+        getJobs(controllers.jobs.signal),
+        fetch('/api/health', { signal: controllers.health.signal }).then(async response => {
+          if (!response.ok) throw new Error(`Health check failed: ${response.statusText}`);
+          return response.json() as Promise<{ orchestratorAlive: boolean }>;
+        }),
+      ]);
+      if (refreshAbort.current !== controllers) return;
+
+      const errors: string[] = [];
+      if (jobsResult.status === 'fulfilled') setJobs(jobsResult.value);
+      else errors.push(jobsResult.reason instanceof Error ? jobsResult.reason.message : 'Failed to load jobs');
+      if (healthResult.status === 'fulfilled') setOrchestratorAlive(healthResult.value.orchestratorAlive);
+      else errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
+      setError(errors.length > 0 ? errors.join('; ') : null);
     } finally {
-      setLoading(false);
+      window.clearTimeout(jobsTimeout);
+      window.clearTimeout(healthTimeout);
+      if (refreshAbort.current === controllers) {
+        refreshAbort.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -68,7 +88,12 @@ export const PipelineDrawer: React.FC = () => {
     if (!isOpen) return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      refreshAbort.current?.jobs.abort();
+      refreshAbort.current?.health.abort();
+      refreshAbort.current = null;
+    };
   }, [isOpen, refresh]);
 
   const showEvents = async (job: JobStatus) => {
@@ -122,8 +147,9 @@ export const PipelineDrawer: React.FC = () => {
         ) : (
           <>
             {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
-            <div className="mt-6 grid min-w-[1080px] grid-cols-6 gap-3 overflow-x-auto">
-              {STAGES.map(stage => {
+            <div className="mt-6 overflow-x-auto">
+              <div className="grid min-w-[1080px] grid-cols-6 gap-3">
+                {STAGES.map(stage => {
                 const stageJobs = jobs.filter(job => job.status === stage);
                 return (
                   <section key={stage} className="min-h-40 rounded-lg border border-zinc-800 bg-zinc-950/50 p-2">
@@ -160,7 +186,8 @@ export const PipelineDrawer: React.FC = () => {
                     </div>
                   </section>
                 );
-              })}
+                })}
+              </div>
             </div>
 
             {terminal.length > 0 && (

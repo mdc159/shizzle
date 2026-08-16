@@ -15,6 +15,7 @@ Spec: approved plan ``async-wiggling-yao.md`` design decisions 1, 2, 4, 5, 6.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -42,8 +43,8 @@ if TYPE_CHECKING:  # avoid a runtime import cycle with stages.py
 logger = logging.getLogger(__name__)
 
 GENERATION = 1
-# The lossless worker writes its outputs under this deterministic prefix (no
-# result payload needed to find the package — decision 3).
+# The lossless worker writes each dispatch beneath a deterministic attempt
+# prefix derived from the durable reservation key (decision 3).
 SEPARATION_SEGMENT = "separation"
 DISPATCH_RECEIPT = "dispatch.json"
 
@@ -54,13 +55,21 @@ def source_key(track_id: uuid.UUID | str) -> str:
 
 
 def separation_prefix(track_id: uuid.UUID | str) -> str:
-    """Where the worker drops the lossless-stem-v1 package + handoff.json."""
+    """Base namespace for lossless-stem-v1 dispatch attempts."""
     return f"tracks/{track_id}/{GENERATION}/{SEPARATION_SEGMENT}"
 
 
-def dispatch_receipt_key(track_id: uuid.UUID | str) -> str:
+def attempt_prefix(track_id: uuid.UUID | str, idempotency_key: str) -> str:
+    """Immutable, path-safe package prefix for one RunPod dispatch attempt."""
+    attempt_id = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    return f"{separation_prefix(track_id)}/attempts/{attempt_id}"
+
+
+def dispatch_receipt_key(
+    track_id: uuid.UUID | str, idempotency_key: str
+) -> str:
     """Worker-written marker that binds a reservation to its RunPod job id."""
-    return f"{separation_prefix(track_id)}/{DISPATCH_RECEIPT}"
+    return f"{attempt_prefix(track_id, idempotency_key)}/{DISPATCH_RECEIPT}"
 
 
 async def accepted_dispatch_id(
@@ -74,7 +83,7 @@ async def accepted_dispatch_id(
     work so a reclaimed orchestrator lease can durably attach the remote job.
     """
     track_id = track_id_for_job(ctx.job.id)
-    key = dispatch_receipt_key(track_id)
+    key = dispatch_receipt_key(track_id, idempotency_key)
     try:
         receipt = await asyncio.to_thread(
             _read_json_or_none,
@@ -95,6 +104,7 @@ async def accepted_dispatch_id(
         "idempotency_key": idempotency_key,
         "track_id": str(track_id),
         "generation": GENERATION,
+        "package_prefix": attempt_prefix(track_id, idempotency_key),
     }
     if any(receipt.get(field) != value for field, value in expected.items()):
         logger.warning(
@@ -110,10 +120,10 @@ async def accepted_dispatch_id(
     return runpod_job_id
 
 
-async def package_ready(ctx: StageContext) -> bool:
+async def package_ready(ctx: StageContext, *, idempotency_key: str) -> bool:
     """Check the handoff-last marker for a dispatch whose RunPod id was lost."""
     track_id = track_id_for_job(ctx.job.id)
-    key = f"{separation_prefix(track_id)}/handoff.json"
+    key = f"{attempt_prefix(track_id, idempotency_key)}/handoff.json"
     try:
         head = await asyncio.to_thread(
             _head_or_none,
@@ -186,7 +196,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
     track_id = track_id_for_job(ctx.job.id)
     pkg_dir = ctx.job_dir / "package"
     pkg_dir.mkdir(parents=True, exist_ok=True)
-    prefix = separation_prefix(track_id)
+    prefix = await _selected_package_prefix(ctx, track_id)
     try:
         await asyncio.to_thread(
             download_package,
@@ -221,6 +231,33 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
         "sample_count": sep.get("sample_count"),
     }
     return JobStage.publishing
+
+
+async def _selected_package_prefix(
+    ctx: StageContext, track_id: uuid.UUID | str
+) -> str:
+    """Read the package selected by the dispatched-to-verifying transition.
+
+    The transition event makes recovery independent of the mutable job attempt
+    counter. Legacy in-flight jobs have no package_prefix and retain the former
+    deterministic layout as a rolling-upgrade fallback.
+    """
+    base = separation_prefix(track_id)
+    if ctx.jobs is None:  # lightweight unit contexts use the legacy layout
+        return base
+    events = await ctx.jobs.list_events(ctx.job.id)
+    for event in reversed(events):
+        detail = event.detail if isinstance(event.detail, dict) else {}
+        if (
+            event.event == "stage_completed"
+            and detail.get("from") == JobStage.dispatched.value
+            and detail.get("to") == JobStage.verifying.value
+        ):
+            prefix = detail.get("package_prefix")
+            if isinstance(prefix, str) and prefix.startswith(f"{base}/attempts/"):
+                return prefix
+            break
+    return base
 
 
 async def cloud_publishing(ctx: StageContext) -> JobStage:

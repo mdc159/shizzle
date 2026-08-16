@@ -14,6 +14,7 @@ RunPod progress channel, so a stall is diagnosable by which phase froze.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -32,6 +33,12 @@ def _clean(handoff: dict) -> dict:
     return {k: v for k, v in handoff.items() if not k.startswith("_")}
 
 
+def _attempt_prefix(base_prefix: str, idempotency_key: str) -> str:
+    """Return an immutable, path-safe package prefix for one dispatch attempt."""
+    attempt_id = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    return f"{base_prefix.rstrip('/')}/attempts/{attempt_id}"
+
+
 def handler(job: dict) -> dict:
     """RunPod serverless handler: S3 source in, lossless-stem-v1 package in S3 out."""
     import runpod
@@ -45,36 +52,36 @@ def handler(job: dict) -> dict:
     track_id = params["track_id"]
     generation = int(params.get("generation", 1))
     idempotency_key = str(params.get("idempotency_key", "")).strip()
+    if not runpod_job_id or not idempotency_key:
+        raise ValueError("RunPod id and idempotency_key are required")
     bucket = params["bucket"]
     input_key = params["input_key"]
-    prefix = params.get(
+    base_prefix = params.get(
         "output_prefix", f"tracks/{track_id}/{generation}/separation/"
-    ).rstrip("/")
+    )
+    prefix = _attempt_prefix(base_prefix, idempotency_key)
 
     s3 = create_s3_client()
     handoff_key = f"{prefix}/handoff.json"
-    if runpod_job_id and idempotency_key:
-        receipt_key = f"{prefix}/dispatch.json"
-        receipt = {
-            "runpod_job_id": runpod_job_id,
-            "idempotency_key": idempotency_key,
-            "track_id": str(track_id),
-            "generation": generation,
-        }
-        heartbeat(f"dispatch: recording {runpod_job_id}")
-        s3.put_object(
-            Bucket=bucket,
-            Key=receipt_key,
-            Body=json.dumps(receipt, separators=(",", ":")).encode("utf-8"),
-            ContentType="application/json",
-        )
-    # wave3 #2: do NOT delete the shared handoff.json marker here. A retry that
-    # shares this prefix could be racing an earlier worker that already crossed
-    # the interface; deleting would destroy its valid completion marker and the
-    # publisher (cloud_verifying) would then see PackageNotReady. handoff.json is
-    # written LAST below, so its appearance is the atomic promotion of a newly
-    # complete package — a stale marker from a dead prior attempt can only exist
-    # if that attempt fully succeeded, in which case keeping it is correct.
+    receipt_key = f"{prefix}/dispatch.json"
+    receipt = {
+        "runpod_job_id": runpod_job_id,
+        "idempotency_key": idempotency_key,
+        "track_id": str(track_id),
+        "generation": generation,
+        "package_prefix": prefix,
+    }
+    heartbeat(f"dispatch: recording {runpod_job_id}")
+    s3.put_object(
+        Bucket=bucket,
+        Key=receipt_key,
+        Body=json.dumps(receipt, separators=(",", ":")).encode("utf-8"),
+        ContentType="application/json",
+    )
+    # Every dispatch writes beneath its own immutable prefix. An older worker
+    # can neither replace a newer receipt nor mutate stems beneath a completed
+    # handoff marker. handoff.json remains the last-write completion marker for
+    # this attempt only.
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         source = tmp_path / Path(input_key).name

@@ -237,8 +237,8 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
 
     changed_heartbeat = changed.worker_heartbeat_at
     assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is False
-    unchanged = await job_repo.get_job(upload_job.id)
-    assert unchanged is not None and unchanged.worker_heartbeat_at == changed_heartbeat
+    refreshed = await job_repo.get_job(upload_job.id)
+    assert refreshed is not None and refreshed.worker_heartbeat_at >= changed_heartbeat
     events = await job_repo.list_events(upload_job.id)
     assert [event.event for event in events] == [
         "created",

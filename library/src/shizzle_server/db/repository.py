@@ -421,6 +421,13 @@ class JobRepository:
             if job is None:
                 raise LookupError(f"job {job_id} does not exist")
             if job.worker_phase == phase:
+                # A stable work phase still proves liveness. Queue age is the
+                # exception: its first heartbeat is the durable entry time used
+                # by the queue-timeout watchdog and must not move on each poll.
+                if phase != "queued":
+                    now = utcnow()
+                    job.worker_heartbeat_at = now
+                    job.updated_at = now
                 return False
             now = utcnow()
             job.worker_phase = phase

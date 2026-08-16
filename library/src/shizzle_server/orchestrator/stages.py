@@ -204,12 +204,21 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             return None
         status, phase = parse_worker_progress(status_payload)
 
+        events = await ctx.jobs.list_events(job.id)
+        if events and events[-1].event == "runpod_poll_failed":
+            await ctx.jobs.append_event(job.id, "runpod_poll_recovered")
+
         if status == "COMPLETED":
             output = status_payload.get("output")
             detail = output if isinstance(output, dict) else {"output": output}
             events = await ctx.jobs.list_events(job.id)
             if not any(event.event == "worker_completed" for event in events):
                 await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
+            dispatch_key = _confirmed_dispatch_key(events, job.runpod_job_id)
+            if dispatch_key is not None:
+                ctx.detail["package_prefix"] = cloud.attempt_prefix(
+                    track_id, dispatch_key
+                )
             return JobStage.verifying
 
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
@@ -283,7 +292,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             )
             ctx.park_seconds = ctx.settings.runpod_poll_seconds
             return None
-        if await cloud.package_ready(ctx):
+        if await cloud.package_ready(ctx, idempotency_key=dispatch_key):
             already_recovered = any(
                 event.event == "runpod_dispatch_recovered"
                 and isinstance(event.detail, dict)
@@ -296,6 +305,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     "runpod_dispatch_recovered",
                     {"idempotency_key": dispatch_key, "source": "handoff.json"},
                 )
+            ctx.detail["package_prefix"] = cloud.attempt_prefix(
+                track_id, dispatch_key
+            )
             return JobStage.verifying
         pending_for = _age_seconds(pending_dispatch.created_at) or 0.0
         fail_closed_after = (
@@ -352,6 +364,19 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         idempotency_key=dispatch_key,
         runpod_job_id=runpod_id,
     )
+    return None
+
+
+def _confirmed_dispatch_key(events: list[Any], runpod_job_id: str | None) -> str | None:
+    """Find the idempotency key bound to the currently polled RunPod job."""
+    for event in reversed(events):
+        detail = event.detail if isinstance(event.detail, dict) else {}
+        if (
+            event.event == "runpod_dispatched"
+            and detail.get("runpod_job_id") == runpod_job_id
+            and isinstance(detail.get("idempotency_key"), str)
+        ):
+            return detail["idempotency_key"]
     return None
 
 

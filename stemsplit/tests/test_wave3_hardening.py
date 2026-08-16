@@ -1,14 +1,13 @@
 """wave3 hardening regression tests for the lossless worker.
 
-#2: handler() must not delete the shared handoff.json marker — a retry sharing
-    the prefix could be racing an earlier worker that already crossed the
-    interface; deleting destroys its valid completion marker. handoff.json is
-    written LAST (atomic promotion), never deleted upfront.
+#2: handler() isolates each dispatch under an immutable attempt prefix, so a
+    retry cannot replace another receipt or mutate a completed package.
 #4: the S3 transfer progress callback closure is mutated from multiple
     transfer-manager threads during multipart transfers; the lock keeps the
     reported percentage monotonic and bounded.
 """
 
+import hashlib
 import json
 import sys
 import threading
@@ -16,7 +15,7 @@ from pathlib import Path
 from types import ModuleType
 
 import s3_ops
-from lossless_handler import handler
+from lossless_handler import _attempt_prefix, handler
 from lossless_worker import ROLES
 
 
@@ -40,10 +39,16 @@ class _FakeS3:
         self.puts.append(kwargs)
 
 
-def test_handler_does_not_delete_shared_handoff_marker(monkeypatch):
-    """wave3 #2: a retry must not destroy a prior valid handoff.json. The shared
-    marker is only ever (over)written LAST as an atomic promotion, never deleted
-    at the start of a run."""
+def test_attempt_prefix_is_deterministic_and_isolates_retries():
+    base = "tracks/T1/1/separation"
+    first = _attempt_prefix(base, "job-1:0")
+    assert first == _attempt_prefix(f"{base}/", "job-1:0")
+    assert first != _attempt_prefix(base, "job-1:1")
+    assert first.startswith(f"{base}/attempts/")
+
+
+def test_handler_isolates_each_dispatch_attempt(monkeypatch):
+    """A retry writes a distinct receipt/package and cannot mutate its peer."""
     serverless = _FakeServerless()
     runpod = ModuleType("runpod")
     runpod.serverless = serverless  # type: ignore[attr-defined]
@@ -76,38 +81,43 @@ def test_handler_does_not_delete_shared_handoff_marker(monkeypatch):
     monkeypatch.setattr("lossless_handler.upload_file", _upload)
 
     prefix = "tracks/T1/1/separation"
+    dispatch_key = "job-1:0"
     result = handler({
         "id": "rp-accepted",
         "input": {
             "track_id": "T1",
             "generation": 1,
-            "idempotency_key": "job-1:0",
+            "idempotency_key": dispatch_key,
             "bucket": "bkt",
             "input_key": "sources/T1/source.mp4",
             "output_prefix": prefix,
         }
     })
 
-    handoff_key = f"{prefix}/handoff.json"
+    attempt_id = hashlib.sha256(dispatch_key.encode()).hexdigest()
+    attempt_prefix = f"{prefix}/attempts/{attempt_id}"
+    handoff_key = f"{attempt_prefix}/handoff.json"
     # The shared marker is never deleted — a prior valid package survives a race.
     assert handoff_key not in fake_s3.deleted
     assert fake_s3.deleted == []
     # handoff.json is the atomic promotion: written LAST, after every stem.
     assert uploaded[-1] == handoff_key
     assert [k for k in uploaded if k.endswith(".wav")] == [
-        f"{prefix}/stems/{role}.wav" for role in ROLES
+        f"{attempt_prefix}/stems/{role}.wav" for role in ROLES
     ]
     assert len(fake_s3.puts) == 1
     receipt = fake_s3.puts[0]
-    assert receipt["Key"] == f"{prefix}/dispatch.json"
+    assert receipt["Key"] == f"{attempt_prefix}/dispatch.json"
     assert receipt["ContentType"] == "application/json"
     assert json.loads(receipt["Body"]) == {
         "runpod_job_id": "rp-accepted",
         "idempotency_key": "job-1:0",
         "track_id": "T1",
         "generation": 1,
+        "package_prefix": attempt_prefix,
     }
     assert result["status"] == "COMPLETED"
+    assert result["package_prefix"] == attempt_prefix
 
 
 def test_transfer_callback_is_thread_safe_and_monotonic():
