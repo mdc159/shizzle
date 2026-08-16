@@ -83,7 +83,10 @@ behavior) are NOT asserted by the workflow.
   identity. A real downgrade is mandatory under F1. If the downgrade itself
   fails, rollback still restores the prior files but leaves API and
   orchestrator stopped and returns the original downgrade failure for manual
-  recovery; it never starts an old image against an unknown schema state.
+  recovery; it never starts an old image against an unknown schema state. A
+  failed application stop likewise restores the files, skips downgrade and
+  restart, and returns the stop failure because schema mutation is unsafe while
+  the new application may still be running.
 - Break-glass: edit `SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a known
   tag-plus-digest reference and run Compose on the box. Automated deployment
   refuses an installation with no prior API identity; bootstrap the first

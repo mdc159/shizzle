@@ -23,6 +23,7 @@ case " $* " in
   *" config -q "*) exit 0 ;;
   *" alembic upgrade head "*) [ "${DOCKER_FAIL:-}" != migration ] || exit 32; exit 0 ;;
   *" alembic downgrade "*) [ "${DOCKER_FAIL:-}" != downgrade ] || exit 33; exit 0 ;;
+  *" stop api orchestrator "*) [ "${DOCKER_FAIL:-}" != stop ] || exit 35; exit 0 ;;
   *" up -d "*) [ "${DOCKER_FAIL:-}" != up ] || exit 34; exit 0 ;;
 esac
 exit 0
@@ -134,6 +135,20 @@ if tail -n 1 "$DOCKER_LOG" | grep -F 'up -d'; then
   echo "downgrade failure restarted application services" >&2
   exit 1
 fi
+
+new_fixture stop-failure
+run_deploy
+DOCKER_FAIL=stop
+set +e
+run_restore
+restore_status=$?
+set -e
+DOCKER_FAIL=
+test "$restore_status" -eq 35
+grep -Fx old-compose "$PROD/compose.prod.yml"
+grep -Fx old-caddy "$PROD/Caddyfile"
+grep -Fx old-player "$PROD/player/index.html"
+tail -n 1 "$DOCKER_LOG" | grep -F 'stop api orchestrator'
 
 new_fixture interrupted-restore
 run_deploy

@@ -48,7 +48,9 @@ Rollback is transactional: the deploy records the prior files and Alembic
 revision, and a failed startup or health check downgrades the database before
 restoring the prior release. If downgrade fails, the prior files are restored
 but application services remain stopped so an old image is not started against
-an unknown schema state. For forward break-glass recovery, set
+an unknown schema state. If stopping the application fails, the prior files are
+still restored but database downgrade and service restart are skipped for
+manual recovery. For forward break-glass recovery, set
 `SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a retained tag-plus-digest,
 then migrate and recreate the services explicitly:
 
