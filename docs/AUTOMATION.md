@@ -307,11 +307,12 @@ Settings sequence (order matters):
    check names — require PRs and the actual job ids (`library`, `stemsplit`,
    `player`, `postgres-contract`); AI reviewers stay advisory, never required.
 4. **After the first image push, confirm the GHCR package is public.** The
-   private-package trap: a package created by a first push defaults to private
-   and the VPS `docker compose pull` fails auth until visibility is changed
-   (or a pull token is wired into the box). Packages pushed by Actions from a
-   public repository inherit public visibility and link automatically — verify
-   rather than assume, since the repo's visibility decides which case applies.
+   private-package trap: a first container package under a personal account
+   defaults to private, and linking it to a public repository inherits access
+   permissions but not package visibility. The VPS `docker compose pull` fails
+   auth until visibility is changed (or a pull token is wired into the box).
+   Actions linkage can grant workflow access without enabling anonymous pulls,
+   so verify package visibility explicitly.
 5. **Pass `secrets: inherit` wherever a caller invokes the reusable deploy
    workflow.** A called workflow's `secrets` context contains only what the
    caller passes — even when the called job declares
@@ -327,8 +328,9 @@ Settings sequence (order matters):
    target it cannot identify. Record the active image once per installation
    (see `deploy/vps/README.md`); every later deploy maintains it.
 
-Bootstrap order: environment + reviewer setup → secrets → first merge
-(exercises build + gated deploy + package creation) → package visibility →
-branch protection. This order means the approval gate exists before any
-deploy can run, the pull works before anyone depends on it, and branch
+Bootstrap order: environment + reviewer setup → secrets → first-release
+identity bootstrap → first merge (exercises build + gated deploy + package
+creation) → package visibility → branch protection. This order means the
+approval gate exists before any deploy can run, rollback identity exists before
+the first gated deploy, the pull works before anyone depends on it, and branch
 protection references real check names.

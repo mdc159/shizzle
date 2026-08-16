@@ -18,10 +18,11 @@ code reaches production changed today:
   The deploy is transactional (rollback snapshot, migration, health checks,
   automatic restore on failure). The api and orchestrator containers now run
   the pulled digest-pinned image; build-on-box is a documented fallback only.
-- Master is protected (PRs + the four required checks). Greptile, CodeRabbit,
-  and cubic review every PR against `INVARIANTS.md`-derived rules, advisory
-  only; PR readiness is judged by the drive-pr-review-convergence workflow,
-  not by green badges.
+- Master is protected by the four required checks, enforced for administrators;
+  the current branch rule does not itself require pull requests. PR-only landing
+  remains repository policy. Greptile, CodeRabbit, and cubic are advisory to
+  branch protection, while drive-pr-review-convergence still requires a
+  current-head Greptile review and evidence-backed dispositions.
 - The full system, its secrets, its failure modes, and the lift-to-a-new-repo
   checklist are documented in [`AUTOMATION.md`](AUTOMATION.md).
 

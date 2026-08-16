@@ -71,14 +71,19 @@ identity ("Refusing automated first deployment"); bootstrap the first
 production release explicitly by recording the identity of whatever image the
 active stack is running:
 
-```text
-printf 'SHIZZLE_API_IMAGE=<active image reference>\n' >> /opt/shizzle/prod/.env
+```sh
+api_image="$(docker inspect --format '{{.Config.Image}}' shizzle-api)" &&
+orchestrator_image="$(docker inspect --format '{{.Config.Image}}' shizzle-orchestrator)" &&
+test -n "$api_image" &&
+test "$api_image" = "$orchestrator_image" &&
+printf 'SHIZZLE_API_IMAGE=%s\n' "$api_image" >> /opt/shizzle/prod/.env
 ```
 
-Use the exact image the running api/orchestrator containers report (`docker
-compose -p shizzle ps`), so a rollback of the first automated deployment
-restarts precisely the release that was active before it. Done once per
-installation; every later deployment maintains the value itself.
+`docker inspect` deliberately avoids loading `compose.prod.yml`, which cannot
+interpolate until this identity exists. The guarded command requires both
+containers to report the same non-empty image reference, so the first automated
+deployment can roll back to precisely the release that was active before it.
+Done once per installation; every later deploy maintains the value itself.
 
 ## Current work
 

@@ -16,9 +16,12 @@ tracks at https://shizzle.systems. Current state and next actions:
    numbered contracts (A1–F6). A PR that changes an invariant must update
    that file and its guarding test in the same PR. The AI reviewers cite
    these IDs; so should you.
-2. **Master is protected.** All work lands by PR through four required
-   checks (`library`, `stemsplit`, `player`, `postgres-contract`). Greptile,
-   CodeRabbit, and cubic review every PR; they are advisory, never gates.
+2. **Master is protected.** Repository policy is that all work lands by PR
+   through four required checks (`library`, `stemsplit`, `player`,
+   `postgres-contract`). The current branch rule enforces those checks for
+   administrators but does not itself require pull requests. Greptile,
+   CodeRabbit, and cubic are advisory to branch protection; the convergence
+   workflow below still requires a current-head Greptile review.
 3. **Green badges are not readiness.** PR readiness is judged by the
    `drive-pr-review-convergence` workflow — installed at
    `.agents/skills/drive-pr-review-convergence/`, launched via the
