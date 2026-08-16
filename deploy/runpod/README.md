@@ -6,9 +6,11 @@ this directory records how it runs in the cloud.
 ## Current facts
 
 - Endpoint: `tevdw8022hs8hn`.
-- Worker image: `ghcr.io/mdc159/shizzle-worker:v2` (legacy tag; new builds
-  publish immutable `sha-<commit>` tags via
-  `.github/workflows/worker-image.yml`, building from `stemsplit/`).
+- Worker image: `ghcr.io/mdc159/shizzle-worker:v2` (legacy package, linked
+  to the retired spike repo `mdc159/shizzle-worker`; still what the endpoint
+  pulls). New builds publish immutable `sha-<commit>` tags to
+  `ghcr.io/mdc159/shizzle/worker` via `.github/workflows/worker-image.yml`,
+  building from `stemsplit/` — repoint the endpoint there at cutover.
 - Pool: last observed one GPU per worker, allowed GPUs RTX A5000 / L4 /
   RTX 3090 / RTX A4000, and `workersMax=0` — the pool is deliberately
   parked; no GPU can currently be allocated.

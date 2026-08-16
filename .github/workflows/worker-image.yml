@@ -32,10 +32,16 @@ jobs:
           context: stemsplit
           file: stemsplit/Dockerfile.lossless
           push: true
-          build-args: WORKER_IMAGE=ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
+          # ghcr.io/mdc159/shizzle/worker, not the legacy shizzle-worker
+          # package: that package is linked to the retired spike repo
+          # mdc159/shizzle-worker, so this repo's Actions token cannot push
+          # to it (write_package denied). First push here auto-creates a
+          # package owned by this repo. RunPod still pulls the legacy :v2
+          # until it is repointed.
+          build-args: WORKER_IMAGE=ghcr.io/mdc159/shizzle/worker:sha-${{ github.sha }}
           # The commit-sha tag is the only tag: human-alias tags are
           # re-pushable and therefore not immutable. handoff.json records
           # the image per separation; the digest is the true identity.
-          tags: ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
+          tags: ghcr.io/mdc159/shizzle/worker:sha-${{ github.sha }}
       - name: Report digest
-        run: docker buildx imagetools inspect ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
+        run: docker buildx imagetools inspect ghcr.io/mdc159/shizzle/worker:sha-${{ github.sha }}

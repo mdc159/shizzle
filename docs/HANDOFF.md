@@ -81,7 +81,8 @@ the separator's native `other` output to `shizzle` as it writes the package.
 - The live endpoint was last observed with one GPU per worker, allowed GPU pool
   RTX A5000/L4/RTX 3090/RTX A4000, and `workersMax=0`.
 - With `workersMax=0`, no GPU can currently be allocated.
-- Worker image: `ghcr.io/mdc159/shizzle-worker:v2`.
+- Worker image: `ghcr.io/mdc159/shizzle-worker:v2` (legacy package; new CI
+  builds publish to `ghcr.io/mdc159/shizzle/worker:sha-<commit>`).
 - A complete separation with real S3 input/output and both integrity gates was
   previously proven on an RTX 4070.
 - `stemsplit/Dockerfile` does not bake `htdemucs_6s` weights. Cold workers must
