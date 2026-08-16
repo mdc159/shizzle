@@ -90,7 +90,7 @@ All three reviewers consume the same source of truth:
   context set via the Greptile API. The `path_instructions` texts from
   `.coderabbit.yaml` are mirrored there verbatim so both reviewers enforce the
   same invariants.
-- **cubic** — configured through its dashboard custom rules. The six paste
+- **cubic** — configured through its dashboard custom rules. The seven paste
   texts below are the standalone versions of the same path instructions; the
   owner pastes each into the dashboard.
 
