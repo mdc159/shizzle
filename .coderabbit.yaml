@@ -48,23 +48,25 @@ reviews:
     # repository.py paste block in docs/AUTOMATION.md §5 — edit both together.
     - path: "library/src/shizzle_server/db/repository.py"
       instructions: >
-        Durable orchestrator stage loop. Enforce the B-series invariants from
-        docs/INVARIANTS.md: job claims use SELECT ... FOR UPDATE SKIP LOCKED
-        and reclaiming an expired foreign lease records a lease_reclaimed
-        event (B1); lease ownership must be checked inside the locked
-        transaction (B2), and the dispatch reservation must commit before any
-        external RunPod call (B3) — a timeout or 5xx must never trigger a
-        second dispatch; it reconciles the outstanding reservation instead.
-        Confirmation deliberately does not require the original lease — the
-        latest reservation key must block stale-dispatcher overwrite (B4).
-        Poll-failure events dedupe to one row per outage and any other event
-        resets the window (B6). A failed RunPod cancel must never mask the
-        original error — _cancel_best_effort logs and swallows (B7). Park frees
+        Postgres data layer for the orchestrator and publisher. Enforce the
+        data-layer invariants from docs/INVARIANTS.md: job claims use
+        SELECT ... FOR UPDATE SKIP LOCKED and reclaiming an expired foreign
+        lease records a lease_reclaimed event in the same transaction (B1);
+        lease ownership must be verified under row lock (with_for_update)
+        inside the same transaction as every lease-scoped write (B2); the
+        dispatch reservation must be committed by its own transaction before
+        any caller performs the external API call, and duplicate reservations
+        must be blocked (B3); confirmation deliberately requires no lease —
+        key it on the latest reservation so a stale dispatcher cannot
+        overwrite a newer one (B4); legacy dispatch_unconfirmed state must
+        fail closed, blocking redispatch rather than paying twice (B5);
+        worker heartbeats are written only on phase change (B8); park frees
         the lease without consuming an attempt or appending an event (B9).
-        Every unresolvable error path fails closed (B5, B10) and every stage
-        handler must be idempotent under crash-rerun (B11). Heartbeats are
-        written only on phase change (B8); a RunPod job already marked failed
-        dispatches fresh under a new idempotency key (B12).
+        Publish writes are idempotent: track ids are deterministic uuid5 so
+        crash-reruns converge on one row (C4), and generation activation is a
+        compare-and-swap under with_for_update with the ledger event committed
+        in the same transaction (C5). Job events are append-only and ordered —
+        no UPDATE or DELETE on the events table (F5).
     - path: "library/src/shizzle_server/publish/**"
       instructions: >
         Publication and delivery-profile policy. Enforce the C and D series
