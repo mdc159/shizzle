@@ -9,7 +9,7 @@
  *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
-import type { Track, StemsManifest, JobStatus, LibraryResponse } from '@/types/karaoke';
+import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse } from '@/types/karaoke';
 import { authFetch, setToken } from '@/lib/auth';
 
 interface AuthResult {
@@ -76,6 +76,20 @@ export async function getLibrary(): Promise<Track[]> {
 
   const data: LibraryResponse = await response.json();
   return data.tracks;
+}
+
+/** Fetch recent pipeline jobs. */
+export async function getJobs(signal?: AbortSignal): Promise<JobStatus[]> {
+  const response = await authFetch('/api/jobs', { signal });
+  if (!response.ok) throw new Error(`Failed to fetch jobs: ${response.statusText}`);
+  return (await response.json()).jobs;
+}
+
+/** Fetch one job's append-only event history. */
+export async function getJobEvents(jobId: string): Promise<JobEvent[]> {
+  const response = await authFetch(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+  if (!response.ok) throw new Error(response.status === 404 ? 'Job not found' : `Failed to fetch job events: ${response.statusText}`);
+  return (await response.json()).events;
 }
 
 /**

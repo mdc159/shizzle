@@ -8,6 +8,7 @@ factory, so callers cannot half-commit orchestration state.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,6 +51,41 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
         "fatal",
     }
 )
+
+_DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
+_DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
+_LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+
+
+def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
+    """Return the latest dispatch that may have been accepted but is unconfirmed.
+
+    ``dispatch_unconfirmed`` predates durable reservations. It must remain
+    fail-closed during a rolling upgrade; otherwise an in-flight legacy job
+    could be submitted again by the first process running the new code.
+    """
+    pending: JobEvent | None = None
+    pending_key: str | None = None
+    for event in events:
+        detail = event.detail if isinstance(event.detail, dict) else {}
+        event_key = detail.get("idempotency_key")
+        if event.event == _LEGACY_DISPATCH_UNCONFIRMED_EVENT:
+            pending = event
+            pending_key = None
+        elif event.event == _DISPATCH_STARTED_EVENT and isinstance(event_key, str):
+            pending = event
+            pending_key = event_key
+        elif (
+            event.event == _DISPATCH_CONFIRMED_EVENT
+            and pending is not None
+            and (
+                (pending_key is None and event_key is None)
+                or event_key == pending_key
+            )
+        ):
+            pending = None
+            pending_key = None
+    return pending
 
 
 def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
@@ -123,7 +159,7 @@ class JobRepository:
                 JobEvent(
                     job_id=job.id,
                     event="created",
-                    detail={"source_type": source_type.value, "source_ref": source_ref},
+                    detail={"source_type": source_type.value},
                 )
             )
         return job
@@ -219,6 +255,188 @@ class JobRepository:
                 .where(Job.id == job_id, Job.lease_owner == worker_id)
                 .values(lease_owner=None, lease_expires_at=None, updated_at=utcnow())
             )
+
+    async def park(
+        self, job_id: uuid.UUID, *, worker_id: str, recheck_in_seconds: float
+    ) -> None:
+        """Schedule a claimed job for recheck without consuming an attempt."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.lease_owner == worker_id)
+                .values(
+                    next_retry_at=now + timedelta(seconds=recheck_in_seconds),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+
+    async def reserve_dispatch(
+        self, job_id: uuid.UUID, *, worker_id: str, idempotency_key: str
+    ) -> bool:
+        """Durably reserve one RunPod submission while the caller owns the lease.
+
+        The reservation commits before the external API call. A reclaimed lease
+        therefore sees the outstanding reservation and must reconcile it instead
+        of submitting another paid worker.
+        """
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.dispatched)
+            lease_expires_at = _aware(job.lease_expires_at)
+            if (
+                job.status != JobStage.dispatched
+                or job.lease_owner != worker_id
+                or lease_expires_at is None
+                or lease_expires_at <= now
+            ):
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
+            dispatch_events = (
+                await session.execute(
+                    select(JobEvent)
+                    .where(
+                        JobEvent.job_id == job_id,
+                        JobEvent.event.in_(
+                            (
+                                _DISPATCH_STARTED_EVENT,
+                                _DISPATCH_CONFIRMED_EVENT,
+                                _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                            )
+                        ),
+                    )
+                    .order_by(JobEvent.id)
+                )
+            ).scalars()
+            if pending_runpod_dispatch(dispatch_events) is not None:
+                return False
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    event=_DISPATCH_STARTED_EVENT,
+                    detail={
+                        "idempotency_key": idempotency_key,
+                        "attempt": job.attempt,
+                    },
+                )
+            )
+            return True
+
+    async def confirm_dispatch(
+        self, job_id: uuid.UUID, *, idempotency_key: str, runpod_job_id: str
+    ) -> bool:
+        """Attach a RunPod id to its durable reservation.
+
+        Confirmation intentionally does not require the original lease. The
+        external request may outlive that lease, but the latest reservation key
+        prevents a stale dispatcher from overwriting a newer submission.
+        """
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None or job.status != JobStage.dispatched:
+                current = job.status if job is not None else JobStage.failed
+                raise InvalidTransition(job_id, current, JobStage.dispatched)
+            dispatch_events = list(
+                (
+                    await session.execute(
+                        select(JobEvent)
+                        .where(
+                            JobEvent.job_id == job_id,
+                            JobEvent.event.in_(
+                                (
+                                    _DISPATCH_STARTED_EVENT,
+                                    _DISPATCH_CONFIRMED_EVENT,
+                                    _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                                )
+                            ),
+                        )
+                        .order_by(JobEvent.id)
+                    )
+                ).scalars()
+            )
+            pending = pending_runpod_dispatch(dispatch_events)
+            already_confirmed = any(
+                event.event == _DISPATCH_CONFIRMED_EVENT
+                and isinstance(event.detail, dict)
+                and event.detail.get("idempotency_key") == idempotency_key
+                and event.detail.get("runpod_job_id") == runpod_job_id
+                for event in dispatch_events
+            )
+            if already_confirmed and job.runpod_job_id == runpod_job_id:
+                return False
+            detail = pending.detail if pending is not None else None
+            if not isinstance(detail, dict) or detail.get("idempotency_key") != idempotency_key:
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
+            job.runpod_job_id = runpod_job_id
+            job.worker_phase = "dispatched"
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    event=_DISPATCH_CONFIRMED_EVENT,
+                    detail={
+                        "runpod_job_id": runpod_job_id,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+            )
+            return True
+
+    async def record_dispatch(
+        self, job_id: uuid.UUID, *, worker_id: str, runpod_job_id: str
+    ) -> None:
+        """Record a claimed dispatched job and seed its worker heartbeat."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.dispatched)
+            lease_expires_at = _aware(job.lease_expires_at)
+            if (
+                job.status != JobStage.dispatched
+                or job.lease_owner != worker_id
+                or lease_expires_at is None
+                or lease_expires_at <= now
+            ):
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
+            job.runpod_job_id = runpod_job_id
+            job.worker_phase = "dispatched"
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    event="runpod_dispatched",
+                    detail={"runpod_job_id": runpod_job_id},
+                )
+            )
+
+    async def record_worker_progress(self, job_id: uuid.UUID, *, phase: str) -> bool:
+        """Record only worker phase changes, keeping heartbeat history bounded."""
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise LookupError(f"job {job_id} does not exist")
+            if job.worker_phase == phase:
+                # A stable work phase still proves liveness. Queue age is the
+                # exception: its first heartbeat is the durable entry time used
+                # by the queue-timeout watchdog and must not move on each poll.
+                if phase != "queued":
+                    now = utcnow()
+                    job.worker_heartbeat_at = now
+                    job.updated_at = now
+                return False
+            now = utcnow()
+            job.worker_phase = phase
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
+            return True
 
     # --- state machine -------------------------------------------------------
 

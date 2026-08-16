@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import pytest
 
@@ -207,3 +210,74 @@ class TestCircuitBreakerConfig:
         """Circuit breaker name appears in repr and status."""
         breaker = CircuitBreaker(name="api-service")
         assert "api-service" in repr(breaker)
+
+
+async def test_half_open_allows_only_one_async_recovery_probe() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, timeout_seconds=-1)
+
+    async def fail() -> None:
+        raise ValueError("down")
+
+    with pytest.raises(ValueError):
+        await breaker.call_async(fail)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def probe() -> str:
+        started.set()
+        await release.wait()
+        return "recovered"
+
+    task = asyncio.create_task(breaker.call_async(probe))
+    await started.wait()
+    with pytest.raises(RuntimeError, match="probe in flight"):
+        await breaker.call_async(probe)
+    release.set()
+    assert await task == "recovered"
+    assert breaker.state == CircuitState.CLOSED
+
+
+def test_half_open_allows_only_one_threaded_recovery_probe() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, timeout_seconds=-1)
+
+    with pytest.raises(ValueError):
+        breaker.call(lambda: int("down"))
+
+    started = threading.Event()
+    release = threading.Event()
+    admission_barrier = threading.Barrier(3)
+    probe_count = 0
+    probe_count_lock = threading.Lock()
+
+    def probe() -> str:
+        nonlocal probe_count
+        with probe_count_lock:
+            probe_count += 1
+        started.set()
+        assert release.wait(timeout=5)
+        return "recovered"
+
+    def contend_for_probe() -> str:
+        admission_barrier.wait(timeout=5)
+        return breaker.call(probe)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        contenders = {
+            executor.submit(contend_for_probe),
+            executor.submit(contend_for_probe),
+        }
+        admission_barrier.wait(timeout=5)
+        assert started.wait(timeout=5)
+        rejected, admitted = wait(contenders, timeout=5, return_when=FIRST_COMPLETED)
+        try:
+            assert len(rejected) == 1
+            assert len(admitted) == 1
+            with pytest.raises(RuntimeError, match="probe in flight"):
+                rejected.pop().result(timeout=5)
+        finally:
+            release.set()
+        assert admitted.pop().result(timeout=5) == "recovered"
+
+    assert probe_count == 1
+    assert breaker.state == CircuitState.CLOSED

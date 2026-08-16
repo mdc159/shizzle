@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from shizzle_server.db.models import JobStage, SourceType
-from shizzle_server.db.repository import TrackGenerationConflict, track_id_for_job
+from shizzle_server.db.models import Job, JobStage, SourceType, utcnow
+from shizzle_server.db.repository import (
+    InvalidTransition,
+    TrackGenerationConflict,
+    pending_runpod_dispatch,
+    track_id_for_job,
+)
 
 
 async def test_create_and_get_job(job_repo):
@@ -187,3 +194,210 @@ async def test_generation_rollback_uses_same_atomic_ledger(track_repo):
     event = (await track_repo.list_generation_events(track_id))[0]
     assert event.event == "rollback"
     assert event.detail["reason"] == "drill"
+
+
+async def test_park_frees_lease_without_consuming_attempt_or_adding_event(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+
+    await job_repo.park(upload_job.id, worker_id="worker-a", recheck_in_seconds=10)
+
+    parked = await job_repo.get_job(upload_job.id)
+    assert parked is not None
+    assert parked.attempt == 0
+    assert parked.next_retry_at is not None
+    assert parked.lease_owner is None
+    assert parked.lease_expires_at is None
+    assert [event.event for event in await job_repo.list_events(upload_job.id)] == ["created"]
+
+
+async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+    )
+    dispatched = await job_repo.get_job(upload_job.id)
+    assert dispatched is not None
+    assert dispatched.runpod_job_id == "runpod-1"
+    assert dispatched.worker_phase == "dispatched"
+    first_heartbeat = dispatched.worker_heartbeat_at
+    assert first_heartbeat is not None
+
+    assert await job_repo.record_worker_progress(upload_job.id, phase="dispatched") is False
+    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is True
+    changed = await job_repo.get_job(upload_job.id)
+    assert changed is not None
+    assert changed.worker_phase == "separate"
+    assert changed.worker_heartbeat_at is not None
+    assert changed.worker_heartbeat_at >= first_heartbeat
+
+    changed_heartbeat = changed.worker_heartbeat_at
+    await asyncio.sleep(0.001)
+    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is False
+    refreshed = await job_repo.get_job(upload_job.id)
+    assert refreshed is not None and refreshed.worker_heartbeat_at > changed_heartbeat
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events] == [
+        "created",
+        "stage_completed",
+        "stage_completed",
+        "runpod_dispatched",
+        "worker_progress",
+    ]
+    assert events[-1].detail == {"phase": "separate"}
+
+
+async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_repo, upload_job):
+    with pytest.raises(InvalidTransition):
+        await job_repo.record_dispatch(
+            upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+        )
+
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    with pytest.raises(InvalidTransition):
+        await job_repo.record_dispatch(
+            upload_job.id, worker_id="worker-b", runpod_job_id="runpod-1"
+        )
+
+
+async def test_record_dispatch_rejects_expired_or_missing_lease(job_repo, upload_job):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+
+    for expiry in (utcnow() - timedelta(seconds=1), None):
+        async with job_repo._sf() as session, session.begin():
+            row = await session.get(Job, upload_job.id)
+            row.lease_expires_at = expiry
+        with pytest.raises(InvalidTransition):
+            await job_repo.record_dispatch(
+                upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
+            )
+
+
+async def test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover(
+    job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    dispatch_key = f"{upload_job.id.hex}:0"
+
+    assert await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-a",
+        idempotency_key=dispatch_key,
+    )
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-a",
+        idempotency_key=dispatch_key,
+    )
+
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+    reclaimed = await job_repo.claim_next(worker_id="worker-b", lease_seconds=60)
+    assert reclaimed is not None and reclaimed.lease_owner == "worker-b"
+
+    # The original caller may still persist the accepted RunPod id. The
+    # reservation key, rather than lease ownership, prevents stale overwrite.
+    assert await job_repo.confirm_dispatch(
+        upload_job.id,
+        idempotency_key=dispatch_key,
+        runpod_job_id="runpod-accepted",
+    )
+    assert not await job_repo.confirm_dispatch(
+        upload_job.id,
+        idempotency_key=dispatch_key,
+        runpod_job_id="runpod-accepted",
+    )
+    job = await job_repo.get_job(upload_job.id)
+    assert job.runpod_job_id == "runpod-accepted"
+    assert job.worker_phase == "dispatched"
+    events = await job_repo.list_events(upload_job.id)
+    assert [event.event for event in events].count("runpod_dispatch_started") == 1
+    confirmations = [event for event in events if event.event == "runpod_dispatched"]
+    assert len(confirmations) == 1
+    assert confirmations[0].detail == {
+        "runpod_job_id": "runpod-accepted",
+        "idempotency_key": dispatch_key,
+    }
+
+
+async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
+    job_repo, upload_job
+):
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.append_event(
+        upload_job.id,
+        "dispatch_unconfirmed",
+        {"attempt": 0, "error": "response lost before upgrade"},
+    )
+    await job_repo.append_event(upload_job.id, "dispatch_unconfirmed_grace")
+    await job_repo.claim_next(worker_id="worker-after-upgrade", lease_seconds=60)
+
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id,
+        worker_id="worker-after-upgrade",
+        idempotency_key=f"{upload_job.id.hex}:0",
+    )
+
+    await job_repo.record_dispatch(
+        upload_job.id,
+        worker_id="worker-after-upgrade",
+        runpod_job_id="legacy-runpod-id",
+    )
+    assert pending_runpod_dispatch(
+        await job_repo.list_events(upload_job.id)
+    ) is None
+
+
+async def test_keyed_confirmation_does_not_clear_legacy_pending_dispatch(
+    job_repo, upload_job
+):
+    await job_repo.append_event(
+        upload_job.id,
+        "dispatch_unconfirmed",
+        {"attempt": 0, "error": "response lost before upgrade"},
+    )
+    await job_repo.append_event(
+        upload_job.id,
+        "runpod_dispatched",
+        {"idempotency_key": "another-attempt", "runpod_job_id": "runpod-other"},
+    )
+
+    events = await job_repo.list_events(upload_job.id)
+    assert pending_runpod_dispatch(events) is not None
+
+    await job_repo.append_event(
+        upload_job.id,
+        "runpod_dispatched",
+        {"runpod_job_id": "legacy-runpod-id"},
+    )
+    assert pending_runpod_dispatch(await job_repo.list_events(upload_job.id)) is None

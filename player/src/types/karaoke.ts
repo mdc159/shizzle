@@ -65,6 +65,8 @@ export interface JobStatus {
     | 'publishing'
     | 'ready'
     | 'failed';
+  title?: string;
+  sourceType?: string;
   progress?: number;
   message?: string;
   error?: string;
@@ -72,6 +74,16 @@ export interface JobStatus {
   errorCode?: string;
   attempt?: number;
   stageTimings?: Record<string, number>;
+  workerPhase?: string;
+  workerHeartbeatAt?: string;
   trackId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface JobEvent {
+  event: string;
+  detail?: Record<string, unknown>;
+  createdAt: string;
 }
 

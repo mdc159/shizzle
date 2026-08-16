@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 const STEPS = [
   { status: 'pending', label: 'Queued' },
   { status: 'downloading', label: 'Fetching Source' },
+  { status: 'dispatched', label: 'Separating (cloud)' },
   { status: 'splitting', label: 'Separating Stems' },
   { status: 'verifying', label: 'Verifying' },
   { status: 'publishing', label: 'Publishing' },

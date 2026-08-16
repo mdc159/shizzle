@@ -30,7 +30,9 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: stemsplit
+          file: stemsplit/Dockerfile.lossless
           push: true
+          build-args: WORKER_IMAGE=ghcr.io/mdc159/shizzle-worker:sha-${{ github.sha }}
           # The commit-sha tag is the only tag: human-alias tags are
           # re-pushable and therefore not immutable. handoff.json records
           # the image per separation; the digest is the true identity.

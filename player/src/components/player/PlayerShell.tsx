@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '@/stores/useStore';
 import { TransportControls } from './TransportControls';
+import { PipelineDrawer } from '@/components/pipeline/PipelineDrawer';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useAudioSync } from '@/hooks/useAudioSync';
 import { loadManifest } from '@/lib/api';
 import { resolveMediaUrl } from '@/lib/playback/mediaUrl';
-import { Loader2 } from 'lucide-react';
+import { Activity, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 export const PlayerShell: React.FC = () => {
@@ -26,7 +28,8 @@ export const PlayerShell: React.FC = () => {
     currentTime,
     setCurrentTime,
     setDuration,
-    activeDrawer
+    activeDrawer,
+    setActiveDrawer
   } = useStore();
 
   // Audio sync hook handles stem loading and synchronization
@@ -173,6 +176,20 @@ export const PlayerShell: React.FC = () => {
       onMouseMove={showControls}
       onTouchStart={showControls}
     >
+      <Button
+        variant="ghost"
+        className={cn(
+          'fixed right-6 top-6 z-40 gap-2 bg-black/50 text-zinc-300',
+          activeDrawer === 'pipeline' && 'bg-accent text-accent-foreground'
+        )}
+        onClick={() => setActiveDrawer(activeDrawer === 'pipeline' ? 'none' : 'pipeline')}
+        aria-label="Pipeline"
+      >
+        <Activity className="h-5 w-5" />
+        Pipeline
+      </Button>
+      <PipelineDrawer />
+
       {/* Background Video Layer */}
       {currentTrack ? (
         <>

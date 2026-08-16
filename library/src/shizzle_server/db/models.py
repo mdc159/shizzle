@@ -56,22 +56,26 @@ class JobStage(StrEnum):
 
 TERMINAL_STAGES = frozenset({JobStage.ready, JobStage.failed})
 
-# Stages the Phase 2 orchestrator loop will claim and execute. `dispatched` is
-# deliberately excluded: in Phase 3 it is owned by the RunPod webhook receiver
-# + polling reconciler, not the lease loop.
+# Stages the orchestrator loop claims and executes. `dispatched` is owned by
+# the claim-based RunPod reconciler (one pass per claim, parks between polls);
+# the webhook receiver is out of scope this phase — polling reconciliation
+# owns dispatched end to end.
 RUNNABLE_STAGES = (
     JobStage.pending,
     JobStage.downloading,
+    JobStage.dispatched,
     JobStage.splitting,
     JobStage.verifying,
     JobStage.publishing,
 )
 
 # Legal forward transitions (state-machine authority, enforced by the repository).
+# In cloud mode `dispatched` IS the splitting (decision 6: no splitting-noop
+# hop) — it advances straight to `verifying` once the worker package is proven.
 ALLOWED_TRANSITIONS: dict[JobStage, frozenset[JobStage]] = {
     JobStage.pending: frozenset({JobStage.downloading, JobStage.failed}),
     JobStage.downloading: frozenset({JobStage.dispatched, JobStage.splitting, JobStage.failed}),
-    JobStage.dispatched: frozenset({JobStage.splitting, JobStage.failed}),
+    JobStage.dispatched: frozenset({JobStage.splitting, JobStage.verifying, JobStage.failed}),
     JobStage.splitting: frozenset({JobStage.verifying, JobStage.failed}),
     JobStage.verifying: frozenset({JobStage.publishing, JobStage.failed}),
     JobStage.publishing: frozenset({JobStage.ready, JobStage.failed}),
@@ -101,6 +105,9 @@ class Job(Base):
         index=True,
     )
     runpod_job_id: Mapped[str | None] = mapped_column(String(128))
+    # Latest worker progress heartbeat; phase changes are also kept in job_events.
+    worker_phase: Mapped[str | None] = mapped_column(String(256))
+    worker_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128))

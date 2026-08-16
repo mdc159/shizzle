@@ -24,7 +24,7 @@ from ..db.repository import HeartbeatRepository, InvalidTransition, JobRepositor
 from ..errors import ErrorCode, StageError
 from ..settings import Settings, get_settings
 from .pipelines import build_pipeline
-from .runpod_client import NotConfiguredRunPodClient
+from .runpod_client import HttpRunPodClient, NotConfiguredRunPodClient
 from .stages import HANDLERS, StageContext
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,19 @@ class Orchestrator:
         self.jobs = JobRepository(sf)
         self.heartbeats = HeartbeatRepository(sf)
         self.pipeline = build_pipeline(self.settings)
-        self.runpod = NotConfiguredRunPodClient()
+        self.runpod = (
+            HttpRunPodClient(
+                api_key=self.settings.runpod_api_key,
+                endpoint_id=self.settings.runpod_endpoint_id,
+                api_base=self.settings.runpod_api_base,
+            )
+            if (
+                self.settings.cloud_pipeline
+                and self.settings.runpod_api_key
+                and self.settings.runpod_endpoint_id
+            )
+            else NotConfiguredRunPodClient()
+        )
         self._stopping = asyncio.Event()
 
     # --- lifecycle -----------------------------------------------------------
@@ -105,6 +117,7 @@ class Orchestrator:
                     pipeline=self.pipeline,
                     jobs=self.jobs,
                     runpod=self.runpod,
+                    worker_id=self.worker_id,
                 )
                 from_stage = job.status
                 started = time.monotonic()
@@ -128,6 +141,19 @@ class Orchestrator:
                     return
 
                 duration_s = round(time.monotonic() - started, 3)
+                if next_stage is None:
+                    # Handler parks (e.g. dispatched hand-off): schedule a recheck
+                    # without consuming an attempt and yield. park frees the
+                    # lease, so the finally-block release_lease no-ops on its
+                    # lease_owner guard — no double-fire.
+                    await self.jobs.park(
+                        job.id,
+                        worker_id=self.worker_id,
+                        recheck_in_seconds=(
+                            ctx.park_seconds or ctx.settings.runpod_poll_seconds
+                        ),
+                    )
+                    return
                 if ctx.published:
                     # publish_track already committed publishing -> ready.
                     logger.info("job %s: published, ready (%.2fs)", job.id, duration_s)

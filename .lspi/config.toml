@@ -1,0 +1,45 @@
+# Semantic navigation for Codex. The MCP surface is intentionally read-only.
+
+[[servers]]
+id = "python"
+kind = "pyright"
+# This LSP consumes library/pyrightconfig.json; mypy remains the CI checker.
+extensions = ["py", "pyi"]
+language_id = "python"
+root_dir = "library"
+command = ".lspi/pyright-lsp-wrapper.cmd"
+args = ["--stdio"]
+initialize_timeout_ms = 20000
+request_timeout_ms = 30000
+warmup_timeout_ms = 1000
+
+[servers.request_timeout_overrides_ms]
+"textDocument/diagnostic" = 120000
+"textDocument/references" = 120000
+"workspace/symbol" = 120000
+
+[[servers]]
+id = "typescript"
+kind = "generic"
+# Intentionally PATH-resolved, like lspi's other globally installed servers.
+extensions = ["ts", "tsx", "js", "jsx"]
+language_id = "typescript"
+root_dir = "player"
+command = "typescript-language-server.cmd"
+args = ["--stdio"]
+adapter = "tsserver"
+initialize_timeout_ms = 20000
+request_timeout_ms = 30000
+warmup_timeout_ms = 1000
+
+[servers.request_timeout_overrides_ms]
+"textDocument/references" = 120000
+"workspace/symbol" = 120000
+
+[mcp]
+context = "codex"
+read_only = true
+
+[mcp.output]
+max_total_chars_default = 120000
+max_total_chars_hard = 500000
