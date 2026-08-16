@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import pytest
 
@@ -246,6 +246,7 @@ def test_half_open_allows_only_one_threaded_recovery_probe() -> None:
 
     started = threading.Event()
     release = threading.Event()
+    admission_barrier = threading.Barrier(3)
     probe_count = 0
     probe_count_lock = threading.Lock()
 
@@ -257,16 +258,26 @@ def test_half_open_allows_only_one_threaded_recovery_probe() -> None:
         assert release.wait(timeout=5)
         return "recovered"
 
+    def contend_for_probe() -> str:
+        admission_barrier.wait(timeout=5)
+        return breaker.call(probe)
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(breaker.call, probe)
+        contenders = {
+            executor.submit(contend_for_probe),
+            executor.submit(contend_for_probe),
+        }
+        admission_barrier.wait(timeout=5)
         assert started.wait(timeout=5)
-        second = executor.submit(breaker.call, probe)
+        rejected, admitted = wait(contenders, timeout=5, return_when=FIRST_COMPLETED)
         try:
+            assert len(rejected) == 1
+            assert len(admitted) == 1
             with pytest.raises(RuntimeError, match="probe in flight"):
-                second.result(timeout=5)
+                rejected.pop().result(timeout=5)
         finally:
             release.set()
-        assert first.result(timeout=5) == "recovered"
+        assert admitted.pop().result(timeout=5) == "recovered"
 
     assert probe_count == 1
     assert breaker.state == CircuitState.CLOSED
