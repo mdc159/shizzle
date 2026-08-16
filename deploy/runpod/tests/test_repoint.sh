@@ -10,7 +10,8 @@ mkdir -p "$BIN"
 
 cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
-exit "${MANIFEST_EXIT:-0}"
+[ "${MANIFEST_EXIT:-0}" -eq 0 ] || exit "$MANIFEST_EXIT"
+printf '%s\n' '{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
 STUB
 cat > "$BIN/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -19,13 +20,18 @@ printf '%s\n' "$*" >> "$RUNPOD_LOG"
 url=${!#}
 case "$url" in
   */endpoints/endpoint-old)
-    printf '%s\n' '{"id":"endpoint-old","templateId":"template-old","workersMax":2}' ;;
+    if [ -f "$RUNPOD_STATE" ]; then
+      printf '%s\n' '{"id":"endpoint-old","templateId":"template-new","workersMax":4}'
+    else
+      printf '%s\n' '{"id":"endpoint-old","templateId":"template-old","workersMax":2}'
+    fi ;;
   */templates/template-old)
     printf '%s\n' '{"id":"template-old","name":"old","imageName":"old:image","isServerless":true,"containerDiskInGb":10,"volumeInGb":0,"env":{}}' ;;
   */templates)
-    printf '%s\n' '{"id":"template-new","imageName":"ghcr.io/mdc159/shizzle/worker:sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' ;;
+    printf '%s\n' '{"id":"template-new","imageName":"ghcr.io/mdc159/shizzle/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' ;;
   */endpoints/endpoint-old/update)
     [ "${RUNPOD_FAIL:-}" != endpoint ] || exit 22
+    if [ "${RUNPOD_FAIL:-}" = postcommit ]; then touch "$RUNPOD_STATE"; exit 22; fi
     printf '%s\n' '{"id":"endpoint-old","templateId":"template-new","workersMax":4}' ;;
   */templates/template-new)
     exit 0 ;;
@@ -36,7 +42,8 @@ chmod +x "$BIN/docker" "$BIN/curl"
 
 TAG=sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RUNPOD_LOG="$TMP/runpod.log"
-export RUNPOD_LOG
+RUNPOD_STATE="$TMP/runpod.state"
+export RUNPOD_LOG RUNPOD_STATE
 : > "$RUNPOD_LOG"
 
 run_repoint() {
@@ -51,8 +58,15 @@ if run_repoint bad-tag 4 endpoint-old template-old; then
 fi
 test ! -s "$RUNPOD_LOG"
 
+if run_repoint "$TAG" 4 '../endpoint' template-old; then
+  echo "invalid endpoint unexpectedly reached the API" >&2
+  exit 1
+fi
+test ! -s "$RUNPOD_LOG"
+
 run_repoint "$TAG" 4 endpoint-old template-old > "$TMP/result.json"
 jq -e '.templateId == "template-new" and .workersMax == 4' "$TMP/result.json" >/dev/null
+grep -F 'ghcr.io/mdc159/shizzle/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$TMP/result.json"
 grep -F '/templates' "$RUNPOD_LOG"
 grep -F '/endpoints/endpoint-old/update' "$RUNPOD_LOG"
 if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
@@ -68,5 +82,18 @@ if run_repoint "$TAG" 4 endpoint-old template-old; then
 fi
 grep -F -- '-X DELETE' "$RUNPOD_LOG"
 grep -F '/templates/template-new' "$RUNPOD_LOG"
+
+: > "$RUNPOD_LOG"
+rm -f "$RUNPOD_STATE"
+RUNPOD_FAIL=postcommit
+if run_repoint "$TAG" 4 endpoint-old template-old; then
+  echo "lost response unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -F '/endpoints/endpoint-old' "$RUNPOD_LOG"
+if grep -F -- '-X DELETE' "$RUNPOD_LOG"; then
+  echo "ambiguous committed update deleted the bound template" >&2
+  exit 1
+fi
 
 printf 'RunPod repoint transaction scenarios passed\n'

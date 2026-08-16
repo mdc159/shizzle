@@ -193,11 +193,12 @@ explicit down_revision (F1); additive-only changes unless the author
 explicitly signs off on a destructive or rewriting migration — if you see a
 drop/rewrite, ask for that sign-off in review. Every upgrade needs a paired,
 real (non no-op) downgrade (F1). The DSN comes from DATABASE_URL and
-target_metadata is Base.metadata (F2). Only the explicit deploy transaction
-runs alembic upgrade head from the api image after recording the rollback
-revision (F3); long-running api and orchestrator services never migrate. The
-migration itself is under test via the contract suite's real `alembic upgrade
-head` subprocess (F4) — flag any test fixture that uses create_all.
+target_metadata is Base.metadata (F2). Only the explicit production deploy
+transaction migrates the production database from the api image after recording
+the rollback revision (F3); long-running api and orchestrator services never
+migrate. Isolated contract databases may run alembic upgrade head. The migration
+itself is under test via the contract suite's real `alembic upgrade head`
+subprocess (F4) — flag any test fixture that uses create_all.
 ```
 
 ```text

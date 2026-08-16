@@ -423,9 +423,10 @@ revision id, explicit `down_revision`, and a paired real downgrade.
 
 ### F3 — single schema writer
 
-**Invariant:** ONLY the explicit deploy transaction runs `alembic upgrade
-head`, using the api image after a rollback snapshot and prior revision have
-been recorded; the orchestrator and long-running api service never migrate.
+**Invariant:** ONLY the explicit production deploy transaction migrates the
+production database, using the api image after a rollback snapshot and prior
+revision have been recorded; the orchestrator and long-running api service
+never migrate. Isolated contract databases may run `alembic upgrade head`.
 - Where: `deploy/vps/deploy-release.sh`, `deploy/vps/restore-release.sh`
 - Guarded by: `deploy/vps/tests/test_release_transaction.sh`
 - Violation smell: a migration command in a long-running service entrypoint,

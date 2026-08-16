@@ -24,7 +24,7 @@ Production deploys run from the environment-gated
 [deploy-vps workflow](../../.github/workflows/deploy-vps.yml). It publishes an
 digest-pinned API image, ships the player, updates `SHIZZLE_API_IMAGE` in the box's
 `.env`, and checks the public application before succeeding. The host deploy
-path requires `rsync`; `setup.sh` installs it.
+path transfers release assets with `scp` and extracts them with `tar`.
 
 Use the production compose project name explicitly:
 
