@@ -1,0 +1,128 @@
+language: "en-US"
+tone_instructions: >
+  Terse, engineering-grade. Cite invariant IDs from docs/INVARIANTS.md when
+  relevant (e.g. "violates B3"). No praise padding. Advisory only — never
+  imply a change is blocked.
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  # Preserve the free-plan review for one useful intake pass. Later pushes are
+  # batched and Greptile performs the manually triggered final review.
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: false
+    auto_pause_after_reviewed_commits: 1
+  path_filters:
+    - "!**/uv.lock"
+    - "!player/package-lock.json"
+    - "!player/dist/**"
+    - "!deploy/aws/*.rendered.json"
+    - "!**/__pycache__/**"
+  path_instructions:
+    - path: "stemsplit/**"
+      instructions: >
+        RunPod GPU worker for the lossless-stem-v1 interface. Enforce
+        handoff-last ordering (A1): handoff.json must be uploaded only after
+        every stem PUT has returned — flag any code path that writes or renames
+        it earlier. Every dispatch attempt must write beneath its own immutable
+        attempts/<sha256(idempotency_key)> prefix (A6); older workers must never
+        clobber newer receipts. Check S3 atomicity assumptions (A1, A10): every
+        upload carries a locally computed sha256, and the shared progress
+        callback closure is mutated by several transfer-manager threads, so
+        every read-modify-write must hold its lock and progress must stay
+        monotonic (A11). Stems must stay pcm_f32le stereo 44100 with identical
+        sample counts and no per-stem normalization (A3). The flat-module
+        layout (lossless_worker.py, s3_ops.py, etc. as siblings, no package
+        structure) is intentional for the worker image — do not suggest
+        packaging or directory reorganization.
+    - path: "library/src/shizzle_server/orchestrator/**"
+      instructions: >
+        Durable orchestrator stage loop. Enforce the B-series invariants from
+        docs/INVARIANTS.md: lease ownership must be checked inside the locked
+        transaction (B2), and the dispatch reservation must commit before any
+        external RunPod call (B3) — a timeout or 5xx must never trigger a
+        second dispatch; it reconciles the outstanding reservation instead.
+        Poll-failure events dedupe to one row per outage and any other event
+        resets the window (B6). A failed RunPod cancel must never mask the
+        original error — _cancel_best_effort logs and swallows (B7). Park frees
+        the lease without consuming an attempt or appending an event (B9).
+        Every unresolvable error path fails closed (B5, B10) and every stage
+        handler must be idempotent under crash-rerun (B11). Heartbeats are
+        written only on phase change (B8); a RunPod job already marked failed
+        dispatches fresh under a new idempotency key (B12).
+    # Mirrored copy: the instruction below is duplicated verbatim in the
+    # repository.py paste block in docs/AUTOMATION.md §5 — edit both together.
+    - path: "library/src/shizzle_server/db/repository.py"
+      instructions: >
+        Postgres data layer for the orchestrator and publisher. Enforce the
+        data-layer invariants from docs/INVARIANTS.md: job claims use
+        SELECT ... FOR UPDATE SKIP LOCKED and reclaiming an expired foreign
+        lease records a lease_reclaimed event in the same transaction (B1);
+        lease ownership must be verified under row lock (with_for_update)
+        inside the same transaction as every lease-scoped write (B2); the
+        dispatch reservation must be committed by its own transaction before
+        any caller performs the external API call, and duplicate reservations
+        must be blocked (B3); confirmation deliberately requires no lease —
+        key it on the latest reservation so a stale dispatcher cannot
+        overwrite a newer one (B4); legacy dispatch_unconfirmed state must
+        fail closed, blocking redispatch rather than paying twice (B5);
+        worker heartbeats are written only on phase change (B8); park frees
+        the lease without consuming an attempt or appending an event (B9).
+        Publish writes are idempotent: track ids are deterministic uuid5 so
+        crash-reruns converge on one row (C4), and generation activation is a
+        compare-and-swap under with_for_update with the ledger event committed
+        in the same transaction (C5). Job events are append-only and ordered —
+        no UPDATE or DELETE on the events table (F5).
+    - path: "library/src/shizzle_server/publish/**"
+      instructions: >
+        Publication and delivery-profile policy. Enforce the C and D series
+        from docs/INVARIANTS.md: the manifest is the completion marker and is
+        written last, via server-side copy only (C2); published generations are
+        immutable — an existing destination manifest makes the publish a no-op
+        (C1); the format guard (m4a stems, 64 MiB cap, no raw PCM) must run
+        before any promotion (C3); track ids are deterministic uuid5 so reruns
+        converge (C4); generation activation is compare-and-swap with the
+        ledger event in the same transaction (C5). Duration/bitrate gates must
+        reference the named constants in delivery_profile.py
+        (TRACK_DURATION_TOLERANCE_SEC 0.100, STEM_DURATION_TOLERANCE_SEC 0.080,
+        STEM_INTER_DURATION_TOLERANCE_SEC 0.005, 2.5 Mb/s cap) — flag any magic
+        number or locally redefined tolerance (D1-D4). delivery_profile.py must
+        stay a pure policy module with no boto3/ffmpeg/db imports (D7); at most
+        one common attenuation, never per-stem and never a boost (D3).
+    - path: "library/alembic/**"
+      instructions: >
+        Database migrations. Enforce the F series from docs/INVARIANTS.md: a
+        single linear chain with numeric filename prefix equal to the revision
+        id and an explicit down_revision (F1); additive-only changes unless the
+        author explicitly signs off on a destructive or rewriting migration —
+        if you see a drop/rewrite, ask for that sign-off in review. Every
+        upgrade needs a paired, real (non no-op) downgrade (F1). The DSN comes
+        from DATABASE_URL and target_metadata is Base.metadata (F2). Only the
+        explicit production deploy transaction migrates the production database
+        from the api image after recording the rollback revision (F3);
+        long-running api and orchestrator services never migrate. Isolated
+        contract databases may run alembic upgrade head. The migration itself
+        is under test via the contract suite's real `alembic upgrade head`
+        subprocess (F4) — flag any test fixture that uses create_all.
+    - path: ".github/workflows/**"
+      instructions: >
+        CI/CD workflows. Build tags must be sha-pinned and deployments must use
+        the registry digest; flag latest/vN tags, tag-only deploys, or
+        hand-pushed images. Every workflow needs least-privilege permissions and
+        a concurrency group. No secret echoing or StrictHostKeyChecking=no.
+        deploy-vps admits only the current master SHA after successful push CI,
+        rechecks it after the production approval gate, and must roll back both
+        files and the database revision on failure.
+    - path: "player/**"
+      instructions: >
+        Browser player. Light review: correctness and obvious accessibility
+        issues only. No styling bikeshed — do not comment on CSS preferences,
+        formatting, or component organization. Flag real bugs (state races,
+        broken playback logic, unhandled errors) and clear WCAG violations
+        (missing labels, keyboard traps, contrast only when egregious).
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "docs/INVARIANTS.md"

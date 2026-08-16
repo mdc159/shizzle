@@ -1,0 +1,13 @@
+{
+  "files": [
+    {
+      "path": "docs/INVARIANTS.md",
+      "description": "Canonical behavioral and safety invariants for all Shizzle reviews"
+    },
+    {
+      "path": "docs/AUTOMATION.md",
+      "description": "CI, deployment, rollback, and coordinated reviewer operating contract",
+      "scope": [".github/workflows/**", "deploy/**"]
+    }
+  ]
+}

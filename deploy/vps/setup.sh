@@ -23,7 +23,7 @@ apt-get upgrade -y -q \
   -o Dpkg::Options::=--force-confold
 
 log "base packages"
-apt-get install -y -q ca-certificates curl gnupg ufw fail2ban unattended-upgrades
+apt-get install -y -q ca-certificates curl gnupg rsync ufw fail2ban unattended-upgrades
 
 # ---------------------------------------------------------------- unattended-upgrades
 log "unattended-upgrades enabled"

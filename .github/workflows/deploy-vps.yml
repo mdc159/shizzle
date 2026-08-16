@@ -1,0 +1,191 @@
+name: deploy-vps
+
+on:
+  workflow_call:
+    inputs:
+      target_sha:
+        description: Successful master CI commit to deploy
+        required: true
+        type: string
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    name: Verify current master commit
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.verify.outputs.target_sha }}
+    steps:
+      - id: verify
+        name: Admit the current reviewed master commit
+        env:
+          TARGET_SHA: ${{ inputs.target_sha }}
+          GIT_REF: ${{ github.ref }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$GIT_REF" = refs/heads/master ]
+          current=$(gh api "repos/$GH_REPO/commits/master" --jq .sha)
+          [ "$current" = "$TARGET_SHA" ] || {
+            echo "::error::Refusing stale deploy: CI passed $TARGET_SHA but master is $current"
+            exit 1
+          }
+          printf 'target_sha=%s\n' "$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+  build-image:
+    needs: admit
+    uses: ./.github/workflows/api-image.yml
+    with:
+      target_sha: ${{ needs.admit.outputs.target_sha }}
+    permissions:
+      contents: read
+      packages: write # Publish the digest-pinned API image.
+
+  deploy:
+    name: Deploy verified release
+    needs: [admit, build-image]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://shizzle.systems
+    env:
+      TARGET_SHA: ${{ needs.admit.outputs.target_sha }}
+      IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
+    steps:
+      - name: Reconfirm master after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GH_REPO/commits/master" --jq .sha)
+          [ "$current" = "$TARGET_SHA" ] || {
+            echo "::error::Master advanced to $current while deployment awaited approval"
+            exit 1
+          }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.admit.outputs.target_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - name: Build player
+        working-directory: player
+        run: npm ci && npm run build
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+      - name: Ship release
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          tar -C player -czf /tmp/shizzle-player.tar.gz dist
+          ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/prod/incoming && mkdir -p /opt/shizzle/prod/incoming'
+          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.prod.yml deploy/vps/Caddyfile.prod \
+            deploy/vps/deploy-release.sh deploy/vps/restore-release.sh \
+            root@"$VPS_HOST":/opt/shizzle/prod/incoming/
+      - name: Deploy transaction
+        id: deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          # Arguments intentionally expand on the runner.
+          # shellcheck disable=SC2029
+          ssh root@"$VPS_HOST" bash /opt/shizzle/prod/incoming/deploy-release.sh \
+            "$IMAGE_REF" "$TARGET_SHA"
+      - name: Check production health
+        id: health
+        run: |
+          set -o pipefail
+          for attempt in {1..12}; do
+            if curl -fsS https://shizzle.systems/ >/dev/null \
+              && curl -fsS https://shizzle.systems/api/health \
+                | jq -e '.status=="ok" and .db==true and .orchestratorAlive==true' >/dev/null \
+              && [ "$(curl -s -o /dev/null -w '%{http_code}' https://shizzle.systems/cdn/tracks/x)" = 403 ]; then
+              exit 0
+            fi
+            echo "Health check attempt $attempt failed; retrying in 10 seconds"
+            sleep 10
+          done
+          exit 1
+      - name: Restore previous release on failure
+        if: failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          set -o pipefail
+          # If SSH failed before the deploy transaction recorded its target,
+          # no active release was mutated and there is nothing to restore.
+          # TARGET_SHA intentionally expands on the runner.
+          # shellcheck disable=SC2029
+          if ssh root@"$VPS_HOST" "test -f /opt/shizzle/prod/.rollback-release-target && test \"\$(cat /opt/shizzle/prod/.rollback-release-target)\" = '$TARGET_SHA'"; then
+            echo "::warning::Restoring files, image identity, and database revision"
+          else
+            probe_status=$?
+            if [ "$probe_status" -ne 1 ]; then
+              echo "::error::Could not determine whether rollback is required (ssh status $probe_status)"
+              exit "$probe_status"
+            fi
+            echo "::warning::No rollback transaction exists for $TARGET_SHA; the active release was not mutated"
+            exit 0
+          fi
+          # TARGET_SHA intentionally expands on the runner.
+          # shellcheck disable=SC2029
+          ssh root@"$VPS_HOST" bash /opt/shizzle/prod/incoming/restore-release.sh "$TARGET_SHA"
+          for attempt in {1..12}; do
+            if curl -fsS https://shizzle.systems/ >/dev/null \
+              && curl -fsS https://shizzle.systems/api/health \
+                | jq -e '.status=="ok" and .db==true and .orchestratorAlive==true' >/dev/null \
+              && [ "$(curl -s -o /dev/null -w '%{http_code}' https://shizzle.systems/cdn/tracks/x)" = 403 ]; then
+              echo "Previous release restored and verified"
+              exit 0
+            fi
+            echo "Restored-release health check attempt $attempt failed; retrying in 10 seconds"
+            sleep 10
+          done
+          echo "::error::Previous release was restored but failed production health verification"
+          exit 1
+      - name: Finalize successful transaction
+        if: success()
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if ssh root@"$VPS_HOST" 'cd /opt/shizzle/prod && rm -f .rollback-release.tar.gz .rollback-release-target .rollback-db-revision .deploy-phase'; then
+              exit 0
+            fi
+            echo "::warning::Transaction finalization attempt $attempt failed"
+            sleep 5
+          done
+          echo "::error::Production is healthy, but transaction artifacts could not be removed; refusing a successful deployment result"
+          exit 1
+      - name: Retain three API images
+        if: success()
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          ssh root@"$VPS_HOST" bash -s <<'REMOTE' || echo "::warning::Production is healthy, but retained-image cleanup failed"
+          set -euo pipefail
+          docker image ls ghcr.io/mdc159/shizzle/api --format '{{.CreatedAt}} {{.ID}}' \
+            | sort -r | tail -n +4 | awk '{print $NF}' \
+            | while read -r image_id; do
+                docker image rm "$image_id" || true
+              done
+          REMOTE

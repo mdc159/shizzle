@@ -1,0 +1,13 @@
+# Usage:
+# SHIZZLE_API_IMAGE is required because Compose interpolates each file before merging the overlay.
+# SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+# SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml run --rm --no-deps api alembic upgrade head
+# SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
+services:
+  api:
+    image: shizzle-api:local-build
+    build:
+      context: ./library
+      dockerfile: Dockerfile.api
+  orchestrator:
+    image: shizzle-api:local-build

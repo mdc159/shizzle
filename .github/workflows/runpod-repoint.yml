@@ -1,0 +1,50 @@
+name: runpod-repoint
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Worker image tag (sha- followed by the full commit SHA)
+        required: true
+        type: string
+      workers_max:
+        description: Maximum workers
+        default: "0"
+        type: string
+      endpoint_id:
+        description: RunPod endpoint ID
+        default: tevdw8022hs8hn
+        type: string
+      template_id:
+        description: Current template ID to clone before the atomic endpoint update
+        default: vh76gbm3uy
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runpod-repoint
+  cancel-in-progress: false
+
+jobs:
+  repoint:
+    name: Repoint RunPod endpoint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Create dedicated template and update endpoint once
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          WORKERS_MAX: ${{ inputs.workers_max }}
+          ENDPOINT_ID: ${{ inputs.endpoint_id }}
+          TEMPLATE_ID: ${{ inputs.template_id }}
+        run: |
+          bash deploy/runpod/repoint.sh \
+            "$IMAGE_TAG" \
+            "$WORKERS_MAX" \
+            "$ENDPOINT_ID" \
+            "$TEMPLATE_ID"
