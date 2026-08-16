@@ -423,11 +423,13 @@ revision id, explicit `down_revision`, and a paired real downgrade.
 
 ### F3 — single schema writer
 
-**Invariant:** ONLY the api container runs `alembic upgrade head`; the
-orchestrator never migrates.
-- Where: `deploy/vps/compose.prod.yml` (api command)
-- Violation smell: a migration command in any other service definition or
-  entrypoint.
+**Invariant:** ONLY the explicit deploy transaction runs `alembic upgrade
+head`, using the api image after a rollback snapshot and prior revision have
+been recorded; the orchestrator and long-running api service never migrate.
+- Where: `deploy/vps/deploy-release.sh`, `deploy/vps/restore-release.sh`
+- Guarded by: `deploy/vps/tests/test_release_transaction.sh`
+- Violation smell: a migration command in a long-running service entrypoint,
+  or rollback that restores an old image without first downgrading the schema.
 
 ### F4 — the migration itself is under test
 

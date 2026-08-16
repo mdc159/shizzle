@@ -16,21 +16,23 @@ flowchart LR
     AI --> HM
     HM --> M[master]
     M --> WI["worker-image.yml:<br/>ghcr.io/mdc159/shizzle/worker:sha-SHA"]
-    M --> DV["deploy-vps.yml"]
+    M --> CI2["ci.yml push checks"]
+    CI2 --> DV["deploy-vps.yml<br/>workflow_run: success"]
     DV --> BI["build-image job<br/>(reusable api-image.yml)<br/>ghcr.io/mdc159/shizzle/api:sha-SHA"]
     BI --> GATE{"production Environment<br/>approval: mdc159"}
-    GATE --> DEP["deploy to VPS:<br/>SHIZZLE_API_TAG=sha-SHA<br/>docker compose -p shizzle -f compose.prod.yml up -d"]
-    M -. "manual dispatch" .-> RR["runpod-repoint.yml:<br/>endpoint tevdw8022hs8hn,<br/>template vh76gbm3uy"]
+    GATE --> DEP["deploy transaction:<br/>tag@sha256 digest + migration<br/>health or DB+file rollback"]
+    M -. "manual dispatch" .-> RR["runpod-repoint.yml:<br/>clone dedicated template,<br/>bind endpoint once"]
 ```
 
 Every PR must pass the four `ci.yml` jobs (`library`, `stemsplit`, `player`,
 `postgres-contract`) before merge; the AI reviewers are advisory and never
 block. On merge to master, `worker-image.yml` publishes the GPU worker image
-and `deploy-vps.yml` builds the api image (via reusable `api-image.yml`,
-tagged `ghcr.io/mdc159/shizzle/api:sha-<sha>`) and deploys after an explicit
-approval. `runpod-repoint.yml` is manual-only for fleet operations: it takes
-an `image_tag` input, scales `workers_max` (default 0), and repoints endpoint
-`tevdw8022hs8hn` at template `vh76gbm3uy`.
+and successful master CI triggers `deploy-vps.yml`. The reusable
+`api-image.yml` publishes `ghcr.io/mdc159/shizzle/api:sha-<sha>` and passes its
+registry digest to the environment-gated deploy. `runpod-repoint.yml` is
+manual-only: it clones the endpoint's current template with the new image and
+sets the new template plus `workers_max` in one endpoint update. The prior
+template remains available for explicit rollback.
 
 ## 2. Secrets inventory
 
@@ -49,19 +51,22 @@ under `/opt/shizzle/prod` per invariant E3.
 
 **On merge to master:**
 
-1. `deploy-vps.yml` job `build-image` calls reusable `api-image.yml`, which
-   builds and pushes `ghcr.io/mdc159/shizzle/api:sha-<sha>`.
+1. A successful `ci` push run on the current `master` SHA triggers
+   `deploy-vps.yml`; stale or non-push CI results are rejected. Job
+   `build-image` calls reusable `api-image.yml`, which builds and pushes the
+   SHA tag and exposes its registry digest.
 2. Job `deploy` pauses at the GitHub Environment `production` gate until
-   mdc159 approves. It fires on every master push and on manual dispatch.
+   mdc159 approves. The workflow rechecks that `master` still names the same
+   reviewed SHA after approval.
 3. After approval, the deploy SSHes to the VPS (using the pinned host key),
-   sets `SHIZZLE_API_TAG=sha-<sha>` in `/opt/shizzle/prod/.env`, and runs
-   `docker compose -p shizzle -f compose.prod.yml up -d`. The box pulls the
-   image from GHCR — there is no source code on the VPS. The api container is
-   the single schema writer and runs `alembic upgrade head` on start.
+   records the prior files and database revision, sets
+   `SHIZZLE_API_IMAGE=<tag>@<digest>`, validates the staged Compose config,
+   runs `alembic upgrade head` explicitly from the new api image, and starts
+   the services. The box receives no source code.
 
 **Health checks after deploy** — the deploy-vps.yml `Check production health`
 step asserts, retrying up to 12 times at 10 s intervals until all pass: the
-public root returns 200, `/api/health` passes a jq assertion
+public root request succeeds, `/api/health` passes a jq assertion
 (`status=="ok"`, `db==true`, `orchestratorAlive==true`), and `/cdn/tracks/x`
 returns exactly 403 (media requires auth). The broader manual verifications
 in `deploy/vps/README.md` (telemetry endpoint, CloudFront media Range
@@ -69,16 +74,19 @@ behavior) are NOT asserted by the workflow.
 
 **Rollback:**
 
-- Primary: re-run the previous green `deploy-vps` run. It pins the old sha it
-  was built with, so re-running it is idempotent and restores the last known
-  good image.
-- Break-glass: edit `SHIZZLE_API_TAG` in `/opt/shizzle/prod/.env` to a known
-  good sha and run `docker compose -p shizzle -f compose.prod.yml up -d` on
-  the box.
+- Automatic: a deploy or health failure downgrades Alembic to the recorded
+  prior revision before restoring the complete prior file snapshot and image
+  identity. A real downgrade is mandatory under F1.
+- Break-glass: edit `SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a known
+  tag-plus-digest reference and run Compose on the box. Automated deployment
+  refuses an installation with no prior API identity; bootstrap the first
+  release explicitly.
 
 **Local-build fallback:** when GHCR is unreachable or for one-off debugging,
 the `compose.build.yml` overlay builds the api image on the box from a source
-rsync instead of pulling the sha-pinned image. It is a fallback, not the
+copy instead of pulling the digest-pinned image. Set
+`SHIZZLE_API_IMAGE=shizzle-api:local-build`; the overlay points both api and
+orchestrator at that one build. It is a fallback, not the
 normal path — deploys never ship source to the box.
 
 ## 4. Reviewer alignment
@@ -185,21 +193,21 @@ explicit down_revision (F1); additive-only changes unless the author
 explicitly signs off on a destructive or rewriting migration — if you see a
 drop/rewrite, ask for that sign-off in review. Every upgrade needs a paired,
 real (non no-op) downgrade (F1). The DSN comes from DATABASE_URL and
-target_metadata is Base.metadata (F2). Only the api container ever runs
-alembic upgrade head (F3); the migration itself is under test via the contract
-suite's real `alembic upgrade head` subprocess (F4) — flag any test fixture
-that uses create_all.
+target_metadata is Base.metadata (F2). Only the explicit deploy transaction
+runs alembic upgrade head from the api image after recording the rollback
+revision (F3); long-running api and orchestrator services never migrate. The
+migration itself is under test via the contract suite's real `alembic upgrade
+head` subprocess (F4) — flag any test fixture that uses create_all.
 ```
 
 ```text
 Scope: .github/workflows/**
-CI/CD workflows. Image tags must be sha-pinned
-(ghcr.io/mdc159/shizzle/api:sha-<sha> or worker:sha-<sha>) — flag any
-latest/vN tag or hand-pushed image. Every workflow needs least-privilege
-permissions and a concurrency group. No secret echoing in any step, and no
-StrictHostKeyChecking=no anywhere — the deploy pins the host key via
-VPS_SSH_HOST_KEY. deploy-vps deploys only after the production environment
-approval gate; check that gate isn't bypassed.
+CI/CD workflows. Build tags must be sha-pinned and deployments must use the
+registry digest; flag latest/vN tags, tag-only deploys, or hand-pushed images.
+Every workflow needs least-privilege permissions and a concurrency group. No
+secret echoing or StrictHostKeyChecking=no. deploy-vps admits only the current
+master SHA after successful push CI, rechecks it after the production approval
+gate, and must roll back both files and the database revision on failure.
 ```
 
 ```text
@@ -241,7 +249,7 @@ Names to substitute everywhere they appear (workflows, AUTOMATION.md,
 - VPS host + production directory + domain
 - RunPod endpoint id (was `tevdw8022hs8hn`) and template id (was
   `vh76gbm3uy`)
-- Compose image-selection var (was `SHIZZLE_API_TAG`)
+- Compose image-selection var (was `SHIZZLE_API_IMAGE`)
 
 Settings sequence (order matters):
 

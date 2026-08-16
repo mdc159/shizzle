@@ -92,18 +92,20 @@ reviews:
         if you see a drop/rewrite, ask for that sign-off in review. Every
         upgrade needs a paired, real (non no-op) downgrade (F1). The DSN comes
         from DATABASE_URL and target_metadata is Base.metadata (F2). Only the
-        api container ever runs alembic upgrade head (F3); the migration itself
-        is under test via the contract suite's real `alembic upgrade head`
-        subprocess (F4) — flag any test fixture that uses create_all.
+        explicit deploy transaction runs alembic upgrade head from the api
+        image after recording the rollback revision (F3); long-running api and
+        orchestrator services never migrate. The migration itself is under test
+        via the contract suite's real `alembic upgrade head` subprocess (F4) —
+        flag any test fixture that uses create_all.
     - path: ".github/workflows/**"
       instructions: >
-        CI/CD workflows. Image tags must be sha-pinned
-        (ghcr.io/mdc159/shizzle/api:sha-<sha> or worker:sha-<sha>) — flag any
-        latest/vN tag or hand-pushed image. Every workflow needs least-privilege
-        permissions and a concurrency group. No secret echoing in any step,
-        and no StrictHostKeyChecking=no anywhere — the deploy pins the host key
-        via VPS_SSH_HOST_KEY. deploy-vps deploys only after the production
-        environment approval gate; check that gate isn't bypassed.
+        CI/CD workflows. Build tags must be sha-pinned and deployments must use
+        the registry digest; flag latest/vN tags, tag-only deploys, or
+        hand-pushed images. Every workflow needs least-privilege permissions and
+        a concurrency group. No secret echoing or StrictHostKeyChecking=no.
+        deploy-vps admits only the current master SHA after successful push CI,
+        rechecks it after the production approval gate, and must roll back both
+        files and the database revision on failure.
     - path: "player/**"
       instructions: >
         Browser player. Light review: correctness and obvious accessibility

@@ -22,10 +22,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Automation failure-path contracts
+        run: |
+          bash deploy/vps/tests/test_release_transaction.sh
+          bash deploy/runpod/tests/test_repoint.sh
       - run: uv sync --directory library
       - run: uv run --directory library pytest -q -m "not postgres"
       - run: uv run --directory library ruff check .
-      # Pre-existing strict-mode typing debt (23 errors, recorded in PR #1).
+      # Pre-existing strict-mode typing debt, tracked after PR #1.
       # Informational until the debt follow-up lands; then remove this flag.
       - run: uv run --directory library mypy src
         continue-on-error: true
@@ -67,6 +71,12 @@ jobs:
       - run: uv run --directory library pytest -q -m postgres
         env:
           SHIZZLE_TEST_DATABASE_URL: postgresql+asyncpg://shizzle:shizzle@127.0.0.1:5433/shizzle
+      - name: Prove head migration downgrade and re-upgrade
+        env:
+          DATABASE_URL: postgresql+asyncpg://shizzle:shizzle@127.0.0.1:5433/shizzle
+        run: |
+          uv run --directory library alembic downgrade -1
+          uv run --directory library alembic upgrade head
 
   player:
     runs-on: ubuntu-latest

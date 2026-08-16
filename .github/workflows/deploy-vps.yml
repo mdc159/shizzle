@@ -1,9 +1,10 @@
 name: deploy-vps
 
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [master]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,23 +14,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  admit:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.verify.outputs.target_sha }}
+    steps:
+      - id: verify
+        name: Admit the current reviewed master commit
+        env:
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$HEAD_BRANCH" = master ]
+          [ "$EVENT" = push ]
+          current=$(gh api repos/${{ github.repository }}/commits/master --jq .sha)
+          [ "$current" = "$TARGET_SHA" ] || {
+            echo "::error::Refusing stale deploy: CI passed $TARGET_SHA but master is $current"
+            exit 1
+          }
+          printf 'target_sha=%s\n' "$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
   build-image:
+    needs: admit
     uses: ./.github/workflows/api-image.yml
+    with:
+      target_sha: ${{ needs.admit.outputs.target_sha }}
     permissions:
       contents: read
       packages: write
 
   deploy:
-    needs: build-image
+    needs: [admit, build-image]
     runs-on: ubuntu-latest
     environment:
       name: production
       url: https://shizzle.systems
     env:
-      TAG: sha-${{ github.sha }}
+      TARGET_SHA: ${{ needs.admit.outputs.target_sha }}
+      IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
     steps:
+      - name: Reconfirm master after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api repos/${{ github.repository }}/commits/master --jq .sha)
+          [ "$current" = "$TARGET_SHA" ] || {
+            echo "::error::Master advanced to $current while deployment awaited approval"
+            exit 1
+          }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.admit.outputs.target_sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -54,44 +95,18 @@ jobs:
         run: |
           tar -C player -czf /tmp/shizzle-player.tar.gz dist
           ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/prod/incoming && mkdir -p /opt/shizzle/prod/incoming'
-          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.prod.yml deploy/vps/Caddyfile.prod root@"$VPS_HOST":/opt/shizzle/prod/incoming/
-      - name: Deploy
+          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.prod.yml deploy/vps/Caddyfile.prod \
+            deploy/vps/deploy-release.sh deploy/vps/restore-release.sh \
+            root@"$VPS_HOST":/opt/shizzle/prod/incoming/
+      - name: Deploy transaction
         id: deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE'
-          set -euo pipefail
-          umask 077
-          TAG=$1
-          cd /opt/shizzle/prod
-          docker pull "ghcr.io/mdc159/shizzle/api:$TAG"
-          tar -xzf incoming/shizzle-player.tar.gz -C incoming
-          PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' .env | tail -n 1)
-          ROLLBACK_ARCHIVE=.rollback-release.tar.gz
-          ROLLBACK_MARKER=.rollback-release-tag
-          rm -f "$ROLLBACK_MARKER" "$ROLLBACK_MARKER.tmp" "$ROLLBACK_ARCHIVE.tmp"
-          if [ -n "$PREV_TAG" ]; then
-            for required_path in .env compose.prod.yml Caddyfile player; do
-              if [ ! -e "$required_path" ]; then
-                echo "Cannot snapshot previous release: missing $required_path" >&2
-                exit 1
-              fi
-            done
-            tar -czf "$ROLLBACK_ARCHIVE.tmp" -- .env compose.prod.yml Caddyfile player
-            mv "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
-            printf '%s\n' "$TAG" > "$ROLLBACK_MARKER.tmp"
-            mv "$ROLLBACK_MARKER.tmp" "$ROLLBACK_MARKER"
-            echo "Captured complete rollback snapshot for $PREV_TAG"
-          fi
-          install -m 644 incoming/compose.prod.yml ./compose.prod.yml
-          install -m 644 incoming/Caddyfile.prod ./Caddyfile
-          sed -i '/^SHIZZLE_API_TAG=/d' .env
-          echo "SHIZZLE_API_TAG=$TAG" >> .env
-          mkdir -p player
-          rsync -a --delete incoming/dist/ player/
-          docker compose -p shizzle -f compose.prod.yml up -d
-          REMOTE
+          # Arguments intentionally expand on the runner.
+          # shellcheck disable=SC2029
+          ssh root@"$VPS_HOST" bash /opt/shizzle/prod/incoming/deploy-release.sh \
+            "$IMAGE_REF" "$TARGET_SHA"
       - name: Check production health
         id: health
         run: |
@@ -113,47 +128,18 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
           set -o pipefail
-          echo "::warning::Deployment failed; restoring the complete previous release"
-          restored=0
-          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE' && restored=1
-          set -euo pipefail
-          TAG=$1
-          cd /opt/shizzle/prod
-          ROLLBACK_ARCHIVE=.rollback-release.tar.gz
-          ROLLBACK_MARKER=.rollback-release-tag
-          if [ ! -f "$ROLLBACK_ARCHIVE" ] \
-            || [ ! -f "$ROLLBACK_MARKER" ] \
-            || [ "$(cat "$ROLLBACK_MARKER")" != "$TAG" ]; then
-            echo "No rollback snapshot exists for $TAG; this may be the first deployment" >&2
-            exit 2
+          # If SSH failed before the deploy transaction recorded its target,
+          # no active release was mutated and there is nothing to restore.
+          # TARGET_SHA intentionally expands on the runner.
+          # shellcheck disable=SC2029
+          if ! ssh root@"$VPS_HOST" "test -f /opt/shizzle/prod/.rollback-release-target && test \"\$(cat /opt/shizzle/prod/.rollback-release-target)\" = '$TARGET_SHA'"; then
+            echo "::warning::No rollback transaction exists for $TARGET_SHA; the active release was not mutated"
+            exit 0
           fi
-          RESTORE_DIR=$(mktemp -d /opt/shizzle/prod/.restore.XXXXXX)
-          trap 'rm -rf "$RESTORE_DIR"' EXIT
-          tar -xzf "$ROLLBACK_ARCHIVE" -C "$RESTORE_DIR"
-          for required_path in .env compose.prod.yml Caddyfile player; do
-            if [ ! -e "$RESTORE_DIR/$required_path" ]; then
-              echo "Rollback snapshot is incomplete: missing $required_path" >&2
-              exit 1
-            fi
-          done
-          PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' "$RESTORE_DIR/.env" | tail -n 1)
-          rm -rf .env.restore compose.prod.yml.restore Caddyfile.restore player.restore
-          cp -a "$RESTORE_DIR/.env" .env.restore
-          cp -a "$RESTORE_DIR/compose.prod.yml" compose.prod.yml.restore
-          cp -a "$RESTORE_DIR/Caddyfile" Caddyfile.restore
-          mv "$RESTORE_DIR/player" player.restore
-          mv -f .env.restore .env
-          mv -f compose.prod.yml.restore compose.prod.yml
-          mv -f Caddyfile.restore Caddyfile
-          rm -rf player
-          mv player.restore player
-          docker compose -p shizzle -f compose.prod.yml up -d --force-recreate --remove-orphans
-          echo "Restored complete release $PREV_TAG"
-          REMOTE
-          if [ "$restored" -ne 1 ]; then
-            echo "::error::The previous release could not be restored"
-            exit 1
-          fi
+          echo "::warning::Restoring files, image identity, and database revision"
+          # TARGET_SHA intentionally expands on the runner.
+          # shellcheck disable=SC2029
+          ssh root@"$VPS_HOST" bash /opt/shizzle/prod/incoming/restore-release.sh "$TARGET_SHA"
           for attempt in {1..12}; do
             if curl -fsS https://shizzle.systems/ >/dev/null \
               && curl -fsS https://shizzle.systems/api/health \
@@ -167,6 +153,12 @@ jobs:
           done
           echo "::error::Previous release was restored but failed production health verification"
           exit 1
+      - name: Finalize successful transaction
+        if: success()
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          ssh root@"$VPS_HOST" 'cd /opt/shizzle/prod && rm -f .rollback-release.tar.gz .rollback-release-target .rollback-db-revision .deploy-phase'
       - name: Retain three API images
         if: success()
         env:

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE_REF=${1:?usage: deploy-release.sh IMAGE_REF TARGET_SHA}
+TARGET_SHA=${2:?usage: deploy-release.sh IMAGE_REF TARGET_SHA}
+PROD_DIR=${SHIZZLE_PROD_DIR:-/opt/shizzle/prod}
+DOCKER_BIN=${SHIZZLE_DOCKER_BIN:-docker}
+
+case "$PROD_DIR" in
+  ""|/) echo "Refusing unsafe production directory: $PROD_DIR" >&2; exit 2 ;;
+esac
+PROD_DIR=$(readlink -f "$PROD_DIR")
+[[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "TARGET_SHA must be exactly 40 lowercase hexadecimal characters" >&2
+  exit 2
+}
+[[ "$IMAGE_REF" =~ ^ghcr\.io/mdc159/shizzle/api:sha-${TARGET_SHA}@sha256:[0-9a-f]{64}$ ]] || {
+  echo "IMAGE_REF must pin the target SHA tag and a sha256 digest" >&2
+  exit 2
+}
+
+cd "$PROD_DIR"
+umask 077
+for required_path in .env compose.prod.yml Caddyfile player incoming/compose.prod.yml incoming/Caddyfile.prod incoming/shizzle-player.tar.gz; do
+  if [ ! -e "$required_path" ]; then
+    echo "Cannot deploy: missing $required_path" >&2
+    exit 1
+  fi
+done
+
+PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
+PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' .env | tail -n 1)
+if [ -z "$PREV_IMAGE" ] && [ -z "$PREV_TAG" ]; then
+  echo "Refusing automated first deployment: the active release has no recorded API identity" >&2
+  exit 1
+fi
+
+PREV_DB_REV=$(
+  # Variables expand inside the postgres container, not in this shell.
+  # shellcheck disable=SC2016
+  "$DOCKER_BIN" compose -p shizzle -f compose.prod.yml exec -T postgres sh -c \
+    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version"'
+)
+if ! [[ "$PREV_DB_REV" =~ ^[0-9a-f]+$ ]]; then
+  echo "Cannot capture the previous database revision: $PREV_DB_REV" >&2
+  exit 1
+fi
+
+ROLLBACK_ARCHIVE=.rollback-release.tar.gz
+ROLLBACK_TARGET=.rollback-release-target
+ROLLBACK_DB_REV=.rollback-db-revision
+DEPLOY_PHASE=.deploy-phase
+STAGE_DIR=$(mktemp -d "$PROD_DIR/.release-stage.XXXXXX")
+trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_TARGET.tmp" "$ROLLBACK_DB_REV.tmp" "$DEPLOY_PHASE.tmp"' EXIT
+
+tar -czf "$ROLLBACK_ARCHIVE.tmp" -- .env compose.prod.yml Caddyfile player
+printf '%s\n' "$TARGET_SHA" > "$ROLLBACK_TARGET.tmp"
+printf '%s\n' "$PREV_DB_REV" > "$ROLLBACK_DB_REV.tmp"
+printf '%s\n' snapshot-ready > "$DEPLOY_PHASE.tmp"
+mv -f "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
+mv -f "$ROLLBACK_DB_REV.tmp" "$ROLLBACK_DB_REV"
+mv -f "$ROLLBACK_TARGET.tmp" "$ROLLBACK_TARGET"
+mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
+
+"$DOCKER_BIN" pull "$IMAGE_REF"
+tar -xzf incoming/shizzle-player.tar.gz -C "$STAGE_DIR"
+test -d "$STAGE_DIR/dist"
+install -m 600 .env "$STAGE_DIR/.env"
+sed -i '/^SHIZZLE_API_TAG=/d; /^SHIZZLE_API_IMAGE=/d' "$STAGE_DIR/.env"
+printf 'SHIZZLE_API_IMAGE=%s\n' "$IMAGE_REF" >> "$STAGE_DIR/.env"
+install -m 644 incoming/compose.prod.yml "$STAGE_DIR/compose.prod.yml"
+install -m 644 incoming/Caddyfile.prod "$STAGE_DIR/Caddyfile"
+mv "$STAGE_DIR/dist" "$STAGE_DIR/player"
+
+SHIZZLE_API_IMAGE=$IMAGE_REF "$DOCKER_BIN" compose \
+  --env-file "$STAGE_DIR/.env" -p shizzle -f "$STAGE_DIR/compose.prod.yml" config -q
+printf '%s\n' files-activating > "$DEPLOY_PHASE.tmp"
+mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
+mv -f "$STAGE_DIR/.env" .env
+mv -f "$STAGE_DIR/compose.prod.yml" compose.prod.yml
+mv -f "$STAGE_DIR/Caddyfile" Caddyfile
+rm -rf -- player.next
+mv "$STAGE_DIR/player" player.next
+rm -rf -- player
+mv player.next player
+
+printf '%s\n' migration-started > "$DEPLOY_PHASE.tmp"
+mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
+"$DOCKER_BIN" compose -p shizzle -f compose.prod.yml run --rm --no-deps api alembic upgrade head
+printf '%s\n' services-starting > "$DEPLOY_PHASE.tmp"
+mv -f "$DEPLOY_PHASE.tmp" "$DEPLOY_PHASE"
+"$DOCKER_BIN" compose -p shizzle -f compose.prod.yml up -d --remove-orphans
+echo "Activated $IMAGE_REF from database revision $PREV_DB_REV"

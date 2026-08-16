@@ -16,7 +16,7 @@ on:
         default: tevdw8022hs8hn
         type: string
       template_id:
-        description: RunPod template ID
+        description: Current template ID to clone before the atomic endpoint update
         default: vh76gbm3uy
         type: string
 
@@ -25,77 +25,21 @@ permissions:
 
 concurrency:
   group: runpod-repoint
+  cancel-in-progress: false
 
 jobs:
   repoint:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate inputs and image
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          WORKERS_MAX: ${{ inputs.workers_max }}
-        run: |
-          [[ "$IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]] || { echo "::error::image_tag must be sha- followed by 40 lowercase hex characters"; exit 1; }
-          [[ "$WORKERS_MAX" =~ ^[0-9]{1,2}$ ]] || { echo "::error::workers_max must be an integer from 0 to 99"; exit 1; }
-          IMAGE="ghcr.io/mdc159/shizzle/worker:$IMAGE_TAG"
-          docker manifest inspect "$IMAGE" >/dev/null 2>&1 || { echo "::error::Worker image does not exist: $IMAGE"; exit 1; }
-      - name: Verify template exclusivity
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Create dedicated template and update endpoint once
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          ENDPOINT_ID: ${{ inputs.endpoint_id }}
-          TEMPLATE_ID: ${{ inputs.template_id }}
         run: |
-          curl -fsS -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            https://rest.runpod.io/v1/endpoints > endpoints.json
-          matching=$(jq -c --arg template "$TEMPLATE_ID" \
-            '[.[] | select(.templateId == $template)]' endpoints.json)
-          offenders=$(jq -r --arg target "$ENDPOINT_ID" \
-            '[.[] | select(.id != $target) | .id] | join(", ")' <<<"$matching")
-          target_present=$(jq -r --arg target "$ENDPOINT_ID" \
-            'any(.[]; .id == $target)' <<<"$matching")
-          failed=0
-          if [ -n "$offenders" ]; then
-            echo "::error::template $TEMPLATE_ID is shared by endpoints $offenders — dedicate a template per endpoint before repointing"
-            failed=1
-          fi
-          if [ "$target_present" != true ]; then
-            echo "::error::endpoint $ENDPOINT_ID does not reference template $TEMPLATE_ID — select its current template before repointing"
-            failed=1
-          fi
-          exit "$failed"
-      - name: Update template image
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          TEMPLATE_ID: ${{ inputs.template_id }}
-        run: |
-          # The preflight proves this template is exclusive to the target endpoint.
-          curl -fsS -X PATCH "https://rest.runpod.io/v1/templates/$TEMPLATE_ID" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -H 'Content-Type: application/json' \
-            --data "$(jq -nc --arg imageName "ghcr.io/mdc159/shizzle/worker:$IMAGE_TAG" '{imageName: $imageName}')"
-      - name: Update endpoint
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          ENDPOINT_ID: ${{ inputs.endpoint_id }}
-          TEMPLATE_ID: ${{ inputs.template_id }}
-          WORKERS_MAX: ${{ inputs.workers_max }}
-        run: |
-          curl -fsS -X POST "https://rest.runpod.io/v1/endpoints/$ENDPOINT_ID/update" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -H 'Content-Type: application/json' \
-            --data "$(jq -nc --arg templateId "$TEMPLATE_ID" --argjson workersMax "$WORKERS_MAX" \
-              '{templateId: $templateId, workersMax: $workersMax}')"
-      - name: Report configuration
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          ENDPOINT_ID: ${{ inputs.endpoint_id }}
-          TEMPLATE_ID: ${{ inputs.template_id }}
-        run: |
-          curl -fsS -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            "https://rest.runpod.io/v1/endpoints/$ENDPOINT_ID" > endpoint.json
-          curl -fsS -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            "https://rest.runpod.io/v1/templates/$TEMPLATE_ID" > template.json
-          jq -n --slurpfile endpoint endpoint.json --slurpfile template template.json \
-            '{id: $endpoint[0].id, templateId: $endpoint[0].templateId,
-              workersMax: $endpoint[0].workersMax, imageName: $template[0].imageName}'
+          bash deploy/runpod/repoint.sh \
+            "${{ inputs.image_tag }}" \
+            "${{ inputs.workers_max }}" \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.template_id }}"

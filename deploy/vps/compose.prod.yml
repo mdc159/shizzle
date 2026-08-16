@@ -2,7 +2,7 @@
 #
 # Pull-mode deploys run through .github/workflows/deploy-vps.yml. The GHCR API
 # package must be public, or the box must docker login to ghcr.io with a
-# read-only PAT. Compose reads ${SHIZZLE_API_TAG} from the project-directory
+# read-only PAT. Compose reads ${SHIZZLE_API_IMAGE} from the project-directory
 # .env file, not from service env_file entries. For a local source build, use
 # the compose.build.yml overlay documented in README.md.
 #
@@ -12,7 +12,7 @@
 # Deploy layout:
 #   /opt/shizzle/prod/player/       built player/dist (served by Caddy)
 #   /opt/shizzle/prod/Caddyfile     production Caddyfile
-#   /opt/shizzle/prod/.env          secrets plus SHIZZLE_API_TAG
+#   /opt/shizzle/prod/.env          secrets plus SHIZZLE_API_IMAGE
 #   /opt/shizzle/prod/secrets/      cloudfront private key (never committed)
 #
 # Media (private S3 karaoke-pimpshizzle) is delivered through CloudFront with
@@ -43,10 +43,10 @@ services:
     restart: unless-stopped
 
   api:
-    image: ghcr.io/mdc159/shizzle/api:${SHIZZLE_API_TAG:?set SHIZZLE_API_TAG in .env}
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
     container_name: shizzle-api
-    # Single schema writer: migrate, then serve.
-    command: sh -c "alembic upgrade head && uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001"
+    # Migrations run as an explicit deploy transaction before services start.
+    command: uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001
     env_file:
       - path: ./.env
         required: true
@@ -66,7 +66,7 @@ services:
     restart: unless-stopped
 
   orchestrator:
-    image: ghcr.io/mdc159/shizzle/api:${SHIZZLE_API_TAG:?set SHIZZLE_API_TAG in .env}
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
     container_name: shizzle-orchestrator
     command: python -m shizzle_server.orchestrator
     env_file:

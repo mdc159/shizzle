@@ -1,8 +1,11 @@
 # Usage:
-# SHIZZLE_API_TAG=local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
-# SHIZZLE_API_TAG=local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
+# SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml build api
+# SHIZZLE_API_IMAGE=shizzle-api:local-build docker compose -p shizzle -f compose.prod.yml -f compose.build.yml up -d
 services:
   api:
+    image: shizzle-api:local-build
     build:
       context: ./library
       dockerfile: Dockerfile.api
+  orchestrator:
+    image: shizzle-api:local-build
