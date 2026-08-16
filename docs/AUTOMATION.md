@@ -59,9 +59,13 @@ under `/opt/shizzle/prod` per invariant E3.
    image from GHCR — there is no source code on the VPS. The api container is
    the single schema writer and runs `alembic upgrade head` on start.
 
-**Health checks after deploy** (see `deploy/vps/README.md`): public root,
-authenticated API, database, orchestrator heartbeat, telemetry endpoint, and
-CloudFront media Range behavior.
+**Health checks after deploy** — the deploy-vps.yml `Check production health`
+step asserts, retrying up to 12 times at 10 s intervals until all pass: the
+public root returns 200, `/api/health` passes a jq assertion
+(`status=="ok"`, `db==true`, `orchestratorAlive==true`), and `/cdn/tracks/x`
+returns exactly 403 (media requires auth). The broader manual verifications
+in `deploy/vps/README.md` (telemetry endpoint, CloudFront media Range
+behavior) are NOT asserted by the workflow.
 
 **Rollback:**
 
@@ -131,20 +135,26 @@ written only on phase change (B8); a RunPod job already marked failed
 dispatches fresh under a new idempotency key (B12).
 ```
 
+<!-- Mirrored copy: duplicates the library/src/shizzle_server/db/repository.py
+     path instruction in .coderabbit.yaml — edit both together. -->
 ```text
 Scope: library/src/shizzle_server/db/repository.py
 Durable orchestrator stage loop. Enforce the B-series invariants from
-docs/INVARIANTS.md: lease ownership must be checked inside the locked
-transaction (B2), and the dispatch reservation must commit before any external
-RunPod call (B3) — a timeout or 5xx must never trigger a second dispatch; it
-reconciles the outstanding reservation instead. Poll-failure events dedupe to
-one row per outage and any other event resets the window (B6). A failed RunPod
-cancel must never mask the original error — _cancel_best_effort logs and
-swallows (B7). Park frees the lease without consuming an attempt or appending
-an event (B9). Every unresolvable error path fails closed (B5, B10) and every
-stage handler must be idempotent under crash-rerun (B11). Heartbeats are
-written only on phase change (B8); a RunPod job already marked failed
-dispatches fresh under a new idempotency key (B12).
+docs/INVARIANTS.md: job claims use SELECT ... FOR UPDATE SKIP LOCKED and
+reclaiming an expired foreign lease records a lease_reclaimed event (B1);
+lease ownership must be checked inside the locked transaction (B2), and the
+dispatch reservation must commit before any external RunPod call (B3) — a
+timeout or 5xx must never trigger a second dispatch; it reconciles the
+outstanding reservation instead. Confirmation deliberately does not require
+the original lease — the latest reservation key must block stale-dispatcher
+overwrite (B4). Poll-failure events dedupe to one row per outage and any
+other event resets the window (B6). A failed RunPod cancel must never mask
+the original error — _cancel_best_effort logs and swallows (B7). Park frees
+the lease without consuming an attempt or appending an event (B9). Every
+unresolvable error path fails closed (B5, B10) and every stage handler must
+be idempotent under crash-rerun (B11). Heartbeats are written only on phase
+change (B8); a RunPod job already marked failed dispatches fresh under a new
+idempotency key (B12).
 ```
 
 ```text
