@@ -1151,6 +1151,34 @@ async def test_cloud_verifying_rejects_source_hash_mismatch(
     assert exc.value.retryable is False
 
 
+async def test_cloud_verifying_rejects_source_object_mismatch(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    ctx.job.input_checksum = "expected"
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(cloud, "download_package", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud,
+        "load_and_verify_package",
+        lambda _path: SimpleNamespace(
+            handoff={
+                "source": {
+                    "sha256": "expected",
+                    "object_key": "sources/different/source.mp4",
+                },
+                "separation": {"sample_count": 44100},
+            },
+            duration_seconds=1.0,
+        ),
+    )
+
+    with pytest.raises(StageError) as exc:
+        await cloud.cloud_verifying(ctx)
+    assert exc.value.code is ErrorCode.CHECKSUM_MISMATCH
+    assert exc.value.retryable is False
+
+
 async def test_cloud_publish_cleans_job_dir_and_persists_verification(
     settings, job_repo, track_repo, upload_job, monkeypatch
 ):

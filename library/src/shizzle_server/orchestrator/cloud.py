@@ -235,11 +235,18 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             f"package verification failed: {exc}"[:500],
             retryable=False,
         ) from exc
-    source_sha256 = pkg.handoff.get("source", {}).get("sha256")
+    source_info = pkg.handoff.get("source", {})
+    source_sha256 = source_info.get("sha256")
     if ctx.job.input_checksum and source_sha256 != ctx.job.input_checksum:
         raise StageError(
             ErrorCode.CHECKSUM_MISMATCH,
             "worker package source checksum does not match the submitted source",
+            retryable=False,
+        )
+    if source_info.get("object_key") != source_key(track_id):
+        raise StageError(
+            ErrorCode.CHECKSUM_MISMATCH,
+            "worker package source object does not match the submitted source",
             retryable=False,
         )
     sep = pkg.handoff.get("separation", {})
