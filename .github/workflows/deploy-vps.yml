@@ -56,15 +56,20 @@ jobs:
           ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/prod/incoming && mkdir -p /opt/shizzle/prod/incoming'
           scp /tmp/shizzle-player.tar.gz deploy/vps/compose.prod.yml deploy/vps/Caddyfile.prod root@"$VPS_HOST":/opt/shizzle/prod/incoming/
       - name: Deploy
+        id: deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE'
+          set -o pipefail
+          status=0
+          ssh root@"$VPS_HOST" bash -s -- "$TAG" <<'REMOTE' | tee /tmp/deploy-output || status=${PIPESTATUS[0]}
           set -euo pipefail
           TAG=$1
           cd /opt/shizzle/prod
           docker pull "ghcr.io/mdc159/shizzle/api:$TAG"
           tar -xzf incoming/shizzle-player.tar.gz -C incoming
+          PREV_TAG=$(grep -oP '(?<=^SHIZZLE_API_TAG=).*' .env || echo '')
+          trap 'printf "PREV_TAG=%s\n" "$PREV_TAG"' EXIT
           install -m 644 incoming/compose.prod.yml ./compose.prod.yml
           install -m 644 incoming/Caddyfile.prod ./Caddyfile
           sed -i '/^SHIZZLE_API_TAG=/d' .env
@@ -73,6 +78,9 @@ jobs:
           rsync -a --delete incoming/dist/ player/
           docker compose -p shizzle -f compose.prod.yml up -d
           REMOTE
+          prev_tag=$(grep '^PREV_TAG=' /tmp/deploy-output | tail -n 1 | cut -d= -f2- || true)
+          printf 'prev_tag=%s\n' "$prev_tag" >> "$GITHUB_OUTPUT"
+          exit "$status"
       - name: Check production health
         run: |
           set -o pipefail
@@ -87,6 +95,25 @@ jobs:
             sleep 10
           done
           exit 1
+      - name: Revert on failed health
+        if: failure()
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          PREV_TAG: ${{ steps.deploy.outputs.prev_tag }}
+        run: |
+          if [ -z "$PREV_TAG" ]; then
+            echo "::notice::No previous API tag was captured; skipping first-deploy revert"
+            exit 0
+          fi
+          echo "::warning::Reverting API and orchestrator to $PREV_TAG. Player assets, Caddyfile, and compose.prod.yml remain from the failed release."
+          ssh root@"$VPS_HOST" bash -s -- "$PREV_TAG" <<'REMOTE'
+          set -euo pipefail
+          PREV_TAG=$1
+          cd /opt/shizzle/prod
+          sed -i '/^SHIZZLE_API_TAG=/d' .env
+          echo "SHIZZLE_API_TAG=$PREV_TAG" >> .env
+          docker compose -p shizzle -f compose.prod.yml up -d
+          REMOTE
       - name: Retain three API images
         if: success()
         env:
