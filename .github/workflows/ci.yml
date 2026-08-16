@@ -2,8 +2,16 @@ name: ci
 
 on:
   push:
+    branches: [master]
   pull_request:
     branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   library:
@@ -26,6 +34,30 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --directory stemsplit
       - run: uv run --directory stemsplit pytest -q
+      - run: uv run --directory stemsplit ruff check .
+
+  postgres-contract:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shizzle
+          POSTGRES_PASSWORD: shizzle
+          POSTGRES_DB: shizzle
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --directory library
+      - run: uv run --directory library pytest -q -m postgres
+        env:
+          SHIZZLE_TEST_DATABASE_URL: postgresql+asyncpg://shizzle:shizzle@127.0.0.1:5433/shizzle
 
   player:
     runs-on: ubuntu-latest
