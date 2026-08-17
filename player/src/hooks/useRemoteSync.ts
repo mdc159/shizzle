@@ -122,6 +122,10 @@ export function useRemoteSync(role: 'player' | 'remote') {
     let reconnectDelay = RECONNECT_BASE_MS;
     let reconnectTimer: number | undefined;
     let publishTimer: number | undefined;
+    // A remote is receive-only until it has this connection's first
+    // authoritative snapshot; commands computed from rehydrated or
+    // pre-disconnect local state must never reach the player.
+    let synced = false;
     const pending = new Map<string, RemoteMessage>();
 
     const send = (msg: RemoteMessage): boolean => {
@@ -198,9 +202,16 @@ export function useRemoteSync(role: 'player' | 'remote') {
       socket.onopen = () => {
         reconnectDelay = RECONNECT_BASE_MS;
         setConnected(true);
-        if (role === 'player') send(snapshot());
-        else send({ type: 'sync-request' });
-        flushPending();
+        if (role === 'player') {
+          send(snapshot());
+          flushPending();
+        } else {
+          // Drop anything queued before/while disconnected — it is stale
+          // relative to the player's authoritative state — and stay
+          // receive-only until the snapshot answers the sync request.
+          pending.clear();
+          send({ type: 'sync-request' });
+        }
       };
 
       socket.onmessage = (event) => {
@@ -215,10 +226,14 @@ export function useRemoteSync(role: 'player' | 'remote') {
             // Coalesce fader bursts to the same cadence as local publishes.
             queue('state', snapshot());
           }
-        } else if (msg.type === 'state') applyState(msg);
+        } else if (msg.type === 'state') {
+          synced = true;
+          applyState(msg);
+        }
       };
 
       socket.onclose = () => {
+        synced = false;
         setConnected(false);
         socketRef.current = null;
         if (!disposed) {
@@ -251,6 +266,9 @@ export function useRemoteSync(role: 'player' | 'remote') {
         }
         return;
       }
+
+      // Receive-only until the first authoritative snapshot this connection.
+      if (!synced) return;
 
       (Object.keys(state.stemGains) as StemId[]).forEach((stem) => {
         if (state.stemGains[stem] !== before.stemGains[stem]) {

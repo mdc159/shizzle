@@ -75,13 +75,11 @@ test('remote page publishes commands and applies state snapshots', async ({ page
     return sockets[sockets.length - 1]?.url;
   })).toMatch(/\/api\/remote\/ws$/);
 
-  // Touching a control publishes the matching command frame.
+  // Before the first authoritative snapshot the remote is receive-only:
+  // touching a control must NOT publish a command (the stale-command race).
   await page.getByRole('button', { name: 'vocals mute' }).click();
-  await expect
-    .poll(async () => (await sentFrames(page)).some(
-      (f) => f.type === 'mute' && f.stem === 'vocals' && f.on === true
-    ), { timeout: 5_000 })
-    .toBe(true);
+  await page.waitForTimeout(500);
+  expect((await sentFrames(page)).filter((f) => f.type === 'mute')).toHaveLength(0);
 
   // An inbound state snapshot updates the surface (track title from player).
   await page.evaluate(() =>
@@ -98,6 +96,14 @@ test('remote page publishes commands and applies state snapshots', async ({ page
   );
   await expect(page.getByTestId('remote-track')).toHaveText('Playing: Test Anthem', { timeout: 5_000 });
 
+  // Synced now — touching a control publishes the matching command frame.
+  await page.getByRole('button', { name: 'vocals mute' }).click();
+  await expect
+    .poll(async () => (await sentFrames(page)).some(
+      (f) => f.type === 'mute' && f.stem === 'vocals' && f.on === true
+    ), { timeout: 5_000 })
+    .toBe(true);
+
   // State maps must contain exactly the known stems.
   await page.evaluate(() =>
     (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
@@ -113,14 +119,51 @@ test('remote page publishes commands and applies state snapshots', async ({ page
   );
   await expect(page.getByTestId('remote-track')).toHaveText('Playing: Test Anthem');
 
-  // A control move made while reconnecting is retained and flushed on open.
+  // A control move made while disconnected is stale by definition: after
+  // reconnect it must be DROPPED, and the remote stays receive-only until a
+  // fresh snapshot arrives.
+  const socketsBefore = await page.evaluate(
+    () => (window as unknown as { __wsUrls: unknown[] }).__wsUrls.length
+  );
   await page.evaluate(() =>
     (window as unknown as { __wsDisconnect: () => void }).__wsDisconnect()
   );
   await page.getByRole('button', { name: 'drums mute' }).click();
+  // Wait until the replacement socket exists and is OPEN.
+  await expect
+    .poll(
+      () =>
+        page.evaluate((n) => {
+          const sockets = (window as unknown as {
+            __wsUrls: Array<{ readyState?: number }>;
+          }).__wsUrls;
+          return sockets.length > n && sockets[sockets.length - 1].readyState === 1;
+        }, socketsBefore),
+      { timeout: 10_000 }
+    )
+    .toBe(true);
+  await page.waitForTimeout(500);
+  expect((await sentFrames(page)).filter(
+    (f) => f.type === 'mute' && f.stem === 'drums'
+  )).toHaveLength(0);
+
+  // Fresh snapshot re-arms publishing; a new move flows.
+  await page.evaluate(() =>
+    (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
+      JSON.stringify({
+        type: 'state',
+        track: 'Test Anthem',
+        gains: { vocals: -6, drums: 0, bass: 0, guitar: 0, piano: 0, shizzle: 0 },
+        mutes: { vocals: true, drums: true, bass: false, guitar: false, piano: false, shizzle: false },
+        solos: { vocals: false, drums: false, bass: false, guitar: false, piano: false, shizzle: false },
+        master: 1,
+      })
+    )
+  );
+  await page.getByRole('button', { name: 'guitar mute' }).click();
   await expect
     .poll(async () => (await sentFrames(page)).some(
-      (f) => f.type === 'mute' && f.stem === 'drums' && f.on === true
+      (f) => f.type === 'mute' && f.stem === 'guitar' && f.on === true
     ), { timeout: 5_000 })
     .toBe(true);
 });
