@@ -50,12 +50,17 @@ class RemoteHub:
             targets = [c for c in self._clients if c is not sender]
 
         async def send(client: WebSocket) -> None:
-            # A dead/slow peer is reaped by its own handler; never let it
-            # serialize or indefinitely block fan-out to healthy peers.
-            with contextlib.suppress(Exception):
+            # Never let a dead/slow peer serialize or indefinitely block
+            # fan-out to healthy peers. Reap it here because a peer that still
+            # reads frames may never make its receive handler disconnect.
+            try:
                 await asyncio.wait_for(
                     client.send_text(text), timeout=SEND_TIMEOUT_SECONDS
                 )
+            except Exception:
+                await self.leave(client)
+                with contextlib.suppress(Exception):
+                    await client.close(code=1013, reason="Slow or unavailable peer")
 
         await asyncio.gather(*(send(client) for client in targets))
 

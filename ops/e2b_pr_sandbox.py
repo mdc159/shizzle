@@ -656,7 +656,9 @@ def command_harvest(args: argparse.Namespace) -> None:
                 ),
                 (
                     f"git -C {shlex.quote(checkout)} merge-base --is-ancestor "
-                    f"{shlex.quote(head_sha)} HEAD"
+                    f"{shlex.quote(head_sha)} HEAD || "
+                    "{ echo 'checkout does not descend from the recorded PR head' "
+                    ">&2; exit 3; }"
                 ),
                 f"git -C {shlex.quote(checkout)} rev-parse HEAD",
             ]

@@ -8,7 +8,8 @@ for command in git gh uv; do
   }
 done
 
-test -n "${E2B_API_KEY//[[:space:]]/}" || {
+e2b_api_key="${E2B_API_KEY:-}"
+test -n "${e2b_api_key//[[:space:]]/}" || {
   printf 'E2B_API_KEY is missing from this host process. See ENVIRONMENT.md.\n' >&2
   exit 1
 }

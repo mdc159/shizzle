@@ -144,10 +144,16 @@ class RenderGoalTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 renderer.render(args)
 
-            args = self.args(Path(temporary) / "goal-secret")
-            args.setup_command = ["API_TOKEN=literal uv sync"]
-            with self.assertRaises(SystemExit):
-                renderer.render(args)
+            for index, command in enumerate([
+                "API_TOKEN=literal uv sync",
+                "true;TOKEN=literal",
+                'echo "PASSWORD=literal"',
+            ]):
+                with self.subTest(command=command):
+                    args = self.args(Path(temporary) / f"goal-secret-{index}")
+                    args.setup_command = [command]
+                    with self.assertRaises(SystemExit):
+                        renderer.render(args)
 
     def test_primary_reviewer_is_json_escaped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

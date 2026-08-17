@@ -96,11 +96,11 @@ Commit all intended changes inside the writer sandbox, then run:
 uv run ops/e2b_pr_sandbox.py harvest RUN_ID
 ```
 
-Harvest refuses dirty worktrees and runs without a commit beyond the recorded
-PR head. It downloads a Git bundle, verifies it locally, and imports its head at
+Harvest requires a clean writer commit that descends from the recorded PR head.
+It downloads a Git bundle, verifies it locally, and imports its head at
 `refs/sandbox/e2b/<run-id>`. It does not alter the current branch, index, or
-worktree. Inspect the ref and tests, then use the controller's argument-safe
-host push:
+worktree, and it does not create commits. Inspect the ref and tests, then use
+the controller's argument-safe host push:
 
 ```powershell
 uv run ops/e2b_pr_sandbox.py push RUN_ID

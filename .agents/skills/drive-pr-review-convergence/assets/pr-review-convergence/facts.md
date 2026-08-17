@@ -6,8 +6,8 @@
   CI checks, and configured reviewer state; do not rely on conversation comments
   alone.
 - Normalize findings by stable provider identifier and assign exactly one of:
-  `fixed`, `stale/already-fixed`, `not-reproducible`, `false-positive`,
-  `duplicate`, `deferred-follow-up`, or `blocked`.
+  `fixed`, `stale/already-fixed`, `not reproducible`, `false positive`,
+  `duplicate`, `deferred follow-up`, or `blocked`.
 - Independently review the whole diff and affected boundaries; bots do not set
   the completeness boundary.
 - There is at most one writer. Readers receive the same authoritative candidate

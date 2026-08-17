@@ -21,7 +21,7 @@ RUNTIME_FILES = {
 TOKEN_RE = re.compile(r"\{\{[^{}]+\}\}")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?:^|\s)[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*\s*="
+    r"(?i)(?<![A-Z0-9_])[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*\s*="
 )
 
 

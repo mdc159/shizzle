@@ -171,6 +171,21 @@ def host_command(
         raise ControllerError(f"host command failed ({args[0]}): {detail}") from exc
 
 
+def bundle_has_prerequisites(bundle_path: Path) -> bool:
+    """Return whether a Git bundle header declares prerequisite commits."""
+    with bundle_path.open("rb") as stream:
+        signature = stream.readline()
+        if not signature.startswith(b"# v") or b" git bundle" not in signature:
+            raise ControllerError("source bundle has an invalid header")
+        for raw_line in stream:
+            line = raw_line.rstrip(b"\r\n")
+            if not line:
+                return False
+            if line.startswith(b"-"):
+                return True
+    raise ControllerError("source bundle header is incomplete")
+
+
 def resolve_pull_request(repo: str, pr_number: int) -> dict[str, Any]:
     validate_repo(repo)
     result = host_command(["gh", "api", f"repos/{repo}/pulls/{pr_number}"])
@@ -298,8 +313,14 @@ def provision(
                 "source bundle must advertise exactly one head ref"
             )
         bundled_sha, _, bundled_ref = head_lines[0].partition(" ")
-        if bundled_sha != pull["head_sha"] or not bundled_ref.startswith("refs/"):
+        if bundled_sha != pull["head_sha"] or not bundled_ref.startswith(
+            "refs/heads/"
+        ):
             raise ControllerError("source bundle head does not exactly match the PR head")
+        if bundle_has_prerequisites(bundle_path):
+            raise ControllerError(
+                "source bundle must be self-contained and declare no prerequisites"
+            )
         if host_command(
             ["git", "status", "--porcelain"], cwd=resolved_repo_root
         ).stdout.strip():
@@ -690,7 +711,9 @@ def command_harvest(args: argparse.Namespace) -> None:
                 ),
                 (
                     f"git -C {shlex.quote(checkout)} merge-base --is-ancestor "
-                    f"{shlex.quote(head_sha)} HEAD"
+                    f"{shlex.quote(head_sha)} HEAD || "
+                    "{ echo 'checkout does not descend from the recorded PR head' "
+                    ">&2; exit 3; }"
                 ),
                 f"git -C {shlex.quote(checkout)} rev-parse HEAD",
             ]

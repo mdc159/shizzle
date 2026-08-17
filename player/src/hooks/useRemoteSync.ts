@@ -56,15 +56,19 @@ const isStem = (value: unknown): value is StemId =>
 const isFiniteNumber = (value: unknown, min: number, max: number): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
 
+const hasExactStemKeys = (value: unknown): value is Record<StemId, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const keys = Object.keys(value);
+  return keys.length === STEMS.length && keys.every(isStem);
+};
+
 const isBooleanMap = (value: unknown): value is Record<StemId, boolean> =>
-  typeof value === 'object' && value !== null &&
-  STEMS.every((stem) => typeof (value as Record<string, unknown>)[stem] === 'boolean');
+  hasExactStemKeys(value) &&
+  STEMS.every((stem) => typeof value[stem] === 'boolean');
 
 const isGainMap = (value: unknown): value is Record<StemId, number> =>
-  typeof value === 'object' && value !== null &&
-  STEMS.every((stem) => isFiniteNumber(
-    (value as Record<string, unknown>)[stem], -60, 12
-  ));
+  hasExactStemKeys(value) &&
+  STEMS.every((stem) => isFiniteNumber(value[stem], -60, 12));
 
 function parseMessage(data: unknown): RemoteMessage | null {
   if (typeof data !== 'string') return null;
@@ -208,7 +212,8 @@ export function useRemoteSync(role: 'player' | 'remote') {
             applyCommand(msg);
             // The player is authoritative. Re-publish after every accepted
             // remote command so all other remotes converge on the result.
-            send(snapshot());
+            // Coalesce fader bursts to the same cadence as local publishes.
+            queue('state', snapshot());
           }
         } else if (msg.type === 'state') applyState(msg);
       };

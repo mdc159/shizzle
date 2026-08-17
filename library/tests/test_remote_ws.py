@@ -93,12 +93,16 @@ async def test_slow_peer_does_not_block_healthy_peer(monkeypatch):
     class Peer:
         def __init__(self, blocked: bool = False) -> None:
             self.blocked = blocked
+            self.closed = False
             self.messages: list[str] = []
 
         async def send_text(self, text: str) -> None:
             if self.blocked:
                 await asyncio.Event().wait()
             self.messages.append(text)
+
+        async def close(self, **_kwargs) -> None:
+            self.closed = True
 
     monkeypatch.setattr(remote, "SEND_TIMEOUT_SECONDS", 0.01)
     hub = remote.RemoteHub()
@@ -113,3 +117,10 @@ async def test_slow_peer_does_not_block_healthy_peer(monkeypatch):
 
     assert healthy.messages == ['{"type":"master","value":0.5}']
     assert stuck.messages == []
+    assert stuck.closed
+
+    await hub.broadcast(sender, '{"type":"master","value":0.6}')  # type: ignore[arg-type]
+    assert healthy.messages == [
+        '{"type":"master","value":0.5}',
+        '{"type":"master","value":0.6}',
+    ]

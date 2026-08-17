@@ -409,6 +409,65 @@ class ControllerUnitTests(unittest.TestCase):
                     str(setup), False, str(bundle), str(source_repo)
                 )
 
+    def test_private_bundle_header_rejects_prerequisites(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp) / "source.bundle"
+            bundle.write_bytes(
+                b"# v2 git bundle\n"
+                + b"-"
+                + b"a" * 40
+                + b" prerequisite\n"
+                + b"b" * 40
+                + b" refs/heads/feature\n\n"
+            )
+            self.assertTrue(skill_controller.bundle_has_prerequisites(bundle))
+
+            bundle.write_bytes(
+                b"# v2 git bundle\n"
+                + b"b" * 40
+                + b" refs/heads/feature\n\n"
+            )
+            self.assertFalse(skill_controller.bundle_has_prerequisites(bundle))
+
+    def test_private_bundle_rejects_non_branch_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            setup = root / "setup.sh"
+            setup.write_text("#!/bin/sh\n", encoding="utf-8")
+            bundle = root / "source.bundle"
+            bundle.write_bytes(b"not uploaded")
+            source_repo = root / "repo"
+            (source_repo / ".git").mkdir(parents=True)
+            pull = {
+                "url": "https://github.com/owner/repo/pull/7",
+                "repo": "owner/repo",
+                "pr_number": 7,
+                "base_ref": "main",
+                "base_sha": "a" * 40,
+                "head_repo": "owner/repo",
+                "head_ref": "feature",
+                "head_sha": "b" * 40,
+                "state": "open",
+            }
+            with (
+                patch.object(skill_controller, "resolve_pull_request", return_value=pull),
+                patch.object(skill_controller, "ensure_writer_available"),
+                patch.object(
+                    skill_controller,
+                    "host_command",
+                    return_value=SimpleNamespace(
+                        stdout=f"{'b' * 40} refs/tags/feature\n"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    skill_controller.ControllerError, "exactly match"
+                ),
+            ):
+                skill_controller.provision(
+                    "owner/repo", 7, "writer", "template", 60,
+                    str(setup), False, str(bundle), str(source_repo)
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

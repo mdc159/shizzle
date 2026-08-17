@@ -98,6 +98,21 @@ test('remote page publishes commands and applies state snapshots', async ({ page
   );
   await expect(page.getByTestId('remote-track')).toHaveText('Playing: Test Anthem', { timeout: 5_000 });
 
+  // State maps must contain exactly the known stems.
+  await page.evaluate(() =>
+    (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
+      JSON.stringify({
+        type: 'state',
+        track: 'Bogus Track',
+        gains: { vocals: -6, drums: 0, bass: 0, guitar: 0, piano: 0, shizzle: 0, unknown: 0 },
+        mutes: { vocals: false, drums: false, bass: false, guitar: false, piano: false, shizzle: false },
+        solos: { vocals: false, drums: false, bass: false, guitar: false, piano: false, shizzle: false },
+        master: 1,
+      })
+    )
+  );
+  await expect(page.getByTestId('remote-track')).toHaveText('Playing: Test Anthem');
+
   // A control move made while reconnecting is retained and flushed on open.
   await page.evaluate(() =>
     (window as unknown as { __wsDisconnect: () => void }).__wsDisconnect()
