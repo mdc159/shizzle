@@ -1,5 +1,11 @@
 # Self-Contained PR Review Convergence Package
 
+This directory is the renderer's source template when it lives under the
+skill's `assets/` tree. Do not run bootstrap there: first run
+`scripts/render_pr_review_goal.py`. In the renderer's output directory this
+same README accompanies the generated `tools/` directory and
+`package-manifest.json`, and the commands below are runnable.
+
 This rendered directory is the complete host-side package for driving one
 public GitHub pull request through a bounded review-and-repair loop. It includes
 the goal, acceptance contract, reviewer policy, E2B controller, E2B template

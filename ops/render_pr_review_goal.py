@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,9 @@ RUNTIME_FILES = {
 }
 TOKEN_RE = re.compile(r"\{\{[^{}]+\}\}")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?:^|\s)[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*\s*="
+)
 
 
 def csv(values: list[str]) -> str:
@@ -32,6 +36,8 @@ def validate(args: argparse.Namespace) -> None:
     expected_prefix = f"/{args.repo}/pull/"
     if parsed.scheme != "https" or parsed.netloc != "github.com":
         raise SystemExit("--pr-url must be an https://github.com pull-request URL")
+    if parsed.query or parsed.fragment:
+        raise SystemExit("--pr-url must not contain a query string or fragment")
     if not parsed.path.startswith(expected_prefix):
         raise SystemExit("--pr-url does not match --repo")
     suffix = parsed.path.removeprefix(expected_prefix).strip("/")
@@ -49,6 +55,17 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit("provide at least one --validation")
     if not args.setup_command:
         raise SystemExit("provide at least one --setup-command")
+    repeated = {
+        "--required-check": args.required_check,
+        "--reviewer": args.reviewer,
+        "--validation": args.validation,
+        "--setup-command": args.setup_command,
+    }
+    for option, values in repeated.items():
+        if any(not value.strip() or "\n" in value or "\r" in value for value in values):
+            raise SystemExit(f"{option} values must be non-blank single lines")
+    if any(SECRET_ASSIGNMENT_RE.search(command) for command in args.setup_command):
+        raise SystemExit("--setup-command must not contain literal credential assignments")
     if args.max_iterations < 1:
         raise SystemExit("--max-iterations must be positive")
     if args.quiet_window_minutes < 1:
@@ -57,18 +74,26 @@ def validate(args: argparse.Namespace) -> None:
 
 def render(args: argparse.Namespace) -> list[Path]:
     validate(args)
-    output = args.output.resolve()
-    if output.exists() and any(output.iterdir()):
-        raise SystemExit(f"refusing non-empty output directory: {output}")
-    output.mkdir(parents=True, exist_ok=True)
+    final_output = args.output.resolve()
+    if final_output.exists() and any(final_output.iterdir()):
+        raise SystemExit(f"refusing non-empty output directory: {final_output}")
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.TemporaryDirectory(
+        prefix=f".{final_output.name}.", dir=final_output.parent
+    )
+    output = Path(temporary.name) / "package"
+    output.mkdir()
+    parsed = urlparse(args.pr_url)
+    pr_number = parsed.path.rstrip("/").rsplit("/", 1)[-1]
     replacements = {
         "{{PR_URL}}": args.pr_url,
-        "{{PR_NUMBER}}": args.pr_url.rstrip("/").rsplit("/", 1)[-1],
+        "{{PR_NUMBER}}": pr_number,
         "{{OWNER/REPO}}": args.repo,
         "{{BASE_BRANCH}}": args.base_branch,
         "{{REQUIRED_CHECKS}}": csv(args.required_check),
         "{{CONFIGURED_REVIEWERS}}": csv(args.reviewer),
         "{{PRIMARY_REVIEWER}}": args.primary_reviewer,
+        "{{PRIMARY_REVIEWER_JSON}}": json.dumps(args.primary_reviewer),
         "{{PRIMARY_REVIEWER_MIN_SCORE}}": str(args.minimum_primary_score),
         "{{ADVISORY_REVIEWERS}}": csv(
             [reviewer for reviewer in args.reviewer if reviewer != args.primary_reviewer]
@@ -95,6 +120,8 @@ def render(args: argparse.Namespace) -> list[Path]:
                     f"unrendered placeholders in {source.name}: {', '.join(unknown)}"
                 )
             destination.write_text(text, encoding="utf-8", newline="\n")
+            if source.suffix == ".sh":
+                destination.chmod(destination.stat().st_mode | 0o111)
         else:
             shutil.copy2(source, destination)
         written.append(destination)
@@ -125,7 +152,12 @@ def render(args: argparse.Namespace) -> list[Path]:
         newline="\n",
     )
     written.append(manifest_path)
-    return written
+    relative_paths = [path.relative_to(output) for path in written]
+    if final_output.exists():
+        final_output.rmdir()
+    output.replace(final_output)
+    temporary.cleanup()
+    return [final_output / path for path in relative_paths]
 
 
 def build_parser() -> argparse.ArgumentParser:

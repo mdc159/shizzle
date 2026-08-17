@@ -32,7 +32,7 @@ call still produces a separate sandbox instance.
 uv run ops/e2b_pr_sandbox.py create --repo mdc159/shizzle --pr 4 --role writer
 uv run ops/e2b_pr_sandbox.py fanout --repo mdc159/shizzle --pr 4 `
   --roles audit-security,audit-workflows,test-regression `
-  --template shizzle-pr-audit-v1
+  --template pr-review-audit-v1
 ```
 
 For another repository, pass its versioned bootstrap script explicitly:
@@ -96,8 +96,8 @@ Commit all intended changes inside the writer sandbox, then run:
 uv run ops/e2b_pr_sandbox.py harvest RUN_ID
 ```
 
-Harvest refuses dirty worktrees and runs without commits. It downloads a Git
-bundle, verifies it locally, and imports its head at
+Harvest refuses dirty worktrees and runs without a commit beyond the recorded
+PR head. It downloads a Git bundle, verifies it locally, and imports its head at
 `refs/sandbox/e2b/<run-id>`. It does not alter the current branch, index, or
 worktree. Inspect the ref and tests, then use the controller's argument-safe
 host push:
@@ -109,8 +109,9 @@ uv run ops/e2b_pr_sandbox.py push RUN_ID
 `push` re-reads the PR, requires its head to equal the head recorded during
 harvest, rejects fork heads, passes one non-force refspec directly to Git, and
 verifies the resulting PR head. Its bounded retries cover provider
-read-after-write lag and never repeat the push. Do not hand-assemble a
-PowerShell refspec.
+read-after-write lag and never repeat the push. If the PR already points to the
+harvested SHA, it performs no push, reports the existing state, and records a
+`reconciled_at` timestamp. Do not hand-assemble a PowerShell refspec.
 
 Permanent destruction is intentionally separate and confirmation-gated:
 

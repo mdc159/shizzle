@@ -31,6 +31,7 @@ const RemoteControls: React.FC = () => {
           </p>
         </div>
         <div
+          role="status"
           className={`flex items-center gap-2 text-sm ${connected ? 'text-green-400' : 'text-red-400'}`}
           data-testid="remote-connection"
         >

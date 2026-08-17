@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from shizzle_server.api.auth import create_device_token
+from shizzle_server.api import remote
+from shizzle_server.api.auth import TOKEN_COOKIE, create_device_token
 from shizzle_server.main import create_app
 
 
@@ -73,8 +77,39 @@ def test_auth_accepts_valid_token(settings):
     token, _ = create_device_token(secured)
     with (
         TestClient(create_app(secured)) as client,
-        client.websocket_connect(f"/api/remote/ws?token={token}") as a,
-        client.websocket_connect(f"/api/remote/ws?token={token}") as b,
+        client.websocket_connect(
+            "/api/remote/ws", headers={"cookie": f"{TOKEN_COOKIE}={token}"}
+        ) as a,
+        client.websocket_connect(
+            "/api/remote/ws", headers={"cookie": f"{TOKEN_COOKIE}={token}"}
+        ) as b,
     ):
         a.send_json({"type": "mix", "stem": "bass", "gainDb": 3.0})
         assert b.receive_json() == {"type": "mix", "stem": "bass", "gainDb": 3.0}
+
+
+@pytest.mark.asyncio
+async def test_slow_peer_does_not_block_healthy_peer(monkeypatch):
+    class Peer:
+        def __init__(self, blocked: bool = False) -> None:
+            self.blocked = blocked
+            self.messages: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            if self.blocked:
+                await asyncio.Event().wait()
+            self.messages.append(text)
+
+    monkeypatch.setattr(remote, "SEND_TIMEOUT_SECONDS", 0.01)
+    hub = remote.RemoteHub()
+    sender = Peer()
+    stuck = Peer(blocked=True)
+    healthy = Peer()
+    await hub.join(sender)  # type: ignore[arg-type]
+    await hub.join(stuck)  # type: ignore[arg-type]
+    await hub.join(healthy)  # type: ignore[arg-type]
+
+    await hub.broadcast(sender, '{"type":"master","value":0.5}')  # type: ignore[arg-type]
+
+    assert healthy.messages == ['{"type":"master","value":0.5}']
+    assert stuck.messages == []

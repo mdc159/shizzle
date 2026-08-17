@@ -29,7 +29,7 @@
     },
     {
       "id": "fact-4",
-      "text": "Each finding receives a recorded disposition: fixed, already fixed or stale, not reproducible, false positive, duplicate, or blocked, with concise evidence.",
+      "text": "Each finding receives a recorded disposition: fixed, stale/already-fixed, not reproducible, false positive, duplicate, deferred follow-up, or blocked, with concise evidence.",
       "accepted": false,
       "removed": false,
       "recommendedAutomatedVerification": true,
@@ -85,7 +85,7 @@
     },
     {
       "id": "fact-11",
-      "text": "Readiness requires two unchanged polls five minutes apart after the last completed review, with no new commits, findings, check failures, or unresolved actionable conversations.",
+      "text": "Readiness requires two unchanged polls one minute apart after the last completed review, with no new commits, findings, check failures, or unresolved actionable conversations.",
       "accepted": false,
       "removed": false,
       "recommendedAutomatedVerification": true,

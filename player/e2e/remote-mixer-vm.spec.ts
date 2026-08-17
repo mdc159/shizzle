@@ -81,9 +81,21 @@ test('remote mute is audible in the playing browser (full stack)', async ({ brow
     }, { timeout: 30_000 })
     .toBe(true);
 
+  // Establish non-default player state before the remote exists. The relay
+  // holds no state, so the later remote must request an authoritative snapshot.
+  await player.keyboard.press('m');
+  await player.getByRole('button', { name: 'drums mute' }).click();
+  await player.keyboard.press('Escape');
+
   // iPad stand-in: log in on /remote, confirm the relay connection.
   await login(remote, '/remote');
   await expect(remote.getByTestId('remote-connection')).toHaveText(/Connected/, {
+    timeout: 15_000,
+  });
+  await expect(remote.getByTestId('remote-track')).toContainText('Black Hole Sun', {
+    timeout: 15_000,
+  });
+  await expect(remote.getByRole('button', { name: 'drums unmute' })).toBeVisible({
     timeout: 15_000,
   });
 

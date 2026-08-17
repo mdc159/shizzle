@@ -55,8 +55,12 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
   const eventRequest = useRef(0);
   const refreshAbort = useRef<{ jobs: AbortController; health: AbortController } | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (refreshAbort.current) return;
+  const refresh = useCallback(async (replaceInFlight = false) => {
+    if (refreshAbort.current) {
+      if (!replaceInFlight) return;
+      refreshAbort.current.jobs.abort();
+      refreshAbort.current.health.abort();
+    }
     const controllers = { jobs: new AbortController(), health: new AbortController() };
     refreshAbort.current = controllers;
     setLoading(true);
@@ -79,7 +83,10 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
       }
       else errors.push(jobsResult.reason instanceof Error ? jobsResult.reason.message : 'Failed to load jobs');
       if (healthResult.status === 'fulfilled') setOrchestratorAlive(healthResult.value.orchestratorAlive);
-      else errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
+      else {
+        setOrchestratorAlive(false);
+        errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
+      }
       setError(errors.length > 0 ? errors.join('; ') : null);
     } finally {
       window.clearTimeout(jobsTimeout);
@@ -135,15 +142,13 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
           <Activity className="h-5 w-5" /> Pipeline
         </h1>
       )}
-      <Button size="icon" variant="ghost" onClick={() => void refresh()} title="Refresh pipeline">
+      <Button size="icon" variant="ghost" onClick={() => void refresh(true)} title="Refresh pipeline">
         <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
       </Button>
     </div>
   );
 
-  const summary = inFlight.length > 0
-    ? `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight`
-    : `0 jobs in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'}`;
+  const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'}`;
 
   return (
     <>

@@ -15,8 +15,10 @@
    any changed deployment, migration, concurrency, security, or state boundary.
 7. Commit in the writer, harvest a verified bundle, inspect the imported host
    ref, reconfirm the unchanged remote head, and push without force.
-8. Reply to each finding with its exact disposition and evidence; resolve only
-   fixed, disproved, duplicate, or explicitly deferred conversations.
+8. Assign exactly one canonical disposition to every finding: fixed,
+   stale/already-fixed, not reproducible, false positive, duplicate, deferred
+   follow-up, or blocked. Reply with evidence; resolve a conversation only when
+   the concern is fixed or disproved, never merely because it was deferred.
 9. After required CI passes, trigger `{{PRIMARY_REVIEWER}}` once on the final
    candidate. Treat `{{ADVISORY_REVIEWERS}}` as non-blocking inputs and never
    wait for their quota. Repeat only for a reproduced P0/P1, up to

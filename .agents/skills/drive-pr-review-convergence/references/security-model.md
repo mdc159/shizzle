@@ -73,9 +73,10 @@ force-push or automatic merge.
 ## Pre-commit audit
 
 ```powershell
-rg -n "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=" .
+rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=" .
 git check-ignore .sandbox/e2b/probe
 ```
 
-The first command must find no credential assignment. Names in prose and code
-that merely test existence are expected.
+The first command must print no file names. Filename-only output avoids logging
+a credential value if an assignment is accidentally present. Names in prose
+and code that merely test existence are expected.

@@ -54,7 +54,7 @@
       "prompt": "What evidence should end the monitoring loop as ready to merge?",
       "description": "The goal needs a quiescence rule so it does not declare victory before asynchronous reviewers finish checking the latest commit.",
       "answerMode": "single-custom",
-      "recommendedAnswer": "Require all required checks green, no actionable unresolved human or bot threads, every finding dispositioned with evidence, reviewers observed on the latest head commit, and two unchanged polls 5 minutes apart after the last completed review. Then report readiness and recommend merge method without merging.",
+      "recommendedAnswer": "Require all required checks green, no actionable unresolved human or bot threads, every finding dispositioned with evidence, reviewers observed on the latest head commit, and two unchanged polls one minute apart after the last completed review. Then report readiness and recommend merge method without merging.",
       "recommendedOptionIds": [
         "verified_quiet"
       ],

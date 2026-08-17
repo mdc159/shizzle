@@ -29,7 +29,7 @@ test('library drawer scrolls to reveal all 27 tracks', async ({ page }) => {
   await page.route('**/api/library', (route) => route.fulfill({ json: { tracks } }));
 
   await page.goto('/');
-  await page.keyboard.press('l');
+  await page.getByRole('button', { name: 'Library' }).click();
 
   const first = page.getByText('Track 1', { exact: true });
   const last = page.getByText('Track 27', { exact: true });

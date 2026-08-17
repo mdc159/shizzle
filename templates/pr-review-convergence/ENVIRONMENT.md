@@ -21,10 +21,10 @@ uses this variable by default: <https://e2b.dev/docs/api-key>.
 
 On Mike's native Windows/Codex Desktop setup, use the Windows **User environment
 variables** UI for `E2B_API_KEY`, then completely restart Codex Desktop so the
-new process inherits it. Verify existence without revealing the value:
+new process inherits it. Verify a non-empty value without revealing it:
 
 ```powershell
-Test-Path Env:E2B_API_KEY
+-not [string]::IsNullOrWhiteSpace($env:E2B_API_KEY)
 ```
 
 For a temporary PowerShell session, assign it interactively without recording
@@ -32,7 +32,7 @@ the value in a repository, shell-history command, task prompt, or log. On
 Linux/WSL/CI, inject it from that environment's secret manager and verify only:
 
 ```bash
-test -n "${E2B_API_KEY:-}"
+test -n "${E2B_API_KEY//[[:space:]]/}"
 ```
 
 Do not put the key in `goal.md`, `review-policy.json`, `setup.sh`, a committed
@@ -81,9 +81,9 @@ Before committing the package:
 
 ```powershell
 git check-ignore .sandbox/e2b/probe
-rg -n "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)=" .
+rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)=" .
 ```
 
 The first command should identify an ignore rule. The second should return no
-assignment containing a credential value. Environment-variable names in this
-documentation are expected and safe.
+file names. Filename-only output prevents an accidental assignment value from
+entering captured logs; environment-variable names in documentation are safe.

@@ -1,11 +1,17 @@
 {
   "schemaVersion": 1,
   "primaryReviewer": {
-    "name": "{{PRIMARY_REVIEWER}}",
+    "name": {{PRIMARY_REVIEWER_JSON}},
     "minimumScore": {{PRIMARY_REVIEWER_MIN_SCORE}},
     "targetScore": 5,
     "blockingSeverities": ["P0", "P1"],
-    "requireFinalCandidateReview": true
+    "requireFinalCandidateReview": true,
+    "blockExplicitDoNotMerge": true
+  },
+  "findings": {
+    "requireEvidenceBackedDispositions": true,
+    "blockRequiredHumanFindings": true,
+    "allowedDispositions": ["fixed", "stale/already-fixed", "not reproducible", "false positive", "duplicate", "deferred follow-up", "blocked"]
   },
   "advisoryReviewers": {{ADVISORY_REVIEWERS_JSON}},
   "advisoryUnavailablePolicy": "record-and-continue",

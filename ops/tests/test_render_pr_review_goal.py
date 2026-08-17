@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,19 +71,43 @@ class RenderGoalTests(unittest.TestCase):
             self.assertNotRegex(rendered, renderer.TOKEN_RE)
             self.assertIn("example/project", rendered)
             self.assertIn("uv run pytest", rendered)
-            self.assertIn("uv sync --frozen", (output / "setup.sh").read_text())
-            policy = json.loads((output / "review-policy.json").read_text())
+            self.assertIn(
+                "uv sync --frozen", (output / "setup.sh").read_text(encoding="utf-8")
+            )
+            policy = json.loads(
+                (output / "review-policy.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(policy["primaryReviewer"]["name"], "greptile")
+            self.assertTrue(policy["primaryReviewer"]["blockExplicitDoNotMerge"])
+            self.assertTrue(policy["findings"]["requireEvidenceBackedDispositions"])
             self.assertEqual(policy["advisoryReviewers"], ["coderabbit"])
             self.assertEqual(policy["repair"]["maxBatches"], 2)
-            manifest = json.loads((output / "package-manifest.json").read_text())
+            manifest = json.loads(
+                (output / "package-manifest.json").read_text(encoding="utf-8")
+            )
             self.assertFalse(manifest["containsSecrets"])
             entries = {item["path"]: item["sha256"] for item in manifest["files"]}
+            self.assertEqual(
+                set(entries),
+                {
+                    path.relative_to(output).as_posix()
+                    for path in written
+                    if path.name != "package-manifest.json"
+                },
+            )
             self.assertEqual(
                 entries["tools/e2b_pr_sandbox.py"],
                 hashlib.sha256(renderer.RUNTIME_FILES["e2b_pr_sandbox.py"].read_bytes()).hexdigest(),
             )
-            self.assertIn("E2B_API_KEY", (output / "ENVIRONMENT.md").read_text())
+            self.assertEqual(
+                entries["goal.md"],
+                hashlib.sha256((output / "goal.md").read_bytes()).hexdigest(),
+            )
+            self.assertTrue((output / "bootstrap.sh").stat().st_mode & stat.S_IXUSR)
+            self.assertTrue((output / "setup.sh").stat().st_mode & stat.S_IXUSR)
+            self.assertIn(
+                "E2B_API_KEY", (output / "ENVIRONMENT.md").read_text(encoding="utf-8")
+            )
             self.assertNotIn("E2B_API_KEY=", rendered)
 
     def test_refuses_nonempty_output(self) -> None:
@@ -106,6 +131,35 @@ class RenderGoalTests(unittest.TestCase):
             args.setup_command = []
             with self.assertRaises(SystemExit):
                 renderer.render(args)
+
+    def test_rejects_query_fragment_blank_and_secret_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.args(Path(temporary) / "goal-query")
+            args.pr_url += "?diff=split"
+            with self.assertRaises(SystemExit):
+                renderer.render(args)
+
+            args = self.args(Path(temporary) / "goal-blank")
+            args.validation = ["   "]
+            with self.assertRaises(SystemExit):
+                renderer.render(args)
+
+            args = self.args(Path(temporary) / "goal-secret")
+            args.setup_command = ["API_TOKEN=literal uv sync"]
+            with self.assertRaises(SystemExit):
+                renderer.render(args)
+
+    def test_primary_reviewer_is_json_escaped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "goal"
+            args = self.args(output)
+            args.reviewer = ['grep"tile', "coderabbit"]
+            args.primary_reviewer = 'grep"tile'
+            renderer.render(args)
+            policy = json.loads(
+                (output / "review-policy.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(policy["primaryReviewer"]["name"], 'grep"tile')
 
 
 if __name__ == "__main__":

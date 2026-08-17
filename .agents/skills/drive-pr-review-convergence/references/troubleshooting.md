@@ -2,9 +2,10 @@
 
 ## `E2B_API_KEY is not present`
 
-Check only existence with `Test-Path Env:E2B_API_KEY` or
-`test -n "${E2B_API_KEY:-}"`. If the key was added after Codex Desktop or the
-terminal started, restart the process. Never print the value.
+Check for a non-empty value with
+`-not [string]::IsNullOrWhiteSpace($env:E2B_API_KEY)` or
+`test -n "${E2B_API_KEY//[[:space:]]/}"`. If the key was added after Codex
+Desktop or the terminal started, restart the process. Never print the value.
 
 ## E2B doctor hangs or fails
 

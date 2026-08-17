@@ -8,7 +8,11 @@ import { test, expect, type Page } from '@playwright/test';
 const stubWebSocket = (page: Page) =>
   page.addInitScript(() => {
     localStorage.setItem('shizzle_token', 'e2e-token');
-    const instances: Array<{ onmessage?: (ev: { data: string }) => void }> = [];
+    const instances: Array<{
+      url: string;
+      close: () => void;
+      onmessage?: (ev: { data: string }) => void;
+    }> = [];
     const sent: string[] = [];
     class FakeWebSocket {
       static OPEN = 1;
@@ -39,8 +43,11 @@ const stubWebSocket = (page: Page) =>
     }
     (window as unknown as Record<string, unknown>).WebSocket = FakeWebSocket;
     (window as unknown as Record<string, unknown>).__wsSent = sent;
+    (window as unknown as Record<string, unknown>).__wsUrls = instances;
+    (window as unknown as Record<string, unknown>).__wsDisconnect = () =>
+      instances[instances.length - 1]?.close();
     (window as unknown as Record<string, unknown>).__wsPush = (data: string) =>
-      instances.forEach((ws) => ws.onmessage?.({ data }));
+      instances[instances.length - 1]?.onmessage?.({ data });
   });
 
 const sentFrames = (page: Page) =>
@@ -58,6 +65,15 @@ test('remote page publishes commands and applies state snapshots', async ({ page
   await page.goto('/remote');
   await expect(page.getByText('Shizzle Remote')).toBeVisible({ timeout: 10_000 });
   await expect(page.getByTestId('remote-connection')).toHaveText(/Connected/, { timeout: 5_000 });
+  await expect.poll(async () => (await sentFrames(page)).some(
+    (frame) => frame.type === 'sync-request'
+  )).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const sockets = (window as unknown as {
+      __wsUrls: Array<{ url: string }>;
+    }).__wsUrls;
+    return sockets[sockets.length - 1]?.url;
+  })).toMatch(/\/api\/remote\/ws$/);
 
   // Touching a control publishes the matching command frame.
   await page.getByRole('button', { name: 'vocals mute' }).click();
@@ -81,6 +97,17 @@ test('remote page publishes commands and applies state snapshots', async ({ page
     )
   );
   await expect(page.getByTestId('remote-track')).toHaveText('Playing: Test Anthem', { timeout: 5_000 });
+
+  // A control move made while reconnecting is retained and flushed on open.
+  await page.evaluate(() =>
+    (window as unknown as { __wsDisconnect: () => void }).__wsDisconnect()
+  );
+  await page.getByRole('button', { name: 'drums mute' }).click();
+  await expect
+    .poll(async () => (await sentFrames(page)).some(
+      (f) => f.type === 'mute' && f.stem === 'drums' && f.on === true
+    ), { timeout: 5_000 })
+    .toBe(true);
 });
 
 test('player applies inbound mixer commands to the store', async ({ page }) => {
@@ -100,6 +127,16 @@ test('player applies inbound mixer commands to the store', async ({ page }) => {
   // Dev builds expose the real store for probes.
   await page.waitForFunction(() => !!(window as unknown as { __shizzle?: unknown }).__shizzle, undefined, { timeout: 10_000 });
 
+  const initialStateFrames = (await sentFrames(page)).filter((f) => f.type === 'state').length;
+  await page.evaluate(() =>
+    (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
+      JSON.stringify({ type: 'sync-request' })
+    )
+  );
+  await expect.poll(async () =>
+    (await sentFrames(page)).filter((f) => f.type === 'state').length
+  ).toBeGreaterThan(initialStateFrames);
+
   await page.evaluate(() =>
     (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
       JSON.stringify({ type: 'mix', stem: 'vocals', gainDb: -24 })
@@ -117,6 +154,22 @@ test('player applies inbound mixer commands to the store', async ({ page }) => {
       { timeout: 5_000 }
     )
     .toBe(-24);
+  await expect.poll(async () => (await sentFrames(page)).some((f) =>
+    f.type === 'state' && (f.gains as Record<string, number>).vocals === -24
+  )).toBe(true);
+
+  // Malformed/out-of-range frames are ignored before they can corrupt state.
+  await page.evaluate(() =>
+    (window as unknown as { __wsPush: (d: string) => void }).__wsPush(
+      JSON.stringify({ type: 'mix', stem: '__proto__', gainDb: 999 })
+    )
+  );
+  await expect.poll(() => page.evaluate(() => {
+    const store = (window as unknown as {
+      __shizzle: { store: { getState: () => { stemGains: Record<string, number> } } };
+    }).__shizzle.store.getState();
+    return store.stemGains.vocals;
+  })).toBe(-24);
 
   await page.evaluate(() =>
     (window as unknown as { __wsPush: (d: string) => void }).__wsPush(

@@ -12,9 +12,9 @@ export const DashboardPage: React.FC = () => {
   const [authed, setAuthed] = useState<boolean>(() => hasToken());
 
   return (
-    <div className="relative min-h-full w-full bg-black text-white antialiased">
+    <div className="relative h-full w-full overflow-hidden bg-black text-white antialiased">
       {authed ? (
-        <main className="mx-auto max-w-7xl overflow-y-auto p-6">
+        <main className="mx-auto h-full max-w-7xl overflow-y-auto p-6">
           <PipelinePanel active variant="page" />
         </main>
       ) : (

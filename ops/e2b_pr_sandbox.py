@@ -26,7 +26,6 @@ import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +34,7 @@ STATE_ROOT = ROOT / ".sandbox" / "e2b"
 RUNS_DIR = STATE_ROOT / "runs"
 ARTIFACTS_DIR = STATE_ROOT / "artifacts"
 DEFAULT_TEMPLATE = "pr-review-v1"
+CONTROLLER_SDK = "e2b==2.35.0"
 ACTIVE_STATES = {
     "planned",
     "provisioning",
@@ -233,7 +233,7 @@ def initial_record(
         "run_id": run_id,
         "sandbox_id": None,
         "provider": "e2b",
-        "controller_sdk": f"e2b=={version('e2b')}",
+        "controller_sdk": CONTROLLER_SDK,
         "template": template,
         "role": role,
         "repo": pull["repo"],
@@ -393,7 +393,7 @@ def command_doctor(_: argparse.Namespace) -> None:
     Sandbox = require_e2b()
     gh = host_command(["gh", "--version"]).stdout.splitlines()[0]
     observed = Sandbox.list(limit=1).next_items()
-    print(f"E2B SDK: {version('e2b')}")
+    print(f"E2B SDK: {CONTROLLER_SDK.removeprefix('e2b==')}")
     print(f"GitHub CLI: {gh}")
     print(f"E2B API: reachable (observed {len(observed)} sandbox(es) in probe)")
 
@@ -556,7 +556,7 @@ def command_sync_diff(args: argparse.Namespace) -> None:
             ["git", "rev-parse", "--verify", args.base_ref], cwd=source
         ).stdout.strip()
         host_command(
-            ["git", "merge-base", "--is-ancestor", source_head, patch_base],
+            ["git", "merge-base", "--is-ancestor", patch_base, source_head],
             cwd=source,
         )
     elif source_head != record["head_sha"]:
@@ -638,6 +638,7 @@ def command_harvest(args: argparse.Namespace) -> None:
     sandbox = connect(record, timeout=args.timeout)
     checkout = record["checkout_path"]
     base_sha = record["base_sha"]
+    head_sha = record["head_sha"]
     status = remote_run(
         sandbox,
         "\n".join(
@@ -649,9 +650,13 @@ def command_harvest(args: argparse.Namespace) -> None:
                     ">&2; exit 2; }"
                 ),
                 (
-                    f'test "$(git -C {shlex.quote(checkout)} rev-list --count '
-                    f'{shlex.quote(base_sha)}..HEAD)" -gt 0 || '
-                    "{ echo 'no commits exist beyond the recorded base SHA' >&2; exit 3; }"
+                    f'test "$(git -C {shlex.quote(checkout)} rev-parse HEAD)" != '
+                    f'{shlex.quote(head_sha)} || '
+                    "{ echo 'no writer commit exists beyond the recorded PR head' >&2; exit 3; }"
+                ),
+                (
+                    f"git -C {shlex.quote(checkout)} merge-base --is-ancestor "
+                    f"{shlex.quote(head_sha)} HEAD"
                 ),
                 f"git -C {shlex.quote(checkout)} rev-parse HEAD",
             ]
@@ -732,7 +737,15 @@ def command_push(args: argparse.Namespace) -> None:
         raise ControllerError(
             f"remote head advanced from {expected_head} to {pull['head_sha']}"
         )
-    host_command(["git", "push", args.remote, f"{imported_ref}:{destination}"])
+    harvested_sha = artifact["sha"]
+    observed_import = host_command(
+        ["git", "rev-parse", imported_ref]
+    ).stdout.strip()
+    if observed_import != harvested_sha:
+        raise ControllerError(
+            f"imported ref moved from {harvested_sha} to {observed_import}"
+        )
+    host_command(["git", "push", args.remote, f"{harvested_sha}:{destination}"])
     observed = None
     post_push_attempts = 0
     # Git's receive-pack result is authoritative for the write, while the PR

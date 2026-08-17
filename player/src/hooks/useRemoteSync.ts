@@ -16,14 +16,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@/stores/useStore';
-import { getToken } from '@/lib/auth';
 import type { StemId } from '@/types/karaoke';
+
+const STEMS: StemId[] = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'shizzle'];
 
 type Command =
   | { type: 'mix'; stem: StemId; gainDb: number }
   | { type: 'mute'; stem: StemId; on: boolean }
   | { type: 'solo'; stem: StemId; on: boolean }
   | { type: 'master'; value: number };
+
+interface SyncRequest {
+  type: 'sync-request';
+}
 
 interface StateSnapshot {
   type: 'state';
@@ -34,7 +39,7 @@ interface StateSnapshot {
   master: number;
 }
 
-type RemoteMessage = Command | StateSnapshot;
+type RemoteMessage = Command | StateSnapshot | SyncRequest;
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 8000;
@@ -42,9 +47,62 @@ const PUBLISH_THROTTLE_MS = 60;
 
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  const token = getToken();
-  const query = token ? `?token=${encodeURIComponent(token)}` : '';
-  return `${scheme}://${location.host}/api/remote/ws${query}`;
+  return `${scheme}://${location.host}/api/remote/ws`;
+}
+
+const isStem = (value: unknown): value is StemId =>
+  typeof value === 'string' && STEMS.includes(value as StemId);
+
+const isFiniteNumber = (value: unknown, min: number, max: number): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max;
+
+const isBooleanMap = (value: unknown): value is Record<StemId, boolean> =>
+  typeof value === 'object' && value !== null &&
+  STEMS.every((stem) => typeof (value as Record<string, unknown>)[stem] === 'boolean');
+
+const isGainMap = (value: unknown): value is Record<StemId, number> =>
+  typeof value === 'object' && value !== null &&
+  STEMS.every((stem) => isFiniteNumber(
+    (value as Record<string, unknown>)[stem], -60, 12
+  ));
+
+function parseMessage(data: unknown): RemoteMessage | null {
+  if (typeof data !== 'string') return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null || !('type' in value)) return null;
+  const msg = value as Record<string, unknown>;
+  if (msg.type === 'sync-request') return { type: 'sync-request' };
+  if (msg.type === 'mix' && isStem(msg.stem) && isFiniteNumber(msg.gainDb, -60, 12)) {
+    return { type: 'mix', stem: msg.stem, gainDb: msg.gainDb };
+  }
+  if (msg.type === 'mute' && isStem(msg.stem) && typeof msg.on === 'boolean') {
+    return { type: 'mute', stem: msg.stem, on: msg.on };
+  }
+  if (msg.type === 'solo' && isStem(msg.stem) && typeof msg.on === 'boolean') {
+    return { type: 'solo', stem: msg.stem, on: msg.on };
+  }
+  if (msg.type === 'master' && isFiniteNumber(msg.value, 0, 1)) {
+    return { type: 'master', value: msg.value };
+  }
+  if (
+    msg.type === 'state' &&
+    (msg.track === null || typeof msg.track === 'string') &&
+    isGainMap(msg.gains) &&
+    isBooleanMap(msg.mutes) &&
+    isBooleanMap(msg.solos) &&
+    isFiniteNumber(msg.master, 0, 1)
+  ) {
+    return {
+      type: 'state', track: msg.track, gains: msg.gains,
+      mutes: msg.mutes, solos: msg.solos, master: msg.master,
+    };
+  }
+  return null;
 }
 
 export function useRemoteSync(role: 'player' | 'remote') {
@@ -62,10 +120,18 @@ export function useRemoteSync(role: 'player' | 'remote') {
     let publishTimer: number | undefined;
     const pending = new Map<string, RemoteMessage>();
 
-    const send = (msg: RemoteMessage) => {
+    const send = (msg: RemoteMessage): boolean => {
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(msg));
+        return true;
       }
+      return false;
+    };
+
+    const flushPending = () => {
+      pending.forEach((msg, key) => {
+        if (send(msg)) pending.delete(key);
+      });
     };
 
     // Coalesce rapid changes (fader drags) per key; flush on a short timer.
@@ -74,8 +140,7 @@ export function useRemoteSync(role: 'player' | 'remote') {
       if (publishTimer === undefined) {
         publishTimer = window.setTimeout(() => {
           publishTimer = undefined;
-          pending.forEach((m) => send(m));
-          pending.clear();
+          flushPending();
         }, PUBLISH_THROTTLE_MS);
       }
     };
@@ -130,17 +195,22 @@ export function useRemoteSync(role: 'player' | 'remote') {
         reconnectDelay = RECONNECT_BASE_MS;
         setConnected(true);
         if (role === 'player') send(snapshot());
+        else send({ type: 'sync-request' });
+        flushPending();
       };
 
       socket.onmessage = (event) => {
-        let msg: RemoteMessage;
-        try {
-          msg = JSON.parse(event.data);
-        } catch {
-          return; // not ours
-        }
-        if (role === 'player' && msg.type !== 'state') applyCommand(msg);
-        else if (role === 'remote' && msg.type === 'state') applyState(msg);
+        const msg = parseMessage(event.data);
+        if (!msg) return;
+        if (role === 'player') {
+          if (msg.type === 'sync-request') send(snapshot());
+          else if (msg.type !== 'state') {
+            applyCommand(msg);
+            // The player is authoritative. Re-publish after every accepted
+            // remote command so all other remotes converge on the result.
+            send(snapshot());
+          }
+        } else if (msg.type === 'state') applyState(msg);
       };
 
       socket.onclose = () => {

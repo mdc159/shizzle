@@ -23,5 +23,5 @@
 }
 
 :80 {
-	redir https://192.168.176.52{uri}
+	redir https://{host}{uri}
 }

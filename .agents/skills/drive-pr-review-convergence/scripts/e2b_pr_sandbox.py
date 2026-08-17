@@ -26,7 +26,6 @@ import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +34,7 @@ STATE_ROOT = ROOT / ".sandbox" / "e2b"
 RUNS_DIR = STATE_ROOT / "runs"
 ARTIFACTS_DIR = STATE_ROOT / "artifacts"
 DEFAULT_TEMPLATE = "pr-review-v1"
+CONTROLLER_SDK = "e2b==2.35.0"
 ACTIVE_STATES = {
     "planned",
     "provisioning",
@@ -233,7 +233,7 @@ def initial_record(
         "run_id": run_id,
         "sandbox_id": None,
         "provider": "e2b",
-        "controller_sdk": f"e2b=={version('e2b')}",
+        "controller_sdk": CONTROLLER_SDK,
         "template": template,
         "role": role,
         "repo": pull["repo"],
@@ -276,30 +276,44 @@ def provision(
         raise ControllerError(f"setup file does not exist: {custom_setup}")
     pull = resolve_pull_request(repo, pr_number)
     ensure_writer_available(pull["repo"], pr_number, role)
-    bundle_path: Path | None = None
-    if source_bundle:
-        bundle_path = Path(source_bundle).resolve()
-        if not bundle_path.is_file():
-            raise ControllerError(f"source bundle does not exist: {bundle_path}")
-        heads = host_command(
-            ["git", "bundle", "list-heads", str(bundle_path)]
-        ).stdout
-        if pull["head_sha"] not in heads:
-            raise ControllerError(
-                "source bundle does not contain the recorded PR head SHA"
-            )
-    Sandbox = require_e2b()
-    run_id = new_run_id(role, pr_number)
-    record = initial_record(pull, role, template, timeout, run_id)
-    # Harvest verification and the head-checked push run git against the
-    # source repository; remember where it lives when the controller runs
-    # outside a checkout (the usual case for a rendered package).
+    resolved_repo_root: Path | None = None
     if source_repo_root:
         resolved_repo_root = Path(source_repo_root).resolve()
         if not (resolved_repo_root / ".git").exists():
             raise ControllerError(
                 f"source repo root is not a git repository: {resolved_repo_root}"
             )
+    bundle_path: Path | None = None
+    if source_bundle:
+        if resolved_repo_root is None:
+            raise ControllerError("--source-bundle requires --source-repo-root")
+        bundle_path = Path(source_bundle).resolve()
+        if not bundle_path.is_file():
+            raise ControllerError(f"source bundle does not exist: {bundle_path}")
+        head_lines = host_command(
+            ["git", "bundle", "list-heads", str(bundle_path)]
+        ).stdout.splitlines()
+        if len(head_lines) != 1:
+            raise ControllerError(
+                "source bundle must advertise exactly one head ref"
+            )
+        bundled_sha, _, bundled_ref = head_lines[0].partition(" ")
+        if bundled_sha != pull["head_sha"] or not bundled_ref.startswith("refs/"):
+            raise ControllerError("source bundle head does not exactly match the PR head")
+        if host_command(
+            ["git", "status", "--porcelain"], cwd=resolved_repo_root
+        ).stdout.strip():
+            raise ControllerError(
+                "source repository has unrelated local changes; refusing bundle upload"
+            )
+        host_command(["git", "bundle", "verify", str(bundle_path)], cwd=resolved_repo_root)
+    Sandbox = require_e2b()
+    run_id = new_run_id(role, pr_number)
+    record = initial_record(pull, role, template, timeout, run_id)
+    # Harvest verification and the head-checked push run git against the
+    # source repository; remember where it lives when the controller runs
+    # outside a checkout (the usual case for a rendered package).
+    if resolved_repo_root is not None:
         record["source_repo_root"] = str(resolved_repo_root)
     save_record(record)  # Durable intent exists before the remote resource.
 
@@ -334,7 +348,11 @@ def provision(
         branch = record["branch"]
         clone_lines = [
             "set -euo pipefail",
-            f"git clone --filter=blob:none {shlex.quote(clone_source)} {shlex.quote(checkout)}",
+            (
+                "git clone "
+                + ("" if bundle_path is not None else "--filter=blob:none ")
+                + f"{shlex.quote(clone_source)} {shlex.quote(checkout)}"
+            ),
         ]
         if bundle_path is None:
             clone_lines.append(
@@ -407,7 +425,7 @@ def command_doctor(_: argparse.Namespace) -> None:
     Sandbox = require_e2b()
     gh = host_command(["gh", "--version"]).stdout.splitlines()[0]
     observed = Sandbox.list(limit=1).next_items()
-    print(f"E2B SDK: {version('e2b')}")
+    print(f"E2B SDK: {CONTROLLER_SDK.removeprefix('e2b==')}")
     print(f"GitHub CLI: {gh}")
     print(f"E2B API: reachable (observed {len(observed)} sandbox(es) in probe)")
 
@@ -572,7 +590,7 @@ def command_sync_diff(args: argparse.Namespace) -> None:
             ["git", "rev-parse", "--verify", args.base_ref], cwd=source
         ).stdout.strip()
         host_command(
-            ["git", "merge-base", "--is-ancestor", source_head, patch_base],
+            ["git", "merge-base", "--is-ancestor", patch_base, source_head],
             cwd=source,
         )
     elif source_head != record["head_sha"]:
@@ -654,6 +672,7 @@ def command_harvest(args: argparse.Namespace) -> None:
     sandbox = connect(record, timeout=args.timeout)
     checkout = record["checkout_path"]
     base_sha = record["base_sha"]
+    head_sha = record["head_sha"]
     status = remote_run(
         sandbox,
         "\n".join(
@@ -665,9 +684,13 @@ def command_harvest(args: argparse.Namespace) -> None:
                     ">&2; exit 2; }"
                 ),
                 (
-                    f'test "$(git -C {shlex.quote(checkout)} rev-list --count '
-                    f'{shlex.quote(base_sha)}..HEAD)" -gt 0 || '
-                    "{ echo 'no commits exist beyond the recorded base SHA' >&2; exit 3; }"
+                    f'test "$(git -C {shlex.quote(checkout)} rev-parse HEAD)" != '
+                    f'{shlex.quote(head_sha)} || '
+                    "{ echo 'no writer commit exists beyond the recorded PR head' >&2; exit 3; }"
+                ),
+                (
+                    f"git -C {shlex.quote(checkout)} merge-base --is-ancestor "
+                    f"{shlex.quote(head_sha)} HEAD"
                 ),
                 f"git -C {shlex.quote(checkout)} rev-parse HEAD",
             ]
@@ -758,8 +781,17 @@ def command_push(args: argparse.Namespace) -> None:
         raise ControllerError(
             f"remote head advanced from {expected_head} to {pull['head_sha']}"
         )
+    harvested_sha = artifact["sha"]
+    observed_import = host_command(
+        ["git", "rev-parse", imported_ref],
+        cwd=Path(record.get("source_repo_root") or ROOT),
+    ).stdout.strip()
+    if observed_import != harvested_sha:
+        raise ControllerError(
+            f"imported ref moved from {harvested_sha} to {observed_import}"
+        )
     host_command(
-        ["git", "push", args.remote, f"{imported_ref}:{destination}"],
+        ["git", "push", args.remote, f"{harvested_sha}:{destination}"],
         cwd=Path(record.get("source_repo_root") or ROOT),
     )
     observed = None

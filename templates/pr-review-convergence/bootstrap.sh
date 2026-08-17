@@ -8,7 +8,7 @@ for command in git gh uv; do
   }
 done
 
-test -n "${E2B_API_KEY:-}" || {
+test -n "${E2B_API_KEY//[[:space:]]/}" || {
   printf 'E2B_API_KEY is missing from this host process. See ENVIRONMENT.md.\n' >&2
   exit 1
 }
@@ -19,7 +19,10 @@ if test -n "${GREPTILE_API_KEY:-}"; then
 else
   printf 'GREPTILE_API_KEY: not set; optional\n'
 fi
-github_login=$(gh api user --jq .login)
+github_login=$(gh api user --jq .login) || {
+  printf 'GitHub CLI authentication failed. Run gh auth login.\n' >&2
+  exit 1
+}
 test -n "$github_login" || {
   printf 'GitHub CLI authentication failed. Run gh auth login.\n' >&2
   exit 1

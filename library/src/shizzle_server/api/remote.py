@@ -7,11 +7,11 @@ nothing — the playing browser publishes ``state`` snapshots, remote surfaces
 send ``mix``/``mute``/``solo``/``master`` commands, and each side ignores
 frame types it does not understand.
 
-Auth: browsers cannot set headers on WebSocket upgrades, so the device token
-rides a ``token`` query parameter, verified with the same HMAC as the REST
-surface. The socket is accepted first and closed with application code 4401
-on failure so clients can distinguish auth rejection from network loss.
-Session-scoped WS credentials remain a documented follow-up (see auth.py).
+Auth: the same-origin WebSocket upgrade carries the HttpOnly device-token
+cookie issued by ``/api/auth``. The socket is accepted first and closed with
+application code 4401 on failure so clients can distinguish auth rejection
+from network loss. Session-scoped WS credentials remain a documented
+follow-up (see auth.py).
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ import contextlib
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .auth import verify_device_token
+from .auth import TOKEN_COOKIE, verify_device_token
 
 # Commands are tiny JSON frames; anything larger is not ours to relay.
 MAX_FRAME_CHARS = 4096
+SEND_TIMEOUT_SECONDS = 1.0
 
 router = APIRouter(prefix="/api")
 
@@ -47,11 +48,16 @@ class RemoteHub:
     async def broadcast(self, sender: WebSocket, text: str) -> None:
         async with self._lock:
             targets = [c for c in self._clients if c is not sender]
-        for client in targets:
-            # A dead peer is reaped by its own handler; never let one broken
-            # socket stop the fan-out to the rest.
+
+        async def send(client: WebSocket) -> None:
+            # A dead/slow peer is reaped by its own handler; never let it
+            # serialize or indefinitely block fan-out to healthy peers.
             with contextlib.suppress(Exception):
-                await client.send_text(text)
+                await asyncio.wait_for(
+                    client.send_text(text), timeout=SEND_TIMEOUT_SECONDS
+                )
+
+        await asyncio.gather(*(send(client) for client in targets))
 
 
 def get_hub(ws: WebSocket) -> RemoteHub:
@@ -66,7 +72,7 @@ async def remote_ws(ws: WebSocket) -> None:
     settings = ws.app.state.settings
     await ws.accept()
     if settings.auth_enabled and not verify_device_token(
-        settings, ws.query_params.get("token")
+        settings, ws.cookies.get(TOKEN_COOKIE)
     ):
         await ws.close(code=4401, reason="Authentication required")
         return

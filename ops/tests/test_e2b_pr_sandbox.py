@@ -6,13 +6,29 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "e2b_pr_sandbox.py"
 SPEC = importlib.util.spec_from_file_location("e2b_pr_sandbox", MODULE_PATH)
 assert SPEC and SPEC.loader
 controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
+
+SKILL_MODULE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".agents"
+    / "skills"
+    / "drive-pr-review-convergence"
+    / "scripts"
+    / "e2b_pr_sandbox.py"
+)
+SKILL_SPEC = importlib.util.spec_from_file_location(
+    "skill_e2b_pr_sandbox", SKILL_MODULE_PATH
+)
+assert SKILL_SPEC and SKILL_SPEC.loader
+skill_controller = importlib.util.module_from_spec(SKILL_SPEC)
+SKILL_SPEC.loader.exec_module(skill_controller)
 
 
 class ControllerUnitTests(unittest.TestCase):
@@ -75,6 +91,7 @@ class ControllerUnitTests(unittest.TestCase):
             record["lifecycle"], {"on_timeout": "pause", "auto_resume": True}
         )
         self.assertIsNone(record["sandbox_id"])
+        self.assertEqual(record["controller_sdk"], "e2b==2.35.0")
         json.dumps(record)
 
     def test_custom_setup_file_is_accepted_by_create_and_fanout(self) -> None:
@@ -120,9 +137,77 @@ class ControllerUnitTests(unittest.TestCase):
         self.assertEqual(args.base_ref, "refs/sandbox/e2b/pr7-writer")
         self.assertTrue(args.replace)
 
+    def test_sync_diff_requires_patch_base_to_ancestor_source(self) -> None:
+        patch_base = "a" * 40
+        source_head = "b" * 40
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            source = state_root / "staging" / "pr7"
+            (source / ".git").mkdir(parents=True)
+            record = {
+                "run_id": "pr7-writer",
+                "head_sha": "0" * 40,
+                "checkout_path": "/workspace/repo",
+                "state": "paused",
+            }
+
+            def command(args, **_kwargs):
+                if args[:3] == ["git", "rev-parse", "HEAD"]:
+                    return SimpleNamespace(stdout=source_head + "\n")
+                if args[:3] == ["git", "rev-parse", "--verify"]:
+                    return SimpleNamespace(stdout=patch_base + "\n")
+                if args[:4] == ["git", "diff", "--binary", "--no-ext-diff"]:
+                    return SimpleNamespace(stdout="diff --git a/x b/x\n")
+                return SimpleNamespace(stdout="")
+
+            sandbox = MagicMock()
+            with (
+                patch.object(controller, "STATE_ROOT", state_root),
+                patch.object(controller, "load_record", return_value=record),
+                patch.object(controller, "host_command", side_effect=command) as host,
+                patch.object(controller, "connect", return_value=sandbox),
+                patch.object(controller, "remote_run", return_value=SimpleNamespace(stdout="")),
+                patch.object(controller, "save_record"),
+            ):
+                controller.command_sync_diff(
+                    Namespace(
+                        run_id="pr7-writer",
+                        source_worktree=str(source),
+                        replace=True,
+                        base_ref="refs/sandbox/e2b/pr7-writer",
+                        timeout=60,
+                    )
+                )
+            host.assert_any_call(
+                ["git", "merge-base", "--is-ancestor", patch_base, source_head],
+                cwd=source,
+            )
+
     def test_push_parser_defaults_to_origin(self) -> None:
         args = controller.build_parser().parse_args(["push", "pr7-writer"])
         self.assertEqual(args.remote, "origin")
+
+    def test_harvest_guard_requires_commit_beyond_recorded_pr_head(self) -> None:
+        head = "a" * 40
+        record = {
+            "run_id": "pr7-writer",
+            "role": "writer",
+            "checkout_path": "/workspace/repo",
+            "base_sha": "0" * 40,
+            "head_sha": head,
+        }
+        with (
+            patch.object(controller, "load_record", return_value=record),
+            patch.object(controller, "connect", return_value=MagicMock()),
+            patch.object(controller, "remote_run", side_effect=RuntimeError("stop")) as run,
+            self.assertRaisesRegex(RuntimeError, "stop"),
+        ):
+            controller.command_harvest(
+                Namespace(run_id="pr7-writer", timeout=60, no_import=False)
+            )
+        script = run.call_args.args[1]
+        self.assertIn(f"!= {head}", script)
+        self.assertIn(f"merge-base --is-ancestor {head} HEAD", script)
 
     def test_push_passes_one_argument_safe_refspec(self) -> None:
         expected = "a" * 40
@@ -156,13 +241,14 @@ class ControllerUnitTests(unittest.TestCase):
             patch.object(controller, "host_command") as command,
             patch.object(controller, "save_record"),
         ):
+            command.return_value.stdout = harvested
             controller.command_push(Namespace(run_id="pr7-writer", remote="origin"))
         command.assert_any_call(
             [
                 "git",
                 "push",
                 "origin",
-                "refs/sandbox/e2b/pr7-writer:refs/heads/feature",
+                f"{harvested}:refs/heads/feature",
             ]
         )
 
@@ -201,6 +287,7 @@ class ControllerUnitTests(unittest.TestCase):
             patch.object(controller.time, "sleep") as sleep,
             patch.object(controller, "save_record"),
         ):
+            command.return_value.stdout = harvested
             controller.command_push(Namespace(run_id="pr7-writer", remote="origin"))
         push_calls = [
             call
@@ -244,6 +331,83 @@ class ControllerUnitTests(unittest.TestCase):
             any(call.args[0][:2] == ["git", "push"] for call in command.call_args_list)
         )
         self.assertIn("reconciled_at", record["artifacts"][-1])
+
+    def test_push_rejects_moved_imported_ref(self) -> None:
+        expected = "a" * 40
+        harvested = "b" * 40
+        record = {
+            "run_id": "pr7-writer",
+            "role": "writer",
+            "repo": "owner/repo",
+            "pr_number": 7,
+            "artifacts": [{
+                "imported_ref": "refs/sandbox/e2b/pr7-writer",
+                "expected_remote_head": expected,
+                "sha": harvested,
+            }],
+        }
+        current = {
+            "state": "open",
+            "repo": "owner/repo",
+            "head_repo": "owner/repo",
+            "head_ref": "feature",
+            "head_sha": expected,
+        }
+        with (
+            patch.object(controller, "load_record", return_value=record),
+            patch.object(controller, "resolve_pull_request", return_value=current),
+            patch.object(
+                controller,
+                "host_command",
+                return_value=SimpleNamespace(stdout="c" * 40 + "\n"),
+            ) as command,
+            self.assertRaisesRegex(controller.ControllerError, "imported ref moved"),
+        ):
+            controller.command_push(Namespace(run_id="pr7-writer", remote="origin"))
+        self.assertFalse(
+            any(call.args[0][:2] == ["git", "push"] for call in command.call_args_list)
+        )
+
+    def test_private_bundle_rejects_multiple_advertised_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            setup = root / "setup.sh"
+            setup.write_text("#!/bin/sh\n", encoding="utf-8")
+            bundle = root / "source.bundle"
+            bundle.write_bytes(b"not uploaded")
+            source_repo = root / "repo"
+            (source_repo / ".git").mkdir(parents=True)
+            pull = {
+                "url": "https://github.com/owner/repo/pull/7",
+                "repo": "owner/repo",
+                "pr_number": 7,
+                "base_ref": "main",
+                "base_sha": "a" * 40,
+                "head_repo": "owner/repo",
+                "head_ref": "feature",
+                "head_sha": "b" * 40,
+                "state": "open",
+            }
+            heads = (
+                f"{'b' * 40} refs/heads/feature\n"
+                f"{'c' * 40} refs/heads/private\n"
+            )
+            with (
+                patch.object(skill_controller, "resolve_pull_request", return_value=pull),
+                patch.object(skill_controller, "ensure_writer_available"),
+                patch.object(
+                    skill_controller,
+                    "host_command",
+                    return_value=SimpleNamespace(stdout=heads),
+                ),
+                self.assertRaisesRegex(
+                    skill_controller.ControllerError, "exactly one head ref"
+                ),
+            ):
+                skill_controller.provision(
+                    "owner/repo", 7, "writer", "template", 60,
+                    str(setup), False, str(bundle), str(source_repo)
+                )
 
 
 if __name__ == "__main__":

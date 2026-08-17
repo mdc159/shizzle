@@ -1,6 +1,7 @@
 # SHIZZLE-TEST VM stack — production topology (postgres + api + orchestrator +
-# caddy) minus TLS and CloudFront: HTTP on :80, media served from the local
-# appdata volume, no external cert volume, no secrets mounts.
+# caddy) minus CloudFront. Caddy publishes HTTPS on :443 using the required
+# ./certs mount and redirects :80; media is served from the local appdata
+# volume and no production secrets are mounted.
 
 name: shizzle
 
