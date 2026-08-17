@@ -1,0 +1,78 @@
+{
+  "stage": "interview",
+  "title": "PR Review Convergence Loop",
+  "goalSlug": "pr-review-convergence-loop",
+  "questions": [
+    {
+      "id": "target_scope",
+      "prompt": "Which pull requests should one run of the goal monitor?",
+      "description": "A single explicit target gives the loop a stable branch, review history, and terminal condition.",
+      "answerMode": "single-custom",
+      "recommendedAnswer": "Require a repository and PR number or URL when launching the goal, and monitor only that PR during the run.",
+      "recommendedOptionIds": [
+        "single"
+      ],
+      "options": [
+        {
+          "id": "single",
+          "label": "One specified PR"
+        },
+        {
+          "id": "all_open",
+          "label": "All open PRs"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "write_authority",
+      "prompt": "What changes may the loop make without stopping for approval?",
+      "description": "The loop can remain useful and autonomous while still stopping before scope expansion or merge.",
+      "answerMode": "single-custom",
+      "recommendedAnswer": "Allow warranted code/test/doc fixes on the PR branch, commits, pushes, review replies, and resolving fully addressed threads. Require approval for scope-expanding suggestions, destructive changes, force-pushes, base-branch changes, and any merge.",
+      "recommendedOptionIds": [
+        "fix_push_reply"
+      ],
+      "options": [
+        {
+          "id": "fix_push_reply",
+          "label": "Fix, push, and reply"
+        },
+        {
+          "id": "local_only",
+          "label": "Prepare local fixes only"
+        },
+        {
+          "id": "report_only",
+          "label": "Triage and report only"
+        }
+      ],
+      "required": true
+    },
+    {
+      "id": "clean_threshold",
+      "prompt": "What evidence should end the monitoring loop as ready to merge?",
+      "description": "The goal needs a quiescence rule so it does not declare victory before asynchronous reviewers finish checking the latest commit.",
+      "answerMode": "single-custom",
+      "recommendedAnswer": "Require all required checks green, no actionable unresolved human or bot threads, every finding dispositioned with evidence, reviewers observed on the latest head commit, and two unchanged polls 5 minutes apart after the last completed review. Then report readiness and recommend merge method without merging.",
+      "recommendedOptionIds": [
+        "verified_quiet"
+      ],
+      "options": [
+        {
+          "id": "verified_quiet",
+          "label": "Green plus quiet window"
+        },
+        {
+          "id": "green_only",
+          "label": "Required checks green"
+        },
+        {
+          "id": "approvals_only",
+          "label": "Required approvals received"
+        }
+      ],
+      "required": true
+    }
+  ]
+}

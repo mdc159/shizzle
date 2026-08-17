@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "primaryReviewer": {
+    "name": "{{PRIMARY_REVIEWER}}",
+    "minimumScore": {{PRIMARY_REVIEWER_MIN_SCORE}},
+    "targetScore": 5,
+    "blockingSeverities": ["P0", "P1"],
+    "requireFinalCandidateReview": true
+  },
+  "advisoryReviewers": {{ADVISORY_REVIEWERS_JSON}},
+  "advisoryUnavailablePolicy": "record-and-continue",
+  "repair": {
+    "batchFindings": true,
+    "maxBatches": {{MAX_ITERATIONS}},
+    "afterLimit": "human-adjudication"
+  },
+  "quietWindow": {
+    "polls": 2,
+    "intervalMinutes": {{QUIET_WINDOW_MINUTES}},
+    "resetOn": [
+      "head-change",
+      "required-check-change",
+      "primary-review-event",
+      "reproduced-blocking-finding"
+    ]
+  }
+}
