@@ -2,6 +2,8 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { RemoteMixerPage } from '@/pages/RemoteMixerPage'
+import { DashboardPage } from '@/pages/DashboardPage'
 import { playbackEngine } from '@/lib/playback/mediaElementEngine'
 import { useStore } from '@/stores/useStore'
 
@@ -20,8 +22,13 @@ if (import.meta.env.DEV) {
   getMetrics: () => playbackEngine.getMetrics(),
 })
 
+// Path-based entry: the control surface and dashboard are standalone pages
+// (no router dependency; Caddy's SPA fallback serves index.html for both).
+const path = location.pathname.replace(/\/+$/, '') || '/';
+const Root = path === '/remote' ? RemoteMixerPage : path === '/dashboard' ? DashboardPage : App;
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Root />
   </StrictMode>,
 )
