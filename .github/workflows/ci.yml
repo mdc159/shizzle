@@ -100,10 +100,43 @@ jobs:
       - run: npm run build
       - run: npm run lint
 
+  deploy-gate:
+    name: Classify merge as deployable or docs-only
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      deploy: ${{ steps.classify.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
+      - name: Classify changed paths
+        id: classify
+        # A merge whose every changed file is documentation must not rebuild
+        # the API image or queue a production deploy — nothing it ships would
+        # differ. Fail open: any doubt (no parent, empty diff) deploys.
+        run: |
+          set -euo pipefail
+          if ! git rev-parse "HEAD^" >/dev/null 2>&1; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "HEAD^" HEAD)"
+          printf 'changed files:\n%s\n' "$changed"
+          if [ -z "$changed" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n' "$changed" | grep -qvE '^(docs/|evidence/|goals/|\.agents/)|\.md$'; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs-only merge; skipping production deploy"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy-production:
     name: Deploy production after green master CI
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [library, stemsplit, postgres-contract, player]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.deploy-gate.outputs.deploy == 'true'
+    needs: [library, stemsplit, postgres-contract, player, deploy-gate]
     permissions:
       contents: read
       packages: write # Publish the digest-pinned API image.

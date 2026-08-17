@@ -54,6 +54,12 @@ under `/opt/shizzle/prod` per invariant E3.
 
 **On merge to master:**
 
+0. The `deploy-gate` job classifies the merge by diffing it against its
+   parent. If every changed file is documentation (`docs/`, `evidence/`,
+   `goals/`, `.agents/`, or any `*.md`), the deploy chain is skipped —
+   nothing a docs-only merge ships would differ, so building an image and
+   queuing an approval for it is pure waste (Mike, 2026-08-17). The gate
+   fails open: a missing parent or empty diff deploys.
 1. After all four jobs pass on a `master` push, `ci.yml` calls
    `deploy-vps.yml`; pull-request and non-master runs cannot call it. The called
    workflow rechecks the supplied SHA against current `master`. Job
