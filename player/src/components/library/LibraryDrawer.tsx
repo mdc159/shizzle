@@ -64,7 +64,7 @@ export const LibraryDrawer: React.FC = () => {
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && setActiveDrawer('none')}>
-      <SheetContent side="left" className="w-[400px] sm:w-[540px] border-r-zinc-800 bg-zinc-950 text-zinc-100">
+      <SheetContent side="left" className="flex flex-col w-[400px] sm:w-[540px] sm:max-w-none border-r-zinc-800 bg-zinc-950 text-zinc-100">
         <SheetHeader>
           <div className="flex items-center justify-between">
             <SheetTitle className="text-zinc-100 text-2xl">Library</SheetTitle>
@@ -96,7 +96,7 @@ export const LibraryDrawer: React.FC = () => {
           </SheetDescription>
         </SheetHeader>
 
-        <div className="mt-8 space-y-4">
+        <div className="mt-8 flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
           {loading ? (
             <div className="flex flex-col items-center justify-center p-8 gap-3">
               <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />

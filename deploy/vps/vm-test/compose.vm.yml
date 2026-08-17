@@ -1,0 +1,85 @@
+# SHIZZLE-TEST VM stack — production topology (postgres + api + orchestrator +
+# caddy) minus CloudFront. Caddy publishes HTTPS on :443 using the required
+# ./certs mount and redirects :80; media is served from the local appdata
+# volume and no production secrets are mounted.
+
+name: shizzle
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shizzle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shizzle}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shizzle} -d ${POSTGRES_DB:-shizzle}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
+    container_name: shizzle-api
+    command: uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001
+    env_file:
+      - path: ./.env
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
+    volumes:
+      - appdata:/app/data
+    expose:
+      - "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orchestrator:
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
+    container_name: shizzle-orchestrator
+    command: python -m shizzle_server.orchestrator
+    env_file:
+      - path: ./.env
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-test}
+    volumes:
+      - appdata:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: shizzle-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      - ./player:/srv/ui:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  appdata:
+  caddy_config:
+  caddy_data:

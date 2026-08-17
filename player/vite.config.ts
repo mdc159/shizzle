@@ -18,8 +18,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:8001',
+        // Override for tests/dev against a non-default control plane port.
+        target: process.env.SHIZZLE_API_PROXY || 'http://localhost:8001',
         changeOrigin: true,
+        ws: true,
       },
     },
   },

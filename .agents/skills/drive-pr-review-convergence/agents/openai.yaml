@@ -1,0 +1,4 @@
+interface:
+  display_name: "Drive PR Review Convergence"
+  short_description: "Run bounded E2B PR repair and reviewer convergence"
+  default_prompt: "Use $drive-pr-review-convergence to drive this pull request through bounded, evidence-backed review convergence and stop before merge."

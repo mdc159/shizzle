@@ -7,39 +7,15 @@ import {
   SheetTitle,
   SheetDescription
 } from '@/components/ui/sheet';
-import { Slider } from '@/components/ui/slider';
 import { Button } from '@/components/ui/button';
 import { RotateCcw } from 'lucide-react';
-import type { StemId } from '@/types/karaoke';
+import { MixerSurface } from './MixerSurface';
+import { useMixerReset } from '@/hooks/useMixerReset';
 
 export const MixerDrawer: React.FC = () => {
-  const {
-    activeDrawer, setActiveDrawer,
-    stemGains, setStemGain,
-    stemMutes, toggleStemMute,
-    stemSolos, toggleStemSolo,
-  } = useStore();
+  const { activeDrawer, setActiveDrawer } = useStore();
   const isOpen = activeDrawer === 'mixer';
-
-  const stems = Object.keys(stemGains) as StemId[];
-
-  // Store is the single source of truth; useAudioSync forwards to the engine.
-  const handleGainChange = (stem: StemId, dbValue: number) => {
-    setStemGain(stem, dbValue);
-  };
-
-  const handleReset = () => {
-    stems.forEach(stem => {
-      setStemGain(stem, 0);
-      if (stemMutes[stem]) toggleStemMute(stem);
-      if (stemSolos[stem]) toggleStemSolo(stem);
-    });
-  };
-
-  const formatGain = (db: number) => {
-    if (db <= -60) return '-∞';
-    return `${db >= 0 ? '+' : ''}${db.toFixed(1)}`;
-  };
+  const handleReset = useMixerReset();
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && setActiveDrawer('none')}>
@@ -56,57 +32,7 @@ export const MixerDrawer: React.FC = () => {
           </SheetDescription>
         </SheetHeader>
 
-        <div className="space-y-6">
-          {stems.map(stem => (
-            <div key={stem} className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="capitalize font-medium text-zinc-300">{stem}</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={`h-6 w-6 p-0 text-xs font-bold rounded ${
-                      stemSolos[stem]
-                        ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 hover:text-amber-400'
-                        : 'text-zinc-600 hover:text-zinc-400'
-                    }`}
-                    onClick={() => toggleStemSolo(stem)}
-                    title={stemSolos[stem] ? 'Unsolo' : 'Solo'}
-                    aria-label={`${stem} ${stemSolos[stem] ? 'unsolo' : 'solo'}`}
-                  >
-                    S
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={`h-6 w-6 p-0 text-xs font-bold rounded ${
-                      stemMutes[stem]
-                        ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 hover:text-red-400'
-                        : 'text-zinc-600 hover:text-zinc-400'
-                    }`}
-                    onClick={() => toggleStemMute(stem)}
-                    title={stemMutes[stem] ? 'Unmute' : 'Mute'}
-                    aria-label={`${stem} ${stemMutes[stem] ? 'unmute' : 'mute'}`}
-                  >
-                    M
-                  </Button>
-                </div>
-                <span className="text-zinc-500 font-mono text-xs">
-                  {formatGain(stemGains[stem])} dB
-                </span>
-              </div>
-              <Slider
-                aria-label={`${stem} gain`}
-                value={[stemGains[stem]]}
-                min={-60}
-                max={12}
-                step={0.5}
-                onValueChange={(vals) => handleGainChange(stem, vals[0])}
-                className="[&_.bg-primary]:bg-zinc-100 [&_.border-primary]:border-zinc-100"
-              />
-            </div>
-          ))}
-        </div>
+        <MixerSurface />
       </SheetContent>
     </Sheet>
   );

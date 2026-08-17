@@ -1,0 +1,27 @@
+{
+	auto_https off
+}
+
+# Self-signed TLS (Caddy internal CA) so Secure cookies behave as they do in
+# production. Browsers/tests must accept the self-signed certificate.
+:443 {
+	tls /certs/cert.pem /certs/key.pem
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:8001
+	}
+	handle /ws/* {
+		reverse_proxy api:8001
+	}
+
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+:80 {
+	redir https://{host}{uri}
+}

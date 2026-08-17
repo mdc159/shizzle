@@ -42,3 +42,6 @@ evidence/spikes/**/out/
 .playwright-cli/
 .jobid.tmp
 output/
+
+# Local E2B controller records and harvested artifacts
+.sandbox/

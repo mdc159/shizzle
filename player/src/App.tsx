@@ -8,6 +8,13 @@ import { Toaster } from 'sonner';
 import { useStore } from '@/stores/useStore';
 import { hasToken } from '@/lib/auth';
 import { refreshMediaSession } from '@/lib/api';
+import { useRemoteSync } from '@/hooks/useRemoteSync';
+
+/** Applies remote mixer commands and publishes mix state (mounted when authed). */
+const RemoteSyncBridge = () => {
+  useRemoteSync('player');
+  return null;
+};
 
 function App() {
   const { setActiveDrawer, togglePlay } = useStore();
@@ -65,6 +72,7 @@ function App() {
   return (
     <div className="relative w-full h-full bg-black text-white antialiased">
       <PlayerShell />
+      <RemoteSyncBridge />
 
       {/* Overlays */}
       <LibraryDrawer />
