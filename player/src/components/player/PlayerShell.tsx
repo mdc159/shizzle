@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { useAudioSync } from '@/hooks/useAudioSync';
 import { loadManifest } from '@/lib/api';
 import { resolveMediaUrl } from '@/lib/playback/mediaUrl';
-import { Activity, Loader2 } from 'lucide-react';
+import { Activity, LayoutDashboard, Loader2, SlidersHorizontal } from 'lucide-react';
 import { toast } from 'sonner';
 
 export const PlayerShell: React.FC = () => {
@@ -176,18 +176,40 @@ export const PlayerShell: React.FC = () => {
       onMouseMove={showControls}
       onTouchStart={showControls}
     >
-      <Button
-        variant="ghost"
-        className={cn(
-          'fixed right-6 top-6 z-40 gap-2 bg-black/50 text-zinc-300',
-          activeDrawer === 'pipeline' && 'bg-accent text-accent-foreground'
-        )}
-        onClick={() => setActiveDrawer(activeDrawer === 'pipeline' ? 'none' : 'pipeline')}
-        aria-label="Pipeline"
-      >
-        <Activity className="h-5 w-5" />
-        Pipeline
-      </Button>
+      <div className="fixed right-6 top-6 z-40 flex items-center gap-2">
+        <Button
+          variant="ghost"
+          className="gap-2 bg-black/50 text-zinc-300"
+          asChild
+        >
+          <a href="/remote" target="_blank" rel="noopener noreferrer" aria-label="Open remote mixer in a new tab">
+            <SlidersHorizontal className="h-5 w-5" />
+            Remote
+          </a>
+        </Button>
+        <Button
+          variant="ghost"
+          className="gap-2 bg-black/50 text-zinc-300"
+          asChild
+        >
+          <a href="/dashboard" target="_blank" rel="noopener noreferrer" aria-label="Open pipeline dashboard in a new tab">
+            <LayoutDashboard className="h-5 w-5" />
+            Dashboard
+          </a>
+        </Button>
+        <Button
+          variant="ghost"
+          className={cn(
+            'gap-2 bg-black/50 text-zinc-300',
+            activeDrawer === 'pipeline' && 'bg-accent text-accent-foreground'
+          )}
+          onClick={() => setActiveDrawer(activeDrawer === 'pipeline' ? 'none' : 'pipeline')}
+          aria-label="Pipeline"
+        >
+          <Activity className="h-5 w-5" />
+          Pipeline
+        </Button>
+      </div>
       <PipelineDrawer />
 
       {/* Background Video Layer */}

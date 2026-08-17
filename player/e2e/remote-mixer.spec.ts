@@ -89,6 +89,14 @@ test('player applies inbound mixer commands to the store', async ({ page }) => {
   await page.route('**/api/**', (route) => route.fulfill({ json: {} }));
 
   await page.goto('/');
+
+  // The main screen links to both companion pages in a new tab.
+  const remoteLink = page.getByRole('link', { name: /remote mixer/i });
+  await expect(remoteLink).toHaveAttribute('href', '/remote', { timeout: 10_000 });
+  await expect(remoteLink).toHaveAttribute('target', '_blank');
+  const dashboardLink = page.getByRole('link', { name: /pipeline dashboard/i });
+  await expect(dashboardLink).toHaveAttribute('href', '/dashboard');
+  await expect(dashboardLink).toHaveAttribute('target', '_blank');
   // Dev builds expose the real store for probes.
   await page.waitForFunction(() => !!(window as unknown as { __shizzle?: unknown }).__shizzle, undefined, { timeout: 10_000 });
 
