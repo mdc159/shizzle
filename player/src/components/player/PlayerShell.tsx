@@ -137,7 +137,9 @@ export const PlayerShell: React.FC = () => {
       try {
         const response = await fetch(videoSrc, {
           signal: controller.signal,
-          credentials: 'omit',
+          // Same-origin cookies must ride: CloudFront signed cookies on /cdn,
+          // the device-token cookie on local-profile /api/tracks paths.
+          credentials: 'same-origin',
         });
         if (!response.ok) throw new Error(`Video download failed with HTTP ${response.status}`);
         const declaredBytes = Number(response.headers.get('content-length') ?? 0);
