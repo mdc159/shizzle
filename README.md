@@ -223,6 +223,12 @@ manifest, rewriting object paths to expiring file-scoped CloudFront signed
 URLs. The orchestrator owns dispatch, callback, polling, reconciliation,
 retry, and publication.
 
+The API also carries the remote-control relay at `/api/remote/ws`: a
+stateless WebSocket fan-out, authenticated by the same device token
+(cookie-borne, since browsers cannot set headers on WebSocket upgrades).
+Every JSON frame from one client is repeated verbatim to every other; the
+relay holds no mix state and interprets nothing.
+
 The orchestrator is the single central monitor. Workers sense and report;
 the orchestrator alone judges and acts. It records every worker heartbeat in
 the job row as it polls, so a dead job's evidence lives in our database
@@ -243,6 +249,37 @@ edge; one bounded audio-less video is staged into a revocable browser Blob.
 Playback health is sensed directly: media clocks, buffers, decoder state, Web
 Audio state, per-stem PCM, master PCM, limiter state, and recovery, with
 first-party telemetry.
+
+The player serves three pages from one build, switched on path with no
+router; Caddy's SPA fallback serves them all:
+
+- `/` — the player itself, described above.
+- `/remote` — a touch-sized control surface (phone or tablet): the full
+  six-stem mixer, per-stem solo/mute, master volume, and the current track
+  readout, with no video and no audio. It drives the playing browser through
+  the relay. A remote is receive-only until it obtains the connection's
+  first authoritative snapshot from the player, so a late joiner can never
+  overwrite the live mix with stale state; commands it then sends are
+  applied by the player through the same store path as local mixer moves.
+- `/dashboard` — the pipeline board as a standalone page for a second
+  screen; the same board is available inside the player as a drawer.
+
+```mermaid
+sequenceDiagram
+    participant R as /remote (tablet)
+    participant W as /api/remote/ws relay
+    participant P as / (playing browser)
+
+    R->>W: sync-request (on connect)
+    W->>P: sync-request
+    P->>W: state snapshot
+    W->>R: state snapshot (remote now live)
+    R->>W: mute vocals
+    W->>P: mute vocals
+    Note over P: store → audio engine,<br/>same path as a local move
+    P->>W: updated state snapshot
+    W->>R: updated state snapshot
+```
 
 The player also carries the pipeline dashboard: the data-flow diagram above,
 rendered live as the operator's panel. Each active job appears on the map at

@@ -1,6 +1,6 @@
 # Shizzle — Current Handoff
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 Repository: `X:\GitHub\shizzle`
 
 ## 2026-08-16 update — automation and deployment
@@ -61,6 +61,12 @@ browser playback.
   state, and recovery.
 - The complete runtime and media path is cloud-hosted and consumed through one
   standards-based browser contract.
+- Companion pages are live (2026-08-17): `/remote` is a touch control surface
+  (full six-stem mixer, solo/mute, master, no video/audio) driving the playing
+  browser through the stateless `/api/remote/ws` relay — receive-only until
+  its first authoritative player snapshot; `/dashboard` is the pipeline board
+  as a standalone page. Both use the same passcode gate and are linked from
+  the player's top-right cluster.
 
 This is finished work. Future clean lossless stems use the same delivery
 pipeline once. The existing library is revisited only if an actual production
@@ -76,6 +82,9 @@ issue is observed.
   distribution `ELKN8VGSX0M64` using expiring file-scoped URLs.
 - **Playback:** six AAC Range streams plus one bounded, staged, revocable
   audio-less video Blob.
+- **Remote control:** `/api/remote/ws` WebSocket relay on the API (device-token
+  cookie auth, stateless fan-out); `/remote` and `/dashboard` pages served by
+  Caddy's SPA fallback.
 - **Rollback:** immutable generation predecessors and pointer-only activation;
   same-origin `/cdn` remains the tested delivery fallback.
 

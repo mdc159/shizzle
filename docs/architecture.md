@@ -111,6 +111,24 @@ The exact format, bitrate, FFmpeg commands, tolerances, and audit checks are in
 There is one browser contract. Support is capability-based, not tied to a
 device, display, or browser-vendor-specific path.
 
+Two companion surfaces ride the same build and the same passcode gate,
+selected by path (`/remote`, `/dashboard`) with no router; production Caddy
+serves them through its SPA fallback:
+
+- **Remote control surface (`/remote`).** A touch-sized full mixer — six
+  stem faders, per-stem solo/mute, master volume, current-track readout —
+  with no video element and no audio graph. It exchanges small JSON frames
+  with the playing browser through the API's stateless `/api/remote/ws`
+  relay (device-token cookie auth; the relay repeats each frame to every
+  other client and interprets nothing). The playing browser is
+  authoritative: it applies inbound commands through the same store path as
+  local mixer moves and publishes throttled state snapshots. A remote is
+  receive-only until it has the connection's first authoritative snapshot —
+  commands queued while disconnected are dropped, never replayed — so a
+  late-joining or reconnecting remote cannot overwrite the live mix.
+- **Pipeline dashboard (`/dashboard`).** The pipeline board as a standalone
+  read-only page; the identical panel renders inside the player as a drawer.
+
 ## 7. Finished media profile
 
 - RunPod handoff: exactly six stereo 44.1 kHz IEEE float32 WAV stems with one
@@ -167,8 +185,9 @@ targeted troubleshooting procedures but are not open requirements.
    source path.
 6. Pass the resulting package into the finished VPS delivery pipeline.
 
-Optional interfaces such as remote controls may be built independently. They
-do not alter or gate ingestion, delivery, or playback architecture.
+The remote control surface and standalone dashboard (§6) were built on this
+principle: they ride the existing store, relay, and delivery paths and do not
+alter or gate ingestion, delivery, or playback architecture.
 
 ## 11. Authoritative records
 
