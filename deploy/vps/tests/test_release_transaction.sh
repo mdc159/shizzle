@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 DEPLOY="$ROOT/deploy/vps/deploy-release.sh"
 RESTORE="$ROOT/deploy/vps/restore-release.sh"
+
+# Keep the deployed endpoint compatible with current browser TLS stacks.  This
+# is checked here because this suite is the deployment contract exercised by
+# CI, and Caddyfile.prod is copied verbatim by the release workflow.
+grep -Fq 'shizzle.systems, www.shizzle.systems {' "$ROOT/deploy/vps/Caddyfile.prod"
+grep -Fq 'protocols tls1.2 tls1.3' "$ROOT/deploy/vps/Caddyfile.prod"
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 BIN="$TMP/bin"

@@ -2,6 +2,8 @@
 #
 # - Serves the built UI (player/dist -> /srv/ui) at shizzle.systems with automatic
 #   HTTPS (Let's Encrypt; cert reused from the preserved caddy_data volume).
+#   Both apex and www names are covered, with TLS 1.2 and 1.3 explicitly
+#   enabled for current browsers.
 # - Reverse-proxies /api and /ws to the api container.
 # - Reverse-proxies the same-origin /cdn path to the production CloudFront
 #   distribution (d2488k8kjndpsy.cloudfront.net, ELKN8VGSX0M64), Host-rewritten
@@ -10,6 +12,10 @@
 # - No explicit :80 server, so Caddy's standard HTTP->HTTPS redirect returns.
 
 shizzle.systems, www.shizzle.systems {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
 	encode zstd gzip
 
 	# API + WebSocket relay -> control plane. reverse_proxy handles the WS
