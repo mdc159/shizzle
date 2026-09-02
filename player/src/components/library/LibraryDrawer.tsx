@@ -1,6 +1,15 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useStore } from '@/stores/useStore';
 import { getLibrary } from '@/lib/api';
+import {
+  filterTracks,
+  isLibrarySort,
+  LIBRARY_SORT_OPTIONS,
+  LIBRARY_SORT_STORAGE_KEY,
+  normalizeForSearch,
+  sortTracks,
+  type LibrarySort,
+} from '@/lib/libraryView';
 import type { Track } from '@/types/karaoke';
 import {
   Sheet,
@@ -10,7 +19,7 @@ import {
   SheetDescription
 } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
-import { Loader2, Music, Play, RefreshCw, AlertCircle, Plus } from 'lucide-react';
+import { Loader2, Music, Play, RefreshCw, AlertCircle, Plus, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 // Format duration as mm:ss
@@ -26,7 +35,25 @@ export const LibraryDrawer: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'newest' | 'title-asc' | 'title-desc' | 'artist-asc' | 'duration-asc' | 'duration-desc'>('newest');
+  const [sortBy, setSortByState] = useState<LibrarySort>(() => {
+    try {
+      const stored = localStorage.getItem(LIBRARY_SORT_STORAGE_KEY);
+      if (isLibrarySort(stored)) return stored;
+    } catch {
+      // localStorage unavailable (e.g. blocked storage) — use the default.
+    }
+    return 'newest';
+  });
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const setSortBy = (next: LibrarySort) => {
+    setSortByState(next);
+    try {
+      localStorage.setItem(LIBRARY_SORT_STORAGE_KEY, next);
+    } catch {
+      // Persistence is best-effort; the in-session choice still applies.
+    }
+  };
 
   const isOpen = activeDrawer === 'library';
 
@@ -64,27 +91,12 @@ export const LibraryDrawer: React.FC = () => {
     setActiveDrawer('source');
   };
 
-  const visibleTracks = useMemo(() => {
-    const normalizedSearch = searchQuery.trim().toLowerCase();
-    const filtered = normalizedSearch.length === 0
-      ? tracks
-      : tracks.filter((track) =>
-        track.title.toLowerCase().includes(normalizedSearch) ||
-        track.artist.toLowerCase().includes(normalizedSearch)
-      );
+  const visibleTracks = useMemo(
+    () => sortTracks(filterTracks(tracks, searchQuery), sortBy),
+    [tracks, searchQuery, sortBy]
+  );
 
-    if (sortBy === 'newest') return filtered;
-
-    const sorted = [...filtered];
-    sorted.sort((a, b) => {
-      if (sortBy === 'duration-asc') return a.duration - b.duration;
-      if (sortBy === 'duration-desc') return b.duration - a.duration;
-      if (sortBy === 'title-desc') return b.title.localeCompare(a.title, undefined, { sensitivity: 'base' });
-      if (sortBy === 'artist-asc') return a.artist.localeCompare(b.artist, undefined, { sensitivity: 'base' });
-      return a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
-    });
-    return sorted;
-  }, [tracks, searchQuery, sortBy]);
+  const isFiltering = normalizeForSearch(searchQuery).length > 0;
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && setActiveDrawer('none')}>
@@ -113,34 +125,62 @@ export const LibraryDrawer: React.FC = () => {
               </Button>
             </div>
           </div>
-          <SheetDescription className="text-zinc-500">
+          <SheetDescription className="text-zinc-500" aria-live="polite">
             {tracks.length > 0
-              ? `${tracks.length} track${tracks.length === 1 ? '' : 's'} available`
+              ? isFiltering && visibleTracks.length < tracks.length
+                ? `${visibleTracks.length} of ${tracks.length} tracks`
+                : `${tracks.length} track${tracks.length === 1 ? '' : 's'} available`
               : 'Select a track to start singing.'}
           </SheetDescription>
         </SheetHeader>
 
         <div className="mt-4 space-y-2">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search title or artist"
-            aria-label="Search library"
-            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
-          />
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && searchQuery.length > 0) {
+                  // Clear the query without letting the Sheet see the Escape.
+                  e.stopPropagation();
+                  setSearchQuery('');
+                }
+              }}
+              placeholder="Search title or artist"
+              aria-label="Search library"
+              className="w-full rounded-md border border-zinc-800 bg-zinc-900 pl-9 pr-8 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+            />
+            {searchQuery.length > 0 && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => {
+                  setSearchQuery('');
+                  searchInputRef.current?.focus();
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          <label htmlFor="library-sort" className="sr-only">
+            Sort library
+          </label>
           <select
+            id="library-sort"
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-            aria-label="Sort library"
+            onChange={(e) => setSortBy(e.target.value as LibrarySort)}
             className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
           >
-            <option value="newest">Sort: Newest</option>
-            <option value="title-asc">Sort: Title (A-Z)</option>
-            <option value="title-desc">Sort: Title (Z-A)</option>
-            <option value="artist-asc">Sort: Artist (A-Z)</option>
-            <option value="duration-asc">Sort: Duration (Shortest)</option>
-            <option value="duration-desc">Sort: Duration (Longest)</option>
+            {LIBRARY_SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
 
@@ -182,8 +222,17 @@ export const LibraryDrawer: React.FC = () => {
               {visibleTracks.map(track => (
                 <div
                   key={track.id}
-                  className="group flex items-center justify-between p-2.5 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  data-testid="library-track-row"
+                  className="group flex items-center justify-between p-2.5 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
                   onClick={() => handleSelect(track)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      if (e.key === ' ') e.preventDefault();
+                      handleSelect(track);
+                    }
+                  }}
                 >
                   <div className="flex items-center gap-3">
                     <div className="h-8 w-8 flex items-center justify-center rounded bg-zinc-900 group-hover:bg-zinc-800 text-zinc-600 group-hover:text-zinc-300">
@@ -210,7 +259,7 @@ export const LibraryDrawer: React.FC = () => {
                       e.stopPropagation();
                       handleSelect(track);
                     }}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity"
                   >
                     <Play className="h-4 w-4" />
                   </Button>

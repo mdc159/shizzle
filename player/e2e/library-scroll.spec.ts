@@ -26,7 +26,9 @@ test('library drawer scrolls to reveal all 27 tracks', async ({ page }) => {
   await page.route('**/api/media/session', (route) =>
     route.fulfill({ json: { cloudfront: false } })
   );
-  await page.route('**/api/library', (route) => route.fulfill({ json: { tracks } }));
+  await page.route('**/api/library', (route) =>
+    route.fulfill({ json: { tracks, total: tracks.length } })
+  );
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Library' }).click();
@@ -54,6 +56,8 @@ test('library drawer scrolls to reveal all 27 tracks', async ({ page }) => {
 test('library drawer supports search and sorting', async ({ page }) => {
   test.setTimeout(60_000);
 
+  // API (recency) order: Gamma, Alpha, Beta, Café. Café Song doubles as the
+  // diacritic case and the unknown-duration case (duration 0).
   const unsortedTracks = [
     {
       id: 'track-gamma',
@@ -82,6 +86,15 @@ test('library drawer supports search and sorting', async ({ page }) => {
       publicUrl: '/tracks/track-beta',
       status: 'ready' as const,
     },
+    {
+      id: 'track-cafe',
+      title: 'Café Song',
+      artist: 'Delta Artist',
+      slug: 'track-cafe',
+      duration: 0,
+      publicUrl: '/tracks/track-cafe',
+      status: 'ready' as const,
+    },
   ];
 
   await page.addInitScript(() => {
@@ -90,19 +103,106 @@ test('library drawer supports search and sorting', async ({ page }) => {
   await page.route('**/api/media/session', (route) =>
     route.fulfill({ json: { cloudfront: false } })
   );
-  await page.route('**/api/library', (route) => route.fulfill({ json: { tracks: unsortedTracks } }));
+  await page.route('**/api/library', (route) =>
+    route.fulfill({ json: { tracks: unsortedTracks, total: unsortedTracks.length } })
+  );
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Library' }).click();
 
-  await expect(page.getByText('3 tracks available')).toBeVisible({ timeout: 5_000 });
-  await expect(page.locator('h4').first()).toHaveText('Gamma Song');
+  const rows = page.getByTestId('library-track-row');
+  const sortSelect = page.getByRole('combobox', { name: 'Sort library' });
+  const searchInput = page.getByRole('textbox', { name: 'Search library' });
 
-  await page.getByRole('combobox', { name: 'Sort library' }).selectOption('title-asc');
-  await expect(page.locator('h4').first()).toHaveText('Alpha Song');
+  await expect(page.getByText('4 tracks available')).toBeVisible({ timeout: 5_000 });
 
-  await page.getByRole('textbox', { name: 'Search library' }).fill('beat');
-  await expect(page.getByText('Beta Beat', { exact: true })).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByText('Alpha Song', { exact: true })).toHaveCount(0);
-  await expect(page.getByText('Gamma Song', { exact: true })).toHaveCount(0);
+  // Default order is the API order.
+  await expect(rows).toHaveCount(4);
+  await expect(rows.nth(0)).toContainText('Gamma Song');
+  await expect(rows.nth(1)).toContainText('Alpha Song');
+  await expect(rows.nth(2)).toContainText('Beta Beat');
+  await expect(rows.nth(3)).toContainText('Café Song');
+
+  await sortSelect.selectOption('title-asc');
+  await expect(rows.nth(0)).toContainText('Alpha Song');
+  await expect(rows.nth(1)).toContainText('Beta Beat');
+  await expect(rows.nth(2)).toContainText('Café Song');
+  await expect(rows.nth(3)).toContainText('Gamma Song');
+
+  await sortSelect.selectOption('title-desc');
+  await expect(rows.nth(0)).toContainText('Gamma Song');
+  await expect(rows.nth(1)).toContainText('Café Song');
+  await expect(rows.nth(2)).toContainText('Beta Beat');
+  await expect(rows.nth(3)).toContainText('Alpha Song');
+
+  await sortSelect.selectOption('artist-asc');
+  await expect(rows.nth(0)).toContainText('Beta Beat');
+  await expect(rows.nth(1)).toContainText('Café Song');
+  await expect(rows.nth(2)).toContainText('Alpha Song');
+  await expect(rows.nth(3)).toContainText('Gamma Song');
+
+  // Unknown duration (0) always sorts last; shortest first for asc.
+  await sortSelect.selectOption('duration-asc');
+  await expect(rows.nth(0)).toContainText('Alpha Song');
+  await expect(rows.nth(1)).toContainText('Gamma Song');
+  await expect(rows.nth(2)).toContainText('Beta Beat');
+  await expect(rows.nth(3)).toContainText('Café Song');
+
+  // ...and longest first for desc, unknown still last.
+  await sortSelect.selectOption('duration-desc');
+  await expect(rows.nth(0)).toContainText('Beta Beat');
+  await expect(rows.nth(1)).toContainText('Gamma Song');
+  await expect(rows.nth(2)).toContainText('Alpha Song');
+  await expect(rows.nth(3)).toContainText('Café Song');
+
+  // The header count reflects the active filter.
+  await searchInput.fill('beat');
+  await expect(page.getByText('1 of 4 tracks')).toBeVisible({ timeout: 5_000 });
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText('Beta Beat');
+
+  // Search folds diacritics: "cafe" matches "Café Song".
+  await searchInput.fill('cafe');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText('Café Song');
+
+  // (Escape-inside-input behaviour is covered at the end of this test: the
+  // query clears, but Radix's document-capture Escape listener fires before
+  // React's stopPropagation can run, so the Sheet closes too.)
+
+  await searchInput.fill('zzz');
+  await expect(page.getByText('No matching tracks')).toBeVisible({ timeout: 5_000 });
+  await expect(rows).toHaveCount(0);
+
+  // The clear button restores the full list and the total count.
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  await expect(rows).toHaveCount(4);
+  await expect(page.getByText('4 tracks available')).toBeVisible({ timeout: 5_000 });
+
+  // The sort choice survives a page reload (localStorage persistence).
+  await sortSelect.selectOption('title-asc');
+  await page.reload();
+  await page.getByRole('button', { name: 'Library' }).click();
+  await expect(sortSelect).toHaveValue('title-asc', { timeout: 10_000 });
+  await expect(rows.nth(0)).toContainText('Alpha Song', { timeout: 5_000 });
+
+  // Escape with a non-empty query clears the query. Radix DismissableLayer
+  // listens for Escape on document with capture, which runs before React's
+  // stopPropagation, so the Sheet closes as well — accepted behaviour. The
+  // cleared query is observable by reopening the drawer.
+  await searchInput.fill('beat');
+  await expect(rows).toHaveCount(1);
+  await searchInput.press('Escape');
+  await expect(searchInput).not.toBeVisible({ timeout: 5_000 }); // Sheet closes
+  await page.getByRole('button', { name: 'Library' }).click();
+  await expect(searchInput).toHaveValue('', { timeout: 5_000 });
+  await expect(rows).toHaveCount(4);
+
+  // Rows are keyboard-reachable: Enter on a focused row selects the track,
+  // which closes the drawer (loadTrack sets activeDrawer to 'none'). Kept
+  // last: loadTrack triggers an unmocked manifest fetch whose error toast
+  // would overlay the Library button for later steps.
+  await rows.first().focus();
+  await page.keyboard.press('Enter');
+  await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
 });
