@@ -260,6 +260,10 @@ export const LibraryDrawer: React.FC = () => {
                   <Button
                     size="icon"
                     variant="ghost"
+                    // Not a tab stop: the row itself is focusable and does
+                    // the same thing. Stays mouse-clickable and appears on
+                    // group-focus-within / focus-visible.
+                    tabIndex={-1}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleSelect(track);
