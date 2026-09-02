@@ -100,7 +100,19 @@ export const LibraryDrawer: React.FC = () => {
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && setActiveDrawer('none')}>
-      <SheetContent side="left" className="flex flex-col w-[400px] sm:w-[540px] sm:max-w-none border-r-zinc-800 bg-zinc-950 text-zinc-100">
+      <SheetContent
+        side="left"
+        className="flex flex-col w-[400px] sm:w-[540px] sm:max-w-none border-r-zinc-800 bg-zinc-950 text-zinc-100"
+        onEscapeKeyDown={(e) => {
+          if (searchQuery.length > 0) {
+            // Clear the search instead of dismissing the drawer. Radix fires
+            // this on DialogPrimitive.Content before closing; preventDefault
+            // cancels the dismiss. Empty query falls through and closes.
+            e.preventDefault();
+            setSearchQuery('');
+          }
+        }}
+      >
         <SheetHeader>
           <div className="flex items-center justify-between">
             <SheetTitle className="text-zinc-100 text-2xl">Library</SheetTitle>
@@ -142,13 +154,6 @@ export const LibraryDrawer: React.FC = () => {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && searchQuery.length > 0) {
-                  // Clear the query without letting the Sheet see the Escape.
-                  e.stopPropagation();
-                  setSearchQuery('');
-                }
-              }}
               placeholder="Search title or artist"
               aria-label="Search library"
               className="w-full rounded-md border border-zinc-800 bg-zinc-900 pl-9 pr-8 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"

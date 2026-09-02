@@ -167,8 +167,8 @@ test('library drawer supports search and sorting', async ({ page }) => {
   await expect(rows.nth(0)).toContainText('Café Song');
 
   // (Escape-inside-input behaviour is covered at the end of this test: the
-  // query clears, but Radix's document-capture Escape listener fires before
-  // React's stopPropagation can run, so the Sheet closes too.)
+  // first Escape clears the query and keeps the drawer open, a second Escape
+  // closes it.)
 
   await searchInput.fill('zzz');
   await expect(page.getByText('No matching tracks')).toBeVisible({ timeout: 5_000 });
@@ -186,17 +186,22 @@ test('library drawer supports search and sorting', async ({ page }) => {
   await expect(sortSelect).toHaveValue('title-asc', { timeout: 10_000 });
   await expect(rows.nth(0)).toContainText('Alpha Song', { timeout: 5_000 });
 
-  // Escape with a non-empty query clears the query. Radix DismissableLayer
-  // listens for Escape on document with capture, which runs before React's
-  // stopPropagation, so the Sheet closes as well — accepted behaviour. The
-  // cleared query is observable by reopening the drawer.
+  // Escape with a non-empty query clears the query and the drawer stays
+  // open: SheetContent passes onEscapeKeyDown to DialogPrimitive.Content,
+  // where preventDefault cancels the dismiss. A second Escape with an empty
+  // query closes the drawer as before.
   await searchInput.fill('beat');
   await expect(rows).toHaveCount(1);
   await searchInput.press('Escape');
-  await expect(searchInput).not.toBeVisible({ timeout: 5_000 }); // Sheet closes
-  await page.getByRole('button', { name: 'Library' }).click();
-  await expect(searchInput).toHaveValue('', { timeout: 5_000 });
+  await expect(searchInput).toHaveValue('');
+  await expect(searchInput).toBeVisible();
   await expect(rows).toHaveCount(4);
+  await searchInput.press('Escape');
+  await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
+
+  // Reopen for the keyboard assertion below.
+  await page.getByRole('button', { name: 'Library' }).click();
+  await expect(rows.first()).toBeVisible({ timeout: 5_000 });
 
   // Rows are keyboard-reachable: Enter on a focused row selects the track,
   // which closes the drawer (loadTrack sets activeDrawer to 'none'). Kept
