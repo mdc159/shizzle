@@ -218,6 +218,74 @@ class NormalizeTrackMetadataTests(unittest.TestCase):
         self.assertEqual(after[TRACK_MOJIBAKE].title, MOJIBAKE_TITLE)
         self.assertFalse(self.report_path.exists())
 
+    def test_delete_sets_deleted_at_only_on_that_row(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        mapping["tracks"][2] = {
+            "id": TRACK_TOOL.hex[:8],
+            "expect_id_prefix": TRACK_TOOL.hex[:8],
+            "expect": {"artist": "TOOL", "title": "The Pot"},
+            "action": "delete",
+            "note": "duplicate of another pressing",
+        }
+        self.write_mapping(mapping)
+        before = self.read_tracks()
+        code = self.run_cli("--apply", "--report", str(self.report_path))
+        self.assertEqual(code, 0)
+        after = self.read_tracks()
+        self.assertIsNotNone(after[TRACK_TOOL].deleted_at)
+        # Soft delete touches nothing else on the row.
+        self.assertEqual(after[TRACK_TOOL].artist, "TOOL")
+        self.assertEqual(after[TRACK_TOOL].title, "The Pot")
+        for track_id in (TRACK_FULL, TRACK_MOJIBAKE):
+            self.assertIsNone(after[track_id].deleted_at)
+        # The previously soft-deleted row keeps its original deleted_at.
+        self.assertEqual(after[TRACK_DELETED].deleted_at, before[TRACK_DELETED].deleted_at)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["counts"]["deleted"], 1)
+        self.assertEqual(report["counts"]["tracks_updated"], 2)
+        self.assertEqual(
+            [row["id"] for row in report["deletions"]], [str(TRACK_TOOL)]
+        )
+        self.assertNotIn(str(TRACK_TOOL), {row["id"] for row in report["tracks"]})
+
+    def test_delete_expect_mismatch_aborts_with_exit_2(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        mapping["tracks"][2] = {
+            "id": TRACK_TOOL.hex[:8],
+            "expect_id_prefix": TRACK_TOOL.hex[:8],
+            "expect": {"artist": "TOOL", "title": "Wrong Title"},
+            "action": "delete",
+        }
+        self.write_mapping(mapping)
+        code = self.run_cli("--apply", "--report", str(self.report_path))
+        self.assertEqual(code, 2)
+        after = self.read_tracks()
+        self.assertIsNone(after[TRACK_TOOL].deleted_at)
+        self.assertEqual(after[TRACK_FULL].artist, "")
+        self.assertFalse(self.report_path.exists())
+
+    def test_dry_run_deletes_nothing(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        mapping["tracks"][2] = {
+            "id": TRACK_TOOL.hex[:8],
+            "expect_id_prefix": TRACK_TOOL.hex[:8],
+            "expect": {"artist": "TOOL", "title": "The Pot"},
+            "action": "delete",
+            "note": "duplicate of another pressing",
+        }
+        self.write_mapping(mapping)
+        code = self.run_cli()
+        self.assertEqual(code, 0)
+        after = self.read_tracks()
+        for track in after.values():
+            if track.id == TRACK_DELETED:
+                continue
+            self.assertIsNone(track.deleted_at)
+        self.assertFalse(self.report_path.exists())
+
     def test_report_written_on_apply(self) -> None:
         self.seed()
         self.write_mapping(base_mapping())

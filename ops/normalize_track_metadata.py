@@ -2,7 +2,10 @@
 """Normalize ``tracks.artist`` / ``tracks.title`` across the whole library.
 
 Reads a reviewed mapping (schema ``shizzle-track-metadata-fix-v1``) and rewrites
-only the two display-metadata columns. Publication state is untouched: no
+only the two display-metadata columns. Entries may also carry
+``"action": "delete"`` to soft-delete a duplicate (same mechanism as the API
+DELETE route: row lock + ``deleted_at = utcnow()``). Publication state is
+untouched: no
 generation, ``s3_prefix``, ``manifest_key``, or pointer changes (C-series
 invariants), and no schema writes (F3) — this is a plain row update.
 
@@ -13,8 +16,9 @@ Safety properties:
 * **All-or-nothing validation.** Every resolution problem (missing id, expect
   mismatch, ambiguous prefix, uncovered track, duplicate target) is collected
   and printed together; any violation aborts with exit 2 before any write.
-* **One transaction.** ``--apply`` updates every resolved row in a single
-  transaction, re-reads each row, and asserts it matches the target.
+* **One transaction.** ``--apply`` applies every update and soft delete in a
+  single transaction, then re-reads each row and asserts it matches the target
+  (``deleted_at`` set for deletions).
 * **Full coverage.** The mapping must name every non-deleted track; soft-deleted
   rows are ignored entirely.
 
@@ -47,7 +51,7 @@ if SERVER_SRC.is_dir():
     sys.path.insert(0, str(SERVER_SRC))
 
 from shizzle_server.db import create_engine, create_session_factory
-from shizzle_server.db.models import Track
+from shizzle_server.db.models import Track, utcnow
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
@@ -66,6 +70,7 @@ class PlannedChange:
     new_artist: str
     new_title: str
     note: str
+    action: str = "update"  # "update" rewrites artist/title; "delete" soft-deletes
 
     @property
     def changed(self) -> bool:
@@ -120,10 +125,20 @@ def resolve(
 
     for index, entry in enumerate(mapping["tracks"]):
         label = entry.get("id") or entry.get("expect_id_prefix") or f"entry[{index}]"
-        for field in ("artist", "title"):
-            if not isinstance(entry.get(field), str):
-                violations.append(f"{label}: missing target {field!r} string")
-        if not isinstance(entry.get("artist"), str) or not isinstance(entry.get("title"), str):
+        action = entry.get("action", "update")
+        if action not in {"update", "delete"}:
+            violations.append(f"{label}: action must be 'update' or 'delete', got {action!r}")
+            continue
+        if action == "update":
+            for field in ("artist", "title"):
+                if not isinstance(entry.get(field), str):
+                    violations.append(f"{label}: missing target {field!r} string")
+            if not isinstance(entry.get("artist"), str) or not isinstance(entry.get("title"), str):
+                continue
+        elif entry.get("expect") is None and not entry.get("note"):
+            # A delete must carry a human-checkable anchor: either an exact
+            # expect block or a note saying why the track is a duplicate.
+            violations.append(f"{label}: delete entries require an 'expect' block or a 'note'")
             continue
 
         track: Track | None = None
@@ -139,19 +154,6 @@ def resolve(
                 if track is None:
                     violations.append(f"{label}: no non-deleted track with id {raw_id}")
                     continue
-                expect = entry.get("expect")
-                if expect is not None and (
-                    track.artist != expect.get("artist") or track.title != expect.get("title")
-                ):
-                    violations.append(
-                        f"{label}: expect mismatch — current "
-                        f"{track.artist!r} / {track.title!r} != expected "
-                        f"{expect.get('artist')!r} / {expect.get('title')!r}"
-                    )
-                    continue
-            elif entry.get("expect") is not None:
-                violations.append(f"{label}: 'expect' requires a full track id, got {raw_id!r}")
-                continue
 
         prefix = entry.get("expect_id_prefix")
         if prefix is not None:
@@ -177,6 +179,16 @@ def resolve(
         if track is None:
             violations.append(f"{label}: entry needs a full 'id' or an 'expect_id_prefix'")
             continue
+        expect = entry.get("expect")
+        if expect is not None and (
+            track.artist != expect.get("artist") or track.title != expect.get("title")
+        ):
+            violations.append(
+                f"{label}: expect mismatch — current "
+                f"{track.artist!r} / {track.title!r} != expected "
+                f"{expect.get('artist')!r} / {expect.get('title')!r}"
+            )
+            continue
         if track.id in claimed:
             violations.append(
                 f"{label}: resolves to track {track.id} already targeted by "
@@ -189,9 +201,10 @@ def resolve(
                 track_id=track.id,
                 old_artist=track.artist,
                 old_title=track.title,
-                new_artist=entry["artist"],
-                new_title=entry["title"],
+                new_artist=track.artist if action == "delete" else entry["artist"],
+                new_title=track.title if action == "delete" else entry["title"],
                 note=str(entry.get("note") or ""),
+                action=action,
             )
         )
 
@@ -206,29 +219,55 @@ def resolve(
     return planned, violations
 
 
-def print_table(planned: list[PlannedChange]) -> None:
-    rows = sorted(planned, key=lambda c: (c.new_artist.casefold(), c.new_title.casefold()))
-    header = ("id", "old artist", "old title", "new artist", "new title", "note")
-    body = [
-        (
-            change.track_id.hex[:8],
-            change.old_artist,
-            change.old_title,
-            change.new_artist,
-            change.new_title,
-            change.note,
-        )
-        for change in rows
-    ]
+def _sort_key(change: PlannedChange) -> tuple[str, str]:
+    return (change.new_artist.casefold(), change.new_title.casefold())
+
+
+def _print_rows(header: tuple[str, ...], body: list[tuple[str, ...]]) -> None:
     widths = [
         max(len(header[i]), *(len(row[i]) for row in body)) if body else len(header[i])
         for i in range(len(header))
     ]
-    line = "  ".join(header[i].ljust(widths[i]) for i in range(len(header)))
-    print(line)
+    print("  ".join(header[i].ljust(widths[i]) for i in range(len(header))))
     print("  ".join("-" * widths[i] for i in range(len(header))))
     for row in body:
         print("  ".join(row[i].ljust(widths[i]) for i in range(len(header))))
+
+
+def print_tables(planned: list[PlannedChange]) -> None:
+    """Print updates and deletions as separate before/after tables."""
+    updates = sorted((c for c in planned if c.action == "update"), key=_sort_key)
+    deletions = sorted((c for c in planned if c.action == "delete"), key=_sort_key)
+    if updates:
+        print("updates:")
+        _print_rows(
+            ("id", "old artist", "old title", "new artist", "new title", "note"),
+            [
+                (
+                    change.track_id.hex[:8],
+                    change.old_artist,
+                    change.old_title,
+                    change.new_artist,
+                    change.new_title,
+                    change.note,
+                )
+                for change in updates
+            ],
+        )
+    if deletions:
+        print("deletions (soft delete):")
+        _print_rows(
+            ("id", "artist", "title", "note"),
+            [
+                (
+                    change.track_id.hex[:8],
+                    change.old_artist,
+                    change.old_title,
+                    change.note,
+                )
+                for change in deletions
+            ],
+        )
 
 
 async def fetch_tracks(database_url: str) -> list[Track]:
@@ -245,7 +284,11 @@ async def fetch_tracks(database_url: str) -> list[Track]:
 async def apply_changes(
     database_url: str, planned: list[PlannedChange]
 ) -> list[PlannedChange]:
-    """Update artist/title only, in one transaction, then re-read and assert."""
+    """Apply updates and soft deletes in one transaction, then re-read and assert.
+
+    Soft delete uses the same mechanism as the API DELETE route
+    (TrackRepository.soft_delete): row lock, set deleted_at = utcnow().
+    """
     engine = create_engine(database_url)
     try:
         session_factory = create_session_factory(engine)
@@ -254,15 +297,23 @@ async def apply_changes(
                 track = await session.get(Track, change.track_id, with_for_update=True)
                 if track is None or track.deleted_at is not None:
                     raise RuntimeError(f"track {change.track_id} vanished mid-apply; aborting")
-                track.artist = change.new_artist
-                track.title = change.new_title
-        # Re-read every updated row and assert it matches the target.
+                if change.action == "delete":
+                    track.deleted_at = utcnow()
+                else:
+                    track.artist = change.new_artist
+                    track.title = change.new_title
+        # Re-read every touched row and assert it matches the target.
         async with session_factory() as session:
             for change in planned:
                 track = await session.get(Track, change.track_id)
                 if track is None:
                     raise RuntimeError(f"track {change.track_id} missing after apply")
-                if track.artist != change.new_artist or track.title != change.new_title:
+                if change.action == "delete":
+                    if track.deleted_at is None:
+                        raise RuntimeError(
+                            f"track {change.track_id} re-read mismatch: deleted_at not set"
+                        )
+                elif track.artist != change.new_artist or track.title != change.new_title:
                     raise RuntimeError(
                         f"track {change.track_id} re-read mismatch: "
                         f"{track.artist!r} / {track.title!r}"
@@ -275,16 +326,18 @@ async def apply_changes(
 def build_report(
     *, database_url: str, mapping_path: Path, planned: list[PlannedChange]
 ) -> dict[str, Any]:
-    rows = sorted(planned, key=lambda c: (c.new_artist.casefold(), c.new_title.casefold()))
+    updates = sorted((c for c in planned if c.action == "update"), key=_sort_key)
+    deletions = sorted((c for c in planned if c.action == "delete"), key=_sort_key)
     return {
         "schema": REPORT_SCHEMA,
         "applied_at": datetime.now(UTC).isoformat(),
         "database_host": database_host(database_url),
         "mapping": str(mapping_path),
         "counts": {
-            "mapping_entries": len(rows),
-            "tracks_updated": sum(1 for c in rows if c.changed),
-            "tracks_unchanged": sum(1 for c in rows if not c.changed),
+            "mapping_entries": len(planned),
+            "tracks_updated": sum(1 for c in updates if c.changed),
+            "tracks_unchanged": sum(1 for c in updates if not c.changed),
+            "deleted": len(deletions),
         },
         "tracks": [
             {
@@ -293,7 +346,15 @@ def build_report(
                 "after": {"artist": change.new_artist, "title": change.new_title},
                 "note": change.note,
             }
-            for change in rows
+            for change in updates
+        ],
+        "deletions": [
+            {
+                "id": str(change.track_id),
+                "before": {"artist": change.old_artist, "title": change.old_title},
+                "note": change.note,
+            }
+            for change in deletions
         ],
     }
 
@@ -317,8 +378,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {violation}", file=sys.stderr)
         return 2
 
-    print(f"mode: {'APPLY' if args.apply else 'DRY RUN'} — {len(planned)} track(s)")
-    print_table(planned)
+    updates = sum(1 for c in planned if c.action == "update")
+    deletions = len(planned) - updates
+    print(
+        f"mode: {'APPLY' if args.apply else 'DRY RUN'} — "
+        f"{updates} update(s), {deletions} deletion(s)"
+    )
+    print_tables(planned)
 
     if not args.apply:
         print("dry run: no changes made (pass --apply to write)")
