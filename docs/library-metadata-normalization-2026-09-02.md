@@ -33,13 +33,24 @@ The mapping is
   block (current values must match exactly) or an `expect_id_prefix` (8 hex
   chars, must match exactly one non-deleted track). Prefix matching exists so
   mojibake titles never have to be retyped into the mapping.
-- Every non-deleted track must be covered; soft-deleted rows are ignored.
+- Entries may carry `"action": "delete"` to soft-delete a duplicate instead
+  of renaming it. Delete entries resolve the same way (full `id` or
+  `expect_id_prefix`) and must carry an `expect` block or a `note` saying why
+  the track is a duplicate. Deletion uses the same mechanism as the API
+  DELETE route (`TrackRepository.soft_delete`: row lock, `deleted_at =
+  utcnow()`), happens inside the same single transaction as the updates, and
+  is verified on re-read (`deleted_at` set). A delete entry counts as
+  covering its track. Deletions are listed separately in the before/after
+  output and in the JSON report (`counts.deleted`, `deletions[]`). The media
+  objects and generation history are retained; the row is only marked.
+- Every non-deleted track must be covered (by an update or a delete entry);
+  soft-deleted rows are ignored.
 - All violations (missing id, expect mismatch, ambiguous prefix, uncovered
   track, duplicate target) are collected and printed together; any violation
   aborts with exit 2 before any write.
-- Without `--apply` the script is a dry run: it prints the before/after table
-  and changes nothing.
-- With `--apply`, all updates happen in ONE transaction, then every updated
+- Without `--apply` the script is a dry run: it prints the before/after
+  tables and changes nothing.
+- With `--apply`, all changes happen in ONE transaction, then every touched
   row is re-read and asserted against the target, and a JSON run record is
   written (timestamp, database host without credentials, per-track
   before/after, counts).
