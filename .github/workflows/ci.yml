@@ -99,6 +99,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run lint
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test e2e/library-scroll.spec.ts --reporter=list
+        env:
+          SHIZZLE_E2E_HEADLESS: "1"
 
   deploy-gate:
     name: Classify merge as deployable or docs-only
