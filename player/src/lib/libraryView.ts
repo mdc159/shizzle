@@ -2,27 +2,18 @@
  * Search/sort view helpers for the Library drawer.
  *
  * Search folds case and diacritics on both sides so typing "cafe" matches
- * "Café". Sorting treats duration <= 0 as "unknown" (the backend stores 0.0
- * when no duration is known) and always places unknown durations last.
+ * "Café". Sorting is alphabetical by title or artist; tracks with no
+ * artist (empty after trim) always sort last in artist order.
  */
 
 import type { Track } from '@/types/karaoke';
 
-export type LibrarySort =
-  | 'newest'
-  | 'title-asc'
-  | 'title-desc'
-  | 'artist-asc'
-  | 'duration-asc'
-  | 'duration-desc';
+export type LibrarySort = 'newest' | 'title-asc' | 'artist-asc';
 
 export const LIBRARY_SORT_OPTIONS: ReadonlyArray<{ value: LibrarySort; label: string }> = [
   { value: 'newest', label: 'Sort: Newest' },
-  { value: 'title-asc', label: 'Sort: Title (A-Z)' },
-  { value: 'title-desc', label: 'Sort: Title (Z-A)' },
-  { value: 'artist-asc', label: 'Sort: Artist (A-Z)' },
-  { value: 'duration-asc', label: 'Sort: Duration (Shortest)' },
-  { value: 'duration-desc', label: 'Sort: Duration (Longest)' },
+  { value: 'title-asc', label: 'Sort: Title (A–Z)' },
+  { value: 'artist-asc', label: 'Sort: Artist (A–Z)' },
 ];
 
 export const LIBRARY_SORT_STORAGE_KEY = 'shizzle_library_sort';
@@ -50,15 +41,16 @@ export function filterTracks(tracks: Track[], query: string): Track[] {
 const compareLocale = (a: string, b: string): number =>
   a.localeCompare(b, undefined, { sensitivity: 'base' });
 
-// Unknown durations (<= 0) always sort last, for both directions. Array
-// sort is stable, so ties keep the incoming (API recency) order.
-const compareDuration = (a: Track, b: Track, direction: 1 | -1): number => {
-  const aKnown = a.duration > 0;
-  const bKnown = b.duration > 0;
-  if (aKnown && bKnown) return (a.duration - b.duration) * direction;
-  if (aKnown) return -1;
-  if (bKnown) return 1;
-  return 0;
+// Array sort is stable, so full ties keep the incoming (API recency) order.
+const compareTitle = (a: Track, b: Track): number =>
+  compareLocale(a.title, b.title) || compareLocale(a.artist, b.artist);
+
+const compareArtist = (a: Track, b: Track): number => {
+  const aEmpty = a.artist.trim().length === 0;
+  const bEmpty = b.artist.trim().length === 0;
+  // Tracks with no artist sort last, without disturbing each other's order.
+  if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+  return compareLocale(a.artist, b.artist) || compareLocale(a.title, b.title);
 };
 
 /** 'newest' returns the input reference (API order is recency order). */
@@ -68,15 +60,9 @@ export function sortTracks(tracks: Track[], sort: LibrarySort): Track[] {
   sorted.sort((a, b) => {
     switch (sort) {
       case 'title-asc':
-        return compareLocale(a.title, b.title);
-      case 'title-desc':
-        return compareLocale(b.title, a.title);
+        return compareTitle(a, b);
       case 'artist-asc':
-        return compareLocale(a.artist, b.artist);
-      case 'duration-asc':
-        return compareDuration(a, b, 1);
-      case 'duration-desc':
-        return compareDuration(a, b, -1);
+        return compareArtist(a, b);
     }
   });
   return sorted;
