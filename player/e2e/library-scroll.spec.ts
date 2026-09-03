@@ -206,3 +206,52 @@ test('library drawer supports search and sorting', async ({ page }) => {
   await page.keyboard.press('Enter');
   await expect(searchInput).not.toBeVisible({ timeout: 5_000 });
 });
+
+test('space on a focused library row selects without toggling playback', async ({ page }) => {
+  test.setTimeout(60_000);
+
+  // Regression test for the Greptile P1 on PR #12: Space on a focused
+  // track row used to bubble to the window-level Space shortcut in App.tsx,
+  // flipping the freshly selected track back to playing before its manifest
+  // was ready. The row now stops propagation and the global handler ignores
+  // prevented events and keys aimed at interactive elements.
+  const twoTracks = tracks.slice(0, 2);
+
+  await page.addInitScript(() => {
+    localStorage.setItem('shizzle_token', 'e2e-token');
+  });
+  await page.route('**/api/media/session', (route) =>
+    route.fulfill({ json: { cloudfront: false } })
+  );
+  await page.route('**/api/library', (route) =>
+    route.fulfill({ json: { tracks: twoTracks, total: twoTracks.length } })
+  );
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Library' }).click();
+
+  const rows = page.getByTestId('library-track-row');
+  await expect(rows).toHaveCount(2);
+
+  await rows.first().focus();
+  await page.keyboard.press('Space');
+
+  // The row activation still selects the track, which closes the drawer.
+  await expect(rows.first()).not.toBeVisible({ timeout: 5_000 });
+
+  // ...but it must not reach the global play/pause shortcut: loadTrack
+  // selects with playing=false, and a leaked Space would flip the flag back
+  // to true before the manifest is ready. Assert on the real store (exposed
+  // as window.__shizzle in dev builds) — the transport's accessible name
+  // cannot distinguish this, because "Loading stems" takes precedence over
+  // "Pause" while the unmocked manifest fetch leaves ready=false.
+  const state = await page.evaluate(() => {
+    const s = (window as unknown as { __shizzle: { store: { getState: () => { playing: boolean; currentTrack: { id: string } | null } } } }).__shizzle.store.getState();
+    return { playing: s.playing, trackId: s.currentTrack?.id ?? null };
+  });
+  expect(state.trackId).toBe(twoTracks[0].id);
+  expect(state.playing).toBe(false);
+
+  // And the transport stays parked on the loading state.
+  await expect(page.getByRole('button', { name: 'Loading stems' })).toBeVisible({ timeout: 5_000 });
+});
