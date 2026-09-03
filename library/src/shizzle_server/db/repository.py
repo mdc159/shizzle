@@ -110,9 +110,15 @@ def track_location_problem(s3_prefix: str, manifest_key: str) -> str | None:
     ``local/`` placeholder, an empty prefix — can never be a playable track.
     """
     problems = []
-    if not s3_prefix.startswith("tracks/") or not s3_prefix.removeprefix("tracks/").strip("/"):
+    body = s3_prefix.removeprefix("tracks/")
+    if not s3_prefix.startswith("tracks/") or not body.strip("/"):
         problems.append(f"s3_prefix {s3_prefix!r} is not under tracks/ with a non-empty path")
-    expected_manifest = f"{s3_prefix.rstrip('/')}/manifest.json"
+    elif body != body.strip("/") or "//" in body:
+        # C7 pins the manifest key to "<s3_prefix>/manifest.json" verbatim: a
+        # prefix with empty segments or a trailing slash could only pass by
+        # tolerating a location that is not its own manifest's real parent.
+        problems.append(f"s3_prefix {s3_prefix!r} is not a canonical tracks/ path")
+    expected_manifest = f"{s3_prefix}/manifest.json"
     if manifest_key != expected_manifest:
         problems.append(
             f"manifest_key {manifest_key!r} is not the prefix manifest {expected_manifest!r}"
@@ -628,10 +634,15 @@ class JobRepository:
         problem = track_location_problem(s3_prefix, manifest_key)
         if problem is not None:
             async with self._sf() as session, session.begin():
-                # Idempotent (B11): a crash after this commit but before the
-                # stage fails the job re-runs publish_track; the refusal is
-                # deterministic, so record it once rather than appending a
-                # duplicate publish_refused event per retry.
+                # Serialize concurrent refusals on the job row (FOR UPDATE,
+                # the same lock the publish path takes): two racing refusals
+                # run one after the other, so only the first passes the
+                # existence check and records the event. Idempotent (B11): a
+                # crash after this commit but before the stage fails the job
+                # re-runs publish_track; the refusal is deterministic, so
+                # record it once rather than appending a duplicate
+                # publish_refused event per retry.
+                await session.get(Job, job_id, with_for_update=True)
                 already = await session.execute(
                     select(JobEvent).where(
                         JobEvent.job_id == job_id, JobEvent.event == "publish_refused"

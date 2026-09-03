@@ -20,8 +20,9 @@ import asyncio
 import uuid
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from shizzle_server.db.models import JobStage, Track
+from shizzle_server.db.models import Job, JobStage, Track
 from shizzle_server.db.repository import (
     PublishRefusedError,
     track_id_for_job,
@@ -180,10 +181,62 @@ async def test_publish_track_refusal_is_recorded_once(job_repo, track_repo, uplo
     assert len(refused) == 1
 
 
+async def test_publish_track_refusal_locks_job_row_before_event_check(
+    job_repo, track_repo, upload_job, monkeypatch
+):
+    """C7 at-most-once: the refusal path locks the job row FOR UPDATE before
+    checking for an existing publish_refused event, so two concurrent
+    refusals serialize on the row lock and only the first inserts. The race
+    itself is unrepresentable on SQLite (single writer, no row locks); it
+    runs on real Postgres in
+    tests/contract/test_orchestrator_postgres.py::TestConcurrentRefusal."""
+    await _publishing_job(job_repo, upload_job)
+
+    calls: list[str] = []
+    original_get = AsyncSession.get
+    original_execute = AsyncSession.execute
+
+    async def spy_get(self, entity, ident, **kwargs):
+        if entity is Job:
+            assert kwargs.get("with_for_update") is True
+            calls.append("lock_job")
+        return await original_get(self, entity, ident, **kwargs)
+
+    async def spy_execute(self, statement, *args, **kwargs):
+        if "FROM job_events" in str(statement):
+            calls.append("event_check")
+        return await original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", spy_get)
+    monkeypatch.setattr(AsyncSession, "execute", spy_execute)
+
+    kwargs = {
+        "title": "Phantom",
+        "duration_seconds": 1.0,
+        "s3_prefix": f"local/{upload_job.id.hex}",
+        "manifest_key": f"local/{upload_job.id.hex}/stems.json",
+    }
+    with pytest.raises(PublishRefusedError):
+        await job_repo.publish_track(upload_job.id, **kwargs)
+    # Two sequential refusals (crash-rerun, B11) still record one event.
+    with pytest.raises(PublishRefusedError):
+        await job_repo.publish_track(upload_job.id, **kwargs)
+
+    assert calls.index("lock_job") < calls.index("event_check")
+    refused = [
+        e for e in await job_repo.list_events(upload_job.id) if e.event == "publish_refused"
+    ]
+    assert len(refused) == 1
+    assert await track_repo.list_tracks() == []
+
+
 def test_track_location_problem_messages():
     assert track_location_problem("tracks/x/1", "tracks/x/1/manifest.json") is None
-    # A trailing slash on the prefix still matches its manifest.
-    assert track_location_problem("tracks/x/1/", "tracks/x/1/manifest.json") is None
+    # C7 pins the manifest key to "<s3_prefix>/manifest.json" verbatim: a
+    # prefix carrying trailing or repeated slashes is not its own manifest's
+    # parent and is refused rather than tolerated.
+    assert track_location_problem("tracks/x/1/", "tracks/x/1/manifest.json") is not None
+    assert track_location_problem("tracks/x//1", "tracks/x/1/manifest.json") is not None
     assert "tracks/" in track_location_problem("local/abc", "local/abc/stems.json")
     assert "manifest.json" in track_location_problem("tracks/x/1", "tracks/x/1/stems.json")
     assert track_location_problem("tracks/", "tracks/manifest.json") is not None
