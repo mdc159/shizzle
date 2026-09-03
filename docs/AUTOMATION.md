@@ -52,8 +52,11 @@ under `/opt/shizzle/prod` per invariant E3. The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
 its heartbeat keeps /api/health green, and new jobs fail closed at dispatch
-with `RUNPOD_DISPATCH_FAILED`. Set both variables in the production `.env`
-when the RunPod path is connected.
+with `RUNPOD_DISPATCH_FAILED`. A job already dispatched to RunPod when
+credentials disappear parks instead: its polls fail retryable and the stall
+watchdog does not fire while the client is unconfigured, so the live remote
+job reconciles on the first poll after credentials return. Set both
+variables in the production `.env` when the RunPod path is connected.
 
 ## 3. Deploy procedure
 

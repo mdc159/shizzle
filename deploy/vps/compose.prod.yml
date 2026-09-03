@@ -81,9 +81,10 @@ services:
       # reads) runs regardless of pipeline.
       # Parked cloud is a valid state: with RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID
       # unset (the RunPod path is not connected yet) the orchestrator still
-      # starts and beats, and new jobs fail closed at dispatch with
-      # RUNPOD_DISPATCH_FAILED. Set both variables in .env when the cloud path
-      # is connected.
+      # starts and beats, new jobs fail closed at dispatch with
+      # RUNPOD_DISPATCH_FAILED, and jobs already dispatched to RunPod park
+      # until credentials return. Set both variables in .env when the cloud
+      # path is connected.
       SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-cloud}
     volumes:
       - appdata:/app/data

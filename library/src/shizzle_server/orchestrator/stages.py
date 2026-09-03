@@ -28,7 +28,7 @@ from ..errors import ErrorCode, StageError
 from ..settings import Settings
 from . import cloud
 from .pipelines import Pipeline
-from .runpod_client import RunPodClient, parse_worker_progress
+from .runpod_client import NotConfiguredRunPodClient, RunPodClient, parse_worker_progress
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,19 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             stalled_for = _age_seconds(job.worker_heartbeat_at)
             if not transient:
                 raise
+            if isinstance(ctx.runpod, NotConfiguredRunPodClient):
+                # Configuration outage (parked cloud): an unconfigured client
+                # can never observe the remote job, and its heartbeat can
+                # never refresh while polling is impossible — the stall
+                # watchdog below would eventually kill a live, paid RunPod
+                # job that nothing is wrong with. Park until credentials
+                # return; the job reconciles on the first real poll.
+                logger.info(
+                    "job %s: RunPod not configured; parking dispatched job %s",
+                    job.id,
+                    job.runpod_job_id,
+                )
+                return None
             if (
                 stalled_for is not None
                 and stalled_for > ctx.settings.runpod_worker_stall_seconds

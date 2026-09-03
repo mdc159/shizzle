@@ -459,8 +459,8 @@ def _stub_cloud_intake(monkeypatch) -> None:
 
 async def _run_cloud_orch(settings, fake: FakeRunPodClient):
     settings.shizzle_pipeline = "cloud"
-    # Cloud mode refuses to start without RunPod credentials; the fake client
-    # replaces the HTTP one below, so placeholder values suffice here.
+    # Placeholder credentials so the orchestrator skips the parked-cloud
+    # warning path; the fake client replaces the HTTP one below.
     settings.runpod_api_key = "unit-test-key"
     settings.runpod_endpoint_id = "unit-test-endpoint"
     orch = Orchestrator(settings, worker_id="cloud-unit")
@@ -498,8 +498,9 @@ def test_cloud_orchestrator_parked_without_runpod_config(settings, caplog):
 
 
 async def test_not_configured_runpod_client_reports_dispatch_failure():
-    """If a cloud handler is still reached unconfigured, the job fails with
-    RUNPOD_DISPATCH_FAILED (non-retryable), not a generic INTERNAL."""
+    """If a cloud handler is still reached unconfigured, a fresh dispatch
+    fails with RUNPOD_DISPATCH_FAILED (non-retryable), not a generic
+    INTERNAL."""
     from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
 
     client = NotConfiguredRunPodClient()
@@ -508,6 +509,53 @@ async def test_not_configured_runpod_client_reports_dispatch_failure():
     assert excinfo.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
     assert excinfo.value.retryable is False
     assert "RUNPOD_API_KEY" in excinfo.value.detail
+
+    # Polling an already-dispatched remote job stays retryable: the failure
+    # says nothing about that job, so the handler parks it until credentials
+    # return instead of failing it permanently.
+    with pytest.raises(StageError) as poll_exc:
+        await client.poll("rp-parked")
+    assert poll_exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert poll_exc.value.retryable is True
+
+
+async def test_parked_cloud_parks_inflight_dispatched_job(
+    settings, job_repo, session_factory, upload_job
+):
+    """A job dispatched before RunPod credentials vanished must park, not
+    fail: with the unconfigured client the poll failure carries no signal
+    about the remote job, so even a heartbeat past the stall window must not
+    trip the stall watchdog."""
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_worker_stall_seconds = 300.0
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    async with session_factory() as session, session.begin():
+        job = await session.get(Job, upload_job.id)
+        job.runpod_job_id = "rp-parked"
+        job.worker_phase = "extracting"
+        # Stale past the stall window: would be killed on a real poll outage.
+        job.worker_heartbeat_at = utcnow() - timedelta(seconds=3600)
+
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=NotConfiguredRunPodClient(),
+        worker_id="parked",
+    )
+    assert await handle_dispatched(ctx) is None
+
+    job = await job_repo.get_job(upload_job.id)
+    assert job.status == JobStage.dispatched  # parked, not failed
+    assert job.worker_phase == "extracting"  # not marked failed
 
 
 async def test_cloud_pipeline_fails_inflight_splitting_job(settings, job_repo, upload_job):
