@@ -417,6 +417,17 @@
       "parser_artist": "Alice In Chains",
       "parser_title": "Rooster",
       "parser_confident": true
+    },
+    {
+      "id": "9ebbeb18-6649-594e-90d3-bad010962d50",
+      "raw": "Band\u001f-\u001fSongTitle",
+      "raw_artist": "",
+      "expect_artist": "Band",
+      "expect_title": "Song Title",
+      "has_separator": true,
+      "parser_artist": "Band",
+      "parser_title": "Song Title",
+      "parser_confident": true
     }
   ]
 }

@@ -122,12 +122,14 @@ async def test_upload_typed_artist_overrides_filename(client):
 async def test_upload_bounds_title_and_artist_length(client):
     """Metadata fields are bounded so they cannot bypass the size guard."""
     c, _ = client
-    resp = await c.post(
-        "/api/upload",
-        files={"file": ("x.mp4", b"fake mp4 bytes", "video/mp4")},
-        data={"title": "t" * 1025, "artist": "a" * 1025},
-    )
-    assert resp.status_code == 422
+    # Each field is exercised alone so a dropped bound on either one fails.
+    for field in ("title", "artist"):
+        resp = await c.post(
+            "/api/upload",
+            files={"file": ("x.mp4", b"fake mp4 bytes", "video/mp4")},
+            data={field: "x" * 1025},
+        )
+        assert resp.status_code == 422, field
     ok = await c.post(
         "/api/upload",
         files={"file": ("x.mp4", b"fake mp4 bytes", "video/mp4")},
@@ -138,11 +140,12 @@ async def test_upload_bounds_title_and_artist_length(client):
 
 async def test_submit_url_bounds_title_and_artist_length(client):
     c, _ = client
-    resp = await c.post(
-        "/api/submit-url",
-        json={"url": "https://youtube.com/watch?v=x", "title": "t" * 1025},
-    )
-    assert resp.status_code == 422
+    for field in ("title", "artist"):
+        resp = await c.post(
+            "/api/submit-url",
+            json={"url": "https://youtube.com/watch?v=x", field: "x" * 1025},
+        )
+        assert resp.status_code == 422, field
 
 
 async def test_submit_url_creates_job(client):

@@ -26,9 +26,14 @@ from shizzle_server.metadata import (
 FIXTURE = Path(__file__).parent / "fixtures" / "source_titles.json"
 ROWS = json.loads(FIXTURE.read_text(encoding="utf-8"))["rows"]
 
-# Platform junk that must never survive into a parsed title. Bare "video" /
-# "audio" are deliberately absent: they survive only inside a kept segment
-# such as "(Live Video)", where "live" marks a different recording.
+# Platform junk asserted absent from every parsed fixture title. Scope: the
+# parser strips these tokens from bracketed segments and trailing dash/comma
+# fragments only — a bare whitespace-delimited trailing token survives on
+# purpose (real titles can end in "Lyrics" or "Video"), so this is a
+# fixture-level check on real production names, not a guarantee about
+# arbitrary input. Bare "video" / "audio" are deliberately absent: they
+# survive only inside a kept segment such as "(Live Video)", where "live"
+# marks a different recording.
 _JUNK_PATTERNS = [
     r"\bofficial\b",
     r"\bfull\s+hd\b",

@@ -83,6 +83,16 @@ const TRAILING_JUNK_PHRASE_RE =
 const EDGE_CHARS_RE_START = /^[\s\-–—,]+/;
 const EDGE_CHARS_RE_END = /[\s\-–—,]+$/;
 
+// Whitespace, backend-compatible: Python's str.split()/str.strip() (the
+// control plane's _nfc_collapse) also treat U+001C–U+001F and U+0085 (NEL)
+// as whitespace where JS \s does not. Collapsing with plain \s would leave
+// those characters in the prefill while the backend parse drops them. The
+// control-character range is intentional (no-control-regex).
+// eslint-disable-next-line no-control-regex
+const WHITESPACE_RUN_RE = /[\s\u0085\u001C-\u001F]+/g;
+// eslint-disable-next-line no-control-regex
+const SPACE_BEFORE_COMMA_RE = /[\s\u0085\u001C-\u001F]+,/g;
+
 function stripEdge(text: string): string {
   return text.trim().replace(EDGE_CHARS_RE_START, '').replace(EDGE_CHARS_RE_END, '').trim();
 }
@@ -153,14 +163,18 @@ export function parseSourceTitle(raw: string): {
   confident: boolean;
 } {
   // NFC-normalize and collapse whitespace; strip a trailing known extension.
-  let name = stripExtension(raw.normalize('NFC').replace(/\s+/g, ' ').trim());
+  let name = stripExtension(raw.normalize('NFC').replace(WHITESPACE_RUN_RE, ' ').trim());
 
   // Drop bracketed/parenthesised upload junk; keep recording info brackets.
   name = name.replace(BRACKET_RE, (segment) =>
     isJunkFragment(segment.slice(1, -1)) ? '' : segment
   );
   // "Title , Full HD" -> "Title, Full HD"; collapse and strip edge " ,".
-  name = name.replace(/\s+,/g, ',').replace(/\s+/g, ' ').trim().replace(/^[ ,]+|[ ,]+$/g, '');
+  name = name
+    .replace(SPACE_BEFORE_COMMA_RE, ',')
+    .replace(WHITESPACE_RUN_RE, ' ')
+    .trim()
+    .replace(/^[ ,]+|[ ,]+$/g, '');
 
   // Split on the FIRST depth-0 spaced hyphen / en dash / em dash.
   const separatorIndex = findSeparator(name);
