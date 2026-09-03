@@ -233,8 +233,22 @@ export const LibraryDrawer: React.FC = () => {
                   className="group flex items-center justify-between p-2.5 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
                   onClick={() => handleSelect(track)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      if (e.key === ' ') e.preventDefault();
+                    // stopPropagation keeps activation keys away from the
+                    // window-level shortcuts in App.tsx (Space is play/pause).
+                    if (e.key === 'Enter') {
+                      e.stopPropagation();
+                      handleSelect(track);
+                    } else if (e.key === ' ') {
+                      // Match native-button Space semantics: prevent the page
+                      // scroll on keydown, activate on keyup (below).
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }
+                  }}
+                  onKeyUp={(e) => {
+                    if (e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
                       handleSelect(track);
                     }
                   }}

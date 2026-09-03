@@ -48,7 +48,8 @@ const compareTitle = (a: Track, b: Track): number =>
 const compareArtist = (a: Track, b: Track): number => {
   const aEmpty = a.artist.trim().length === 0;
   const bEmpty = b.artist.trim().length === 0;
-  // Tracks with no artist sort last, without disturbing each other's order.
+  // Tracks with no artist sort last; among themselves they are ordered by
+  // title (full ties keep the incoming API recency order).
   if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
   return compareLocale(a.artist, b.artist) || compareLocale(a.title, b.title);
 };
@@ -63,6 +64,11 @@ export function sortTracks(tracks: Track[], sort: LibrarySort): Track[] {
         return compareTitle(a, b);
       case 'artist-asc':
         return compareArtist(a, b);
+      default:
+        // Unreachable today (LibrarySort is a closed union and 'newest'
+        // returned early), but a future variant must not yield undefined
+        // from the comparator.
+        return 0;
     }
   });
   return sorted;

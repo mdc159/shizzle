@@ -32,8 +32,20 @@ function App() {
   // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A focused control that already handled the key (e.g. a library row
+      // activating on Space) marks it prevented; never double-handle it here.
+      if (e.defaultPrevented) return;
       // Ignore if typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Ignore keys aimed at an interactive element (button, link, select,
+      // role="button" row, editable region) — it owns its own keyboard
+      // behaviour, so Space there must not become a global play/pause.
+      if (
+        e.target instanceof HTMLElement &&
+        e.target.closest('button, a[href], select, [role="button"], [contenteditable="true"]')
+      ) {
+        return;
+      }
 
       switch (e.key.toLowerCase()) {
         case ' ':
