@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # a real value on the VPS to turn the gate on. Rotating the passcode (its
     # value is bound into every token's signature) revokes all issued tokens.
     shizzle_passcode: str = ""
+    # Explicit opt-in required to run with the passcode gate OPEN (default
+    # OFF). An empty shizzle_passcode makes auth_enabled False and silently
+    # opens every protected route — production ran open that way for weeks
+    # (invariant E6). The API refuses to start in that state unless this is
+    # set; the test suite sets it in its fixtures, so the default in every
+    # real deployment is fail-closed.
+    shizzle_allow_open_gate: bool = False
     auth_version: int = 1
     token_signing_secret: str = "dev-insecure-change-me"
     auth_token_ttl_seconds: int = 7 * 24 * 3600
@@ -106,6 +113,28 @@ class Settings(BaseSettings):
     @property
     def auth_enabled(self) -> bool:
         return bool(self.shizzle_passcode)
+
+    @property
+    def auth_gate_state(self) -> str:
+        """"on" when the passcode gate is active, "open" otherwise (E6 signal)."""
+        return "on" if self.auth_enabled else "open"
+
+    def assert_auth_gate_safe(self) -> None:
+        """Fail closed at startup when the gate would be silently open (E6).
+
+        "Not under the test suite" is explicit opt-in, matching the
+        shizzle_allow_test_pipeline pattern: the unit fixtures construct
+        ``Settings(shizzle_allow_open_gate=True)`` (or set
+        ``SHIZZLE_ALLOW_OPEN_GATE=1``), so the default in every real
+        deployment refuses to start open.
+        """
+        if self.auth_enabled or self.shizzle_allow_open_gate:
+            return
+        raise RuntimeError(
+            "Refusing to start: SHIZZLE_PASSCODE is empty, so the passcode "
+            "gate would be silently open. Set SHIZZLE_PASSCODE, or set "
+            "SHIZZLE_ALLOW_OPEN_GATE=1 to run open deliberately."
+        )
 
     @property
     def cloudfront_enabled(self) -> bool:

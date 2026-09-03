@@ -537,4 +537,5 @@ async def health(request: Request) -> HealthResponse:
         db=db_ok,
         orchestratorAlive=alive,
         orchestratorLastHeartbeat=last_beat,
+        authGate=settings.auth_gate_state,
     )

@@ -32,6 +32,7 @@ def settings(tmp_path) -> Settings:
         shizzle_embedded_orchestrator=False,
         shizzle_pipeline="test",
         shizzle_allow_test_pipeline=True,  # unit suite opts in (C7 default is off)
+        shizzle_allow_open_gate=True,  # unit suite opts in (E6 default is fail-closed)
         orchestrator_poll_seconds=0.05,
         orchestrator_lease_seconds=5.0,
         orchestrator_heartbeat_seconds=0.5,

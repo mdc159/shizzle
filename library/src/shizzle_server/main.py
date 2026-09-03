@@ -32,6 +32,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup
+        # E6: refuse to start when the passcode gate would be silently open.
+        settings.assert_auth_gate_safe()
+        if settings.auth_enabled:
+            logger.info("auth gate: ON")
+        else:
+            logger.info("auth gate: OPEN (SHIZZLE_ALLOW_OPEN_GATE=1)")
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         engine = create_engine(settings.database_url)
         session_factory = create_session_factory(engine)

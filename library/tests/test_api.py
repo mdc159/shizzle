@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -269,12 +271,56 @@ async def test_health_reports_db_and_orchestrator(client):
     # No orchestrator heartbeat yet -> degraded but honest
     assert body["orchestratorAlive"] is False
     assert body["status"] == "degraded"
+    # E6: the suite opts in to an open gate, and health says so affirmatively.
+    assert body["authGate"] == "open"
 
     # After a heartbeat it goes green
     await app.state.heartbeat_repo.beat("test-worker")
     body = (await c.get("/api/health")).json()
     assert body["orchestratorAlive"] is True
     assert body["status"] == "ok"
+
+
+async def test_auth_gate_startup_refusal(settings):
+    """E6: empty passcode + no SHIZZLE_ALLOW_OPEN_GATE opt-in -> refuse to start."""
+    unguarded = settings.model_copy(update={"shizzle_allow_open_gate": False})
+    assert unguarded.auth_gate_state == "open"
+    with pytest.raises(RuntimeError, match="SHIZZLE_PASSCODE"):
+        unguarded.assert_auth_gate_safe()
+    with pytest.raises(RuntimeError, match="SHIZZLE_ALLOW_OPEN_GATE"):
+        unguarded.assert_auth_gate_safe()
+    # The refusal happens inside the lifespan, so the app never serves.
+    app = create_app(unguarded)
+    with pytest.raises(RuntimeError, match="SHIZZLE_PASSCODE"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+async def test_auth_gate_on_starts_and_reports(settings, caplog):
+    """E6: a passcode set -> gate ON, logged and visible in health."""
+    secured = settings.model_copy(
+        update={"shizzle_passcode": "letmein", "shizzle_allow_open_gate": False}
+    )
+    app = create_app(secured)
+    with caplog.at_level(logging.INFO, logger="shizzle_server.main"):
+        async with app.router.lifespan_context(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                assert (await c.get("/api/health")).json()["authGate"] == "on"
+    assert "auth gate: ON" in caplog.text
+    # Never log the passcode or its length.
+    assert "letmein" not in caplog.text
+
+
+async def test_auth_gate_open_opt_in_logs_and_reports(settings, caplog):
+    """E6: deliberate open gate logs the affirmative OPEN state."""
+    app = create_app(settings)  # suite fixture opts in via shizzle_allow_open_gate
+    with caplog.at_level(logging.INFO, logger="shizzle_server.main"):
+        async with app.router.lifespan_context(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                assert (await c.get("/api/health")).json()["authGate"] == "open"
+    assert "auth gate: OPEN (SHIZZLE_ALLOW_OPEN_GATE=1)" in caplog.text
 
 
 async def test_playback_telemetry_route_persists_direct_evidence(client):

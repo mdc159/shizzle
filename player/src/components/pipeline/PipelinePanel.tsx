@@ -71,7 +71,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
         getJobs(controllers.jobs.signal),
         fetch('/api/health', { signal: controllers.health.signal }).then(async response => {
           if (!response.ok) throw new Error(`Health check failed: ${response.statusText}`);
-          return response.json() as Promise<{ orchestratorAlive: boolean }>;
+          return response.json() as Promise<{ orchestratorAlive: boolean; authGate: 'on' | 'open' }>;
         }),
       ]);
       if (refreshAbort.current !== controllers) return;

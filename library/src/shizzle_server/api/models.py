@@ -200,3 +200,5 @@ class HealthResponse(BaseModel):
     db: bool
     orchestratorAlive: bool
     orchestratorLastHeartbeat: datetime | None = None
+    # E6: affirmative gate state so dashboards/monitors can see it.
+    authGate: Literal["on", "open"]
