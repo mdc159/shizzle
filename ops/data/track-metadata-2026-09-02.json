@@ -41,7 +41,7 @@
       "expect_id_prefix": "5cbd16b6",
       "artist": "Pearl Jam",
       "title": "Black (Unplugged)",
-      "note": "source title has mojibake where 'Acústico' should be; match on id prefix"
+      "note": "the library dump printed this title with mojibake, but the stored value carries the correct 'Acústico' (see the run record's before-values); match on id prefix"
     },
     {
       "id": "d24e81ba",
@@ -60,7 +60,7 @@
       "expect_id_prefix": "0244dc21",
       "artist": "Temple of the Dog",
       "title": "War Pigs (Black Sabbath cover, live in San Francisco)",
-      "note": "source title has mojibake where an em dash should be; match on id prefix"
+      "note": "the library dump printed this title with mojibake, but the stored value carries the correct '–' (en dash; see the run record's before-values); match on id prefix"
     },
     {
       "id": "c4072b04",

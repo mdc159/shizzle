@@ -4,7 +4,7 @@
   "database_host": "postgres",
   "mapping": "/tmp/ops/track-metadata-2026-09-02.json",
   "mapping_repo_path": "ops/data/track-metadata-2026-09-02.json",
-  "mapping_sha256": "9bac82a8c39a70e5e03ca3730803c7893b4b1e99b56ad74c94b3c7b8b09835d6",
+  "mapping_sha256": "4233b56ca91223edc55006db3ce74d5293f8d723821885cf61e29649de33b023",
   "counts": {
     "mapping_entries": 29,
     "tracks_updated": 26,
@@ -202,7 +202,7 @@
         "artist": "Pearl Jam",
         "title": "Black (Unplugged)"
       },
-      "note": "source title has mojibake where 'Acústico' should be; match on id prefix"
+      "note": "the library dump printed this title with mojibake, but the stored value carries the correct 'Acústico' (see the run record's before-values); match on id prefix"
     },
     {
       "id": "05ced267-c681-48c8-a8a7-3bc7c4e5f10e",
@@ -286,7 +286,7 @@
         "artist": "Temple of the Dog",
         "title": "War Pigs (Black Sabbath cover, live in San Francisco)"
       },
-      "note": "source title has mojibake where an em dash should be; match on id prefix"
+      "note": "the library dump printed this title with mojibake, but the stored value carries the correct '–' (en dash; see the run record's before-values); match on id prefix"
     },
     {
       "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
