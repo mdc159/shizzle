@@ -110,8 +110,8 @@ async def test_track_soft_delete_and_library_filter(job_repo, track_repo, upload
         upload_job.id,
         title="Test Track",
         duration_seconds=12.5,
-        s3_prefix=f"local/{upload_job.id.hex}",
-        manifest_key=f"local/{upload_job.id.hex}/stems.json",
+        s3_prefix=f"tracks/{track_id_for_job(upload_job.id)}/1",
+        manifest_key=f"tracks/{track_id_for_job(upload_job.id)}/1/manifest.json",
     )
     assert track.id == track_id_for_job(upload_job.id)
 

@@ -144,6 +144,8 @@ class OrchestratorProcess:
             "SHIZZLE_WORKER_ID": worker_id,
             "SHIZZLE_EMBEDDED_ORCHESTRATOR": "false",
             "SHIZZLE_PIPELINE": "test",
+            # Explicit opt-in required since C7 (default is off).
+            "SHIZZLE_ALLOW_TEST_PIPELINE": "true",
             "ORCHESTRATOR_POLL_SECONDS": "0.2",
             "ORCHESTRATOR_LEASE_SECONDS": "4",
             "ORCHESTRATOR_HEARTBEAT_SECONDS": "0.5",

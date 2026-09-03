@@ -158,8 +158,9 @@ class Track(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     artist: Mapped[str] = mapped_column(Text, nullable=False, default="")
     duration_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    # Local Phase 2 placeholder: "local/{job_dir}". Phase 3 publisher writes
-    # the real immutable prefix "tracks/{track_id}/{generation}".
+    # Always the real immutable prefix "tracks/{track_id}/{generation}" — the
+    # Phase 2 "local/{job_dir}" placeholder shape is refused at publish time
+    # and never listed by the library (invariant C7).
     s3_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     manifest_key: Mapped[str] = mapped_column(Text, nullable=False)

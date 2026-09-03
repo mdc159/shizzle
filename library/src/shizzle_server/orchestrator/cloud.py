@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..api.media import s3_client
 from ..db.models import JobStage
-from ..db.repository import track_id_for_job
+from ..db.repository import PublishRefusedError, track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..publish.lossless_intake import (
     IntakeError,
@@ -331,6 +331,11 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
     except StageError:
         raise
     except IntakeError as exc:
+        raise StageError(
+            ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
+        ) from exc
+    except PublishRefusedError as exc:
+        # Invariant C7: a refused location cannot become valid on retry.
         raise StageError(
             ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
         ) from exc

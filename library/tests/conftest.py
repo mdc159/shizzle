@@ -31,6 +31,7 @@ def settings(tmp_path) -> Settings:
         data_dir=data_dir,
         shizzle_embedded_orchestrator=False,
         shizzle_pipeline="test",
+        shizzle_allow_test_pipeline=True,  # unit suite opts in (C7 default is off)
         orchestrator_poll_seconds=0.05,
         orchestrator_lease_seconds=5.0,
         orchestrator_heartbeat_seconds=0.5,
