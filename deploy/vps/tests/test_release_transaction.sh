@@ -129,6 +129,51 @@ run_deploy
 grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$PROD/.env"
 grep -F 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
 
+# E6: Compose delivers whitespace-only, quoted-empty, and comment-only
+# passcodes to the API as empty, so the preflight must reject all three
+# before the transaction; a quoted opt-in must still count as deliberate.
+new_fixture whitespace-passcode
+sed -i 's/^SHIZZLE_PASSCODE=test-passcode$/SHIZZLE_PASSCODE=   /' "$PROD/.env"
+if run_deploy 2> "$TMP/whitespace-passcode.err"; then
+  echo "whitespace-only passcode unexpectedly deployed" >&2
+  exit 1
+fi
+grep -F 'SHIZZLE_PASSCODE is empty or missing' "$TMP/whitespace-passcode.err"
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture quoted-empty-passcode
+sed -i 's/^SHIZZLE_PASSCODE=test-passcode$/SHIZZLE_PASSCODE=""/' "$PROD/.env"
+if run_deploy 2> "$TMP/quoted-empty-passcode.err"; then
+  echo "quoted-empty passcode unexpectedly deployed" >&2
+  exit 1
+fi
+grep -F 'SHIZZLE_PASSCODE is empty or missing' "$TMP/quoted-empty-passcode.err"
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture comment-only-passcode
+sed -i 's/^SHIZZLE_PASSCODE=test-passcode$/SHIZZLE_PASSCODE= # temporarily blank/' "$PROD/.env"
+if run_deploy 2> "$TMP/comment-only-passcode.err"; then
+  echo "comment-only passcode unexpectedly deployed" >&2
+  exit 1
+fi
+grep -F 'SHIZZLE_PASSCODE is empty or missing' "$TMP/comment-only-passcode.err"
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture quoted-open-gate-opt-in
+sed -i '/^SHIZZLE_PASSCODE=/d' "$PROD/.env"
+printf 'SHIZZLE_ALLOW_OPEN_GATE="1"\n' >> "$PROD/.env"
+run_deploy
+grep -F 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
+
+new_fixture commented-open-gate-opt-in
+sed -i '/^SHIZZLE_PASSCODE=/d' "$PROD/.env"
+printf 'SHIZZLE_ALLOW_OPEN_GATE=1 # deliberate open gate\n' >> "$PROD/.env"
+run_deploy
+grep -F 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
+
 new_fixture pull-failure
 DOCKER_FAIL=pull
 if run_deploy; then echo "pull failure unexpectedly deployed" >&2; exit 1; fi

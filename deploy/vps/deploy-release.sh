@@ -36,10 +36,38 @@ done
 
 # E6: the passcode gate is never silently open in production. Fail before
 # the transaction when the production .env leaves SHIZZLE_PASSCODE empty or
-# missing, unless SHIZZLE_ALLOW_OPEN_GATE=1 is set deliberately. The last
-# assignment wins, matching compose .env semantics (same as PREV_IMAGE).
-PASSCODE_VALUE=$(sed -n 's/^SHIZZLE_PASSCODE=//p' .env | tail -n 1)
-OPEN_GATE_VALUE=$(sed -n 's/^SHIZZLE_ALLOW_OPEN_GATE=//p' .env | tail -n 1)
+# missing, unless SHIZZLE_ALLOW_OPEN_GATE=1 is set deliberately.
+# Values are read with Compose dotenv semantics — the last assignment wins
+# (same as PREV_IMAGE), matching quotes are stripped, and unquoted values
+# lose surrounding whitespace and any ` # inline comment` — so a value
+# Compose would deliver to the API as empty (`SHIZZLE_PASSCODE=   `,
+# `SHIZZLE_PASSCODE=""`, `SHIZZLE_PASSCODE= # blank`) is rejected here,
+# before the transaction touches files.
+dotenv_value() {
+  local key=$1 raw
+  raw=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\{0,1\}${key}[[:space:]]*=[[:space:]]*//p" .env | tail -n 1)
+  # Quoted values keep their content verbatim; Compose strips the quotes.
+  if [[ "$raw" =~ ^\"(.*)\"[[:space:]]*$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "$raw" =~ ^\'(.*)\'[[:space:]]*$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  # Unquoted: `#` starts a comment (a leading `#` after `=` or a ` #`
+  # inline comment, per Compose dotenv rules); trim surrounding whitespace.
+  # A passcode that genuinely starts with `#` must be quoted to survive.
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  case "$raw" in
+    '#'*) raw= ;;
+    *) raw=${raw%%[[:space:]]#*} ;;
+  esac
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  printf '%s' "$raw"
+}
+PASSCODE_VALUE=$(dotenv_value SHIZZLE_PASSCODE)
+OPEN_GATE_VALUE=$(dotenv_value SHIZZLE_ALLOW_OPEN_GATE)
 if [ -z "$PASSCODE_VALUE" ] && [ "$OPEN_GATE_VALUE" != "1" ]; then
   echo "Cannot deploy: SHIZZLE_PASSCODE is empty or missing in .env — the passcode gate would be silently open (invariant E6). Set SHIZZLE_PASSCODE, or SHIZZLE_ALLOW_OPEN_GATE=1 for a deliberate open deployment." >&2
   exit 1
