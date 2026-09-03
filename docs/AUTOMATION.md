@@ -52,7 +52,11 @@ under `/opt/shizzle/prod` per invariant E3.
 
 Passcode gate preflight (E6): `deploy-release.sh` fails before the transaction
 when `SHIZZLE_PASSCODE` is empty or missing in the production `.env`, unless
-`SHIZZLE_ALLOW_OPEN_GATE=1` is present as a deliberate opt-in. The API itself
+`SHIZZLE_ALLOW_OPEN_GATE=1` is present as a deliberate opt-in. Values are read
+with Compose dotenv semantics (last assignment wins, quotes stripped, unquoted
+whitespace and comments dropped), so a value Compose would deliver to the API
+as empty — whitespace-only, quoted-empty, or comment-only — is rejected before
+any file is touched. The API itself
 also refuses to start with an empty passcode and no opt-in, and reports the
 gate state at startup and in `/api/health` (`authGate`). An empty passcode is
 therefore a loud, blocking misconfiguration, never a silently open gate.

@@ -429,7 +429,7 @@ startup plus `/api/health` MUST report the gate state affirmatively
 `authGate: "on"|"open"`). Neither logs nor health may carry the passcode or
 its length.
 - Where: `library/src/shizzle_server/settings.py` (`assert_auth_gate_safe`), `library/src/shizzle_server/main.py` (lifespan), `library/src/shizzle_server/api/routes.py` (`/api/health`), `deploy/vps/deploy-release.sh`
-- Guarded by: `library/tests/test_api.py::test_auth_gate_startup_refusal`, `library/tests/test_api.py::test_auth_gate_on_starts_and_reports`, `library/tests/test_api.py::test_auth_gate_open_opt_in_logs_and_reports`, `deploy/vps/tests/test_release_transaction.sh` (empty-passcode / missing-passcode / open-gate-opt-in cases)
+- Guarded by: `library/tests/test_api.py::test_auth_gate_startup_refusal`, `library/tests/test_api.py::test_auth_gate_on_starts_and_reports`, `library/tests/test_api.py::test_auth_gate_open_opt_in_logs_and_reports`, `deploy/vps/tests/test_release_transaction.sh` (empty-passcode / missing-passcode / whitespace / quoted-empty / comment-only / open-gate-opt-in cases)
 - Violation smell: a default, fallback, or fixture that runs the API with no
   passcode and no explicit opt-in, or a health/log surface that hides the
   gate state.
