@@ -272,7 +272,12 @@ export const AddSourceModal: React.FC = () => {
                     id="source-artist"
                     type="text"
                     value={artist}
-                    onChange={(e) => setArtist(e.target.value)}
+                    onChange={(e) => {
+                      setArtist(e.target.value);
+                      // Once the user types an artist the quiet guess hint
+                      // has served its purpose.
+                      if (e.target.value.trim()) setArtistUncertain(false);
+                    }}
                     placeholder="Artist name"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                   />

@@ -99,4 +99,6 @@ test('file name without an artist shows a hint and blocks submit until artist is
 
   await artistInput.fill("Guns N' Roses");
   await expect(submit).toBeEnabled();
+  // The quiet hint hides once the user has typed an artist.
+  await expect(page.getByText("Couldn't tell the artist from the file name")).toBeHidden();
 });
