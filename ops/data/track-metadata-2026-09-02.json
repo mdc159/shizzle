@@ -9,34 +9,190 @@
     "canonical spellings: AC/DC, Guns N' Roses, Tool, Temple of the Dog, Alice in Chains"
   ],
   "tracks": [
-    {"id": "75fae991-7ddc-5187-bd06-a828fde89db2", "expect": {"artist": "", "title": "Van Halen - Runnin' With The Devil (Official Music Video)"}, "action": "delete", "note": "phantom row: s3_prefix local/9fe2c9a570f4449abf55bcd96f7159da, no manifest in S3; created 2026-08-19 by job 9fe2c9a5 through a stub test_pipeline path that published in under a second; nothing to play; Mike 2026-09-02"},
-    {"id": "05ced267-c681-48c8-a8a7-3bc7c4e5f10e", "expect": {"artist": "Peter Frampton", "title": "Black Hole Sun (Guitar Center Sessions)"}, "artist": "Peter Frampton", "title": "Black Hole Sun (Guitar Center Sessions)"},
-    {"id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf", "expect": {"artist": "TOOL", "title": "The Pot"}, "artist": "Tool", "title": "The Pot"},
-    {"id": "5cbd16b6-2b44-4bbd-9a9c-c2a0d0d06a0c", "expect_id_prefix": "5cbd16b6", "artist": "Pearl Jam", "title": "Black (Unplugged)", "note": "source title has mojibake in 'Acústico'; match on id prefix"},
-    {"id": "d24e81ba", "expect_id_prefix": "d24e81ba", "artist": "Alice in Chains", "title": "Man in the Box"},
-    {"id": "4bd3d013", "expect_id_prefix": "4bd3d013", "artist": "Van Halen", "title": "You Really Got Me"},
-    {"id": "0244dc21", "expect_id_prefix": "0244dc21", "artist": "Temple of the Dog", "title": "War Pigs (Black Sabbath cover, live in San Francisco)", "note": "source title has mojibake dash; match on id prefix"},
-    {"id": "c4072b04", "expect_id_prefix": "c4072b04", "artist": "AC/DC", "title": "It's a Long Way to the Top"},
-    {"id": "297389b3", "expect_id_prefix": "297389b3", "artist": "Stone Temple Pilots", "title": "Plush"},
-    {"id": "22f0177d", "expect_id_prefix": "22f0177d", "artist": "Metallica", "title": "Orion (live, Philadelphia 2025)"},
-    {"id": "fc51be9b", "expect_id_prefix": "fc51be9b", "artist": "Guns N' Roses", "title": "Mr. Brownstone"},
-    {"id": "ffee538e", "expect_id_prefix": "ffee538e", "artist": "Mother Love Bone", "title": "Stardog Champion"},
-    {"id": "20d172a7", "expect_id_prefix": "20d172a7", "artist": "Temple of the Dog", "title": "Hunger Strike"},
-    {"id": "0329507a", "expect_id_prefix": "0329507a", "artist": "Van Halen", "title": "Hot for Teacher"},
-    {"id": "06ce033c", "expect_id_prefix": "06ce033c", "artist": "Soundgarden", "title": "Spoonman"},
-    {"id": "4ed567d1", "expect_id_prefix": "4ed567d1", "artist": "AC/DC", "title": "Let's Get It Up"},
-    {"id": "b7a980db", "expect_id_prefix": "b7a980db", "artist": "Guns N' Roses", "title": "Sweet Child o' Mine"},
-    {"id": "7c8d8cf7", "expect_id_prefix": "7c8d8cf7", "artist": "Guns N' Roses", "title": "My Michelle"},
-    {"id": "234a7b1c", "expect_id_prefix": "234a7b1c", "action": "delete", "note": "duplicate of ffee538e (Mother Love Bone, Stardog Champion); both legacy imports, this one 29.97 fps 304.5 s, the kept one is the official video at 30 fps 300.7 s; decided by Mike 2026-09-02"},
-    {"id": "9c835433", "expect_id_prefix": "9c835433", "artist": "AC/DC", "title": "Shoot to Thrill (Iron Man 2 version)"},
-    {"id": "427a17cb", "expect_id_prefix": "427a17cb", "artist": "Skid Row", "title": "Monkey Business"},
-    {"id": "f5b84806", "expect_id_prefix": "f5b84806", "artist": "AC/DC", "title": "Ride On (live, Stade de France 2001)"},
-    {"id": "99ec0110", "expect_id_prefix": "99ec0110", "artist": "Soundgarden", "title": "Outshined"},
-    {"id": "1edee1b7", "expect_id_prefix": "1edee1b7", "artist": "AC/DC", "title": "You Shook Me All Night Long"},
-    {"id": "a54803e6", "expect_id_prefix": "a54803e6", "artist": "AC/DC", "title": "Let There Be Rock"},
-    {"id": "c1c4ec31", "expect_id_prefix": "c1c4ec31", "artist": "AC/DC", "title": "You Shook Me All Night Long (with Steven Tyler, 2003 Hall of Fame induction)"},
-    {"id": "e9bc18b1", "expect_id_prefix": "e9bc18b1", "artist": "AC/DC", "title": "Walk All Over You"},
-    {"id": "1f3b9397", "expect_id_prefix": "1f3b9397", "artist": "Black Sabbath", "title": "Into the Void (live)"},
-    {"id": "52eb3b91", "expect_id_prefix": "52eb3b91", "artist": "Van Halen", "title": "(Oh) Pretty Woman"}
+    {
+      "id": "75fae991-7ddc-5187-bd06-a828fde89db2",
+      "expect": {
+        "artist": "",
+        "title": "Van Halen - Runnin' With The Devil (Official Music Video)"
+      },
+      "action": "delete",
+      "note": "phantom row: s3_prefix local/9fe2c9a570f4449abf55bcd96f7159da, no manifest in S3; created 2026-08-19 by job 9fe2c9a5 through a stub test_pipeline path that published in under a second; nothing to play; Mike 2026-09-02"
+    },
+    {
+      "id": "05ced267-c681-48c8-a8a7-3bc7c4e5f10e",
+      "expect": {
+        "artist": "Peter Frampton",
+        "title": "Black Hole Sun (Guitar Center Sessions)"
+      },
+      "artist": "Peter Frampton",
+      "title": "Black Hole Sun (Guitar Center Sessions)"
+    },
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "expect": {
+        "artist": "TOOL",
+        "title": "The Pot"
+      },
+      "artist": "Tool",
+      "title": "The Pot"
+    },
+    {
+      "id": "5cbd16b6",
+      "expect_id_prefix": "5cbd16b6",
+      "artist": "Pearl Jam",
+      "title": "Black (Unplugged)",
+      "note": "source title has mojibake in 'Acústico'; match on id prefix"
+    },
+    {
+      "id": "d24e81ba",
+      "expect_id_prefix": "d24e81ba",
+      "artist": "Alice in Chains",
+      "title": "Man in the Box"
+    },
+    {
+      "id": "4bd3d013",
+      "expect_id_prefix": "4bd3d013",
+      "artist": "Van Halen",
+      "title": "You Really Got Me"
+    },
+    {
+      "id": "0244dc21",
+      "expect_id_prefix": "0244dc21",
+      "artist": "Temple of the Dog",
+      "title": "War Pigs (Black Sabbath cover, live in San Francisco)",
+      "note": "source title has mojibake dash; match on id prefix"
+    },
+    {
+      "id": "c4072b04",
+      "expect_id_prefix": "c4072b04",
+      "artist": "AC/DC",
+      "title": "It's a Long Way to the Top"
+    },
+    {
+      "id": "297389b3",
+      "expect_id_prefix": "297389b3",
+      "artist": "Stone Temple Pilots",
+      "title": "Plush"
+    },
+    {
+      "id": "22f0177d",
+      "expect_id_prefix": "22f0177d",
+      "artist": "Metallica",
+      "title": "Orion (live, Philadelphia 2025)"
+    },
+    {
+      "id": "fc51be9b",
+      "expect_id_prefix": "fc51be9b",
+      "artist": "Guns N' Roses",
+      "title": "Mr. Brownstone"
+    },
+    {
+      "id": "ffee538e",
+      "expect_id_prefix": "ffee538e",
+      "artist": "Mother Love Bone",
+      "title": "Stardog Champion"
+    },
+    {
+      "id": "20d172a7",
+      "expect_id_prefix": "20d172a7",
+      "artist": "Temple of the Dog",
+      "title": "Hunger Strike"
+    },
+    {
+      "id": "0329507a",
+      "expect_id_prefix": "0329507a",
+      "artist": "Van Halen",
+      "title": "Hot for Teacher"
+    },
+    {
+      "id": "06ce033c",
+      "expect_id_prefix": "06ce033c",
+      "artist": "Soundgarden",
+      "title": "Spoonman"
+    },
+    {
+      "id": "4ed567d1",
+      "expect_id_prefix": "4ed567d1",
+      "artist": "AC/DC",
+      "title": "Let's Get It Up"
+    },
+    {
+      "id": "b7a980db",
+      "expect_id_prefix": "b7a980db",
+      "artist": "Guns N' Roses",
+      "title": "Sweet Child o' Mine"
+    },
+    {
+      "id": "7c8d8cf7",
+      "expect_id_prefix": "7c8d8cf7",
+      "artist": "Guns N' Roses",
+      "title": "My Michelle"
+    },
+    {
+      "id": "234a7b1c",
+      "expect_id_prefix": "234a7b1c",
+      "action": "delete",
+      "note": "duplicate of ffee538e (Mother Love Bone, Stardog Champion); both legacy imports, this one 29.97 fps 304.5 s, the kept one is the official video at 30 fps 300.7 s; decided by Mike 2026-09-02"
+    },
+    {
+      "id": "9c835433",
+      "expect_id_prefix": "9c835433",
+      "artist": "AC/DC",
+      "title": "Shoot to Thrill (Iron Man 2 version)"
+    },
+    {
+      "id": "427a17cb",
+      "expect_id_prefix": "427a17cb",
+      "artist": "Skid Row",
+      "title": "Monkey Business"
+    },
+    {
+      "id": "f5b84806",
+      "expect_id_prefix": "f5b84806",
+      "artist": "AC/DC",
+      "title": "Ride On (live, Stade de France 2001)"
+    },
+    {
+      "id": "99ec0110",
+      "expect_id_prefix": "99ec0110",
+      "artist": "Soundgarden",
+      "title": "Outshined"
+    },
+    {
+      "id": "1edee1b7",
+      "expect_id_prefix": "1edee1b7",
+      "artist": "AC/DC",
+      "title": "You Shook Me All Night Long"
+    },
+    {
+      "id": "a54803e6",
+      "expect_id_prefix": "a54803e6",
+      "artist": "AC/DC",
+      "title": "Let There Be Rock"
+    },
+    {
+      "id": "c1c4ec31",
+      "expect_id_prefix": "c1c4ec31",
+      "artist": "AC/DC",
+      "title": "You Shook Me All Night Long (with Steven Tyler, 2003 Hall of Fame induction)"
+    },
+    {
+      "id": "e9bc18b1",
+      "expect_id_prefix": "e9bc18b1",
+      "artist": "AC/DC",
+      "title": "Walk All Over You"
+    },
+    {
+      "id": "1f3b9397",
+      "expect_id_prefix": "1f3b9397",
+      "artist": "Black Sabbath",
+      "title": "Into the Void (live)"
+    },
+    {
+      "id": "52eb3b91",
+      "expect_id_prefix": "52eb3b91",
+      "artist": "Van Halen",
+      "title": "(Oh) Pretty Woman"
+    }
   ]
 }
