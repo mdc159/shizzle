@@ -127,10 +127,69 @@ async def test_publish_track_accepts_real_published_location(job_repo, track_rep
     assert [t.id for t in await track_repo.list_tracks()] == [tid]
 
 
+async def test_publish_track_refuses_bare_tracks_prefix(job_repo, track_repo, upload_job):
+    """`tracks/` alone names no published-object namespace — nothing to play."""
+    await _publishing_job(job_repo, upload_job)
+    with pytest.raises(PublishRefusedError, match="not under tracks/"):
+        await job_repo.publish_track(
+            upload_job.id,
+            title="Phantom",
+            duration_seconds=1.0,
+            s3_prefix="tracks/",
+            manifest_key="tracks/manifest.json",
+        )
+    assert await track_repo.list_tracks() == []
+
+
+async def test_publish_track_refuses_manifest_outside_prefix(
+    job_repo, track_repo, upload_job
+):
+    """A manifest key under a DIFFERENT prefix must not pass: the manifest
+    endpoint would read unrelated S3 metadata for this track."""
+    await _publishing_job(job_repo, upload_job)
+    tid = track_id_for_job(upload_job.id)
+    with pytest.raises(PublishRefusedError, match="manifest.json"):
+        await job_repo.publish_track(
+            upload_job.id,
+            title="Phantom",
+            duration_seconds=1.0,
+            s3_prefix=f"tracks/{tid}/1",
+            manifest_key="tracks/other/1/manifest.json",
+        )
+    assert await track_repo.list_tracks() == []
+
+
+async def test_publish_track_refusal_is_recorded_once(job_repo, track_repo, upload_job):
+    """Crash-rerun idempotency (B11): the refusal is deterministic, so a
+    re-run after a crash appends no duplicate publish_refused event."""
+    await _publishing_job(job_repo, upload_job)
+    kwargs = dict(
+        title="Phantom",
+        duration_seconds=1.0,
+        s3_prefix=f"local/{upload_job.id.hex}",
+        manifest_key=f"local/{upload_job.id.hex}/stems.json",
+    )
+    with pytest.raises(PublishRefusedError):
+        await job_repo.publish_track(upload_job.id, **kwargs)
+    with pytest.raises(PublishRefusedError):
+        await job_repo.publish_track(upload_job.id, **kwargs)
+
+    refused = [
+        e for e in await job_repo.list_events(upload_job.id) if e.event == "publish_refused"
+    ]
+    assert len(refused) == 1
+
+
 def test_track_location_problem_messages():
     assert track_location_problem("tracks/x/1", "tracks/x/1/manifest.json") is None
+    # A trailing slash on the prefix still matches its manifest.
+    assert track_location_problem("tracks/x/1/", "tracks/x/1/manifest.json") is None
     assert "tracks/" in track_location_problem("local/abc", "local/abc/stems.json")
     assert "manifest.json" in track_location_problem("tracks/x/1", "tracks/x/1/stems.json")
+    assert track_location_problem("tracks/", "tracks/manifest.json") is not None
+    assert "manifest.json" in track_location_problem(
+        "tracks/x/1", "tracks/other/1/manifest.json"
+    )
 
 
 # --- layer 3: the library never lists rows outside tracks/ --------------------

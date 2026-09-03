@@ -483,12 +483,33 @@ async def test_publish_job_falls_back_to_job_artist(s3, job_repo, settings):
     assert track.artist == "Soundgarden"
     assert track.title == "Test Track"  # manifest title still wins
 
-    # An empty-string manifest artist falls back the same way.
+    # An empty-string manifest artist falls back the same way — against a
+    # FRESH job, so the fallback branch (not the idempotent no-op) is what
+    # stores the artist.
+    job2_id = uuid.uuid4()
+    job2_dir = settings.data_dir / job2_id.hex
+    job2_dir.mkdir(parents=True)
+    (job2_dir / "source.mp4").write_bytes(b"fake video bytes")
+    job2 = await job_repo.create_job(
+        job_id=job2_id,
+        source_type=SourceType.upload,
+        source_ref="source.mp4",
+        title="Spoonman",
+        artist="Soundgarden",
+    )
+    job2 = await _advance_to_publishing(job_repo, job2)
+    track2_id = track_id_for_job(job2.id)
+    prefix2 = staging_prefix(track2_id, 1)
+    uploads2 = []
+    for rel, data in STAGED_FILES.items():
+        s3.put_object(Bucket=BUCKET, Key=f"{prefix2}{rel}", Body=data)
+        uploads2.append({"file": rel, "sha256": _sha(data), "size_bytes": len(data)})
+
     track2, _ = await publish_job(
         jobs=job_repo,
         publisher=Publisher(s3, BUCKET),
-        job=await job_repo.get_job(job.id),
-        worker_result={"uploads": uploads},
+        job=job2,
+        worker_result={"uploads": uploads2},
         manifest={**MANIFEST, "artist": ""},
     )
     assert track2.artist == "Soundgarden"

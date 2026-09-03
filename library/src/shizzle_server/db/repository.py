@@ -110,10 +110,13 @@ def track_location_problem(s3_prefix: str, manifest_key: str) -> str | None:
     ``local/`` placeholder, an empty prefix — can never be a playable track.
     """
     problems = []
-    if not s3_prefix.startswith("tracks/"):
-        problems.append(f"s3_prefix {s3_prefix!r} is not under tracks/")
-    if not manifest_key.endswith("/manifest.json"):
-        problems.append(f"manifest_key {manifest_key!r} does not end in /manifest.json")
+    if not s3_prefix.startswith("tracks/") or not s3_prefix.removeprefix("tracks/").strip("/"):
+        problems.append(f"s3_prefix {s3_prefix!r} is not under tracks/ with a non-empty path")
+    expected_manifest = f"{s3_prefix.rstrip('/')}/manifest.json"
+    if manifest_key != expected_manifest:
+        problems.append(
+            f"manifest_key {manifest_key!r} is not the prefix manifest {expected_manifest!r}"
+        )
     return "; ".join(problems) or None
 
 
@@ -625,17 +628,27 @@ class JobRepository:
         problem = track_location_problem(s3_prefix, manifest_key)
         if problem is not None:
             async with self._sf() as session, session.begin():
-                session.add(
-                    JobEvent(
-                        job_id=job_id,
-                        event="publish_refused",
-                        detail={
-                            "s3_prefix": s3_prefix,
-                            "manifest_key": manifest_key,
-                            "reason": problem,
-                        },
+                # Idempotent (B11): a crash after this commit but before the
+                # stage fails the job re-runs publish_track; the refusal is
+                # deterministic, so record it once rather than appending a
+                # duplicate publish_refused event per retry.
+                already = await session.execute(
+                    select(JobEvent).where(
+                        JobEvent.job_id == job_id, JobEvent.event == "publish_refused"
                     )
                 )
+                if already.scalars().first() is None:
+                    session.add(
+                        JobEvent(
+                            job_id=job_id,
+                            event="publish_refused",
+                            detail={
+                                "s3_prefix": s3_prefix,
+                                "manifest_key": manifest_key,
+                                "reason": problem,
+                            },
+                        )
+                    )
             raise PublishRefusedError(problem)
         tid = track_id_for_job(job_id)
         try:
