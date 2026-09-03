@@ -98,6 +98,8 @@ class Job(Base):
     # URL for url-sourced jobs; relative path of the uploaded file for uploads.
     source_ref: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
+    # Clean performer name resolved at ingest (never folded into the title).
+    artist: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[JobStage] = mapped_column(
         Enum(JobStage, native_enum=False, length=16),
         nullable=False,

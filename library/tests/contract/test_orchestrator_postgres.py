@@ -264,6 +264,36 @@ class TestSchemaContract:
             assert {"jobs", "job_events", "tracks", "orchestrator_heartbeats"} <= tables
             assert "alembic_version" in tables
 
+            # 0005_job_artist: jobs.artist is NOT NULL with a '' default so
+            # pre-migration rows stay valid.
+            columns = {
+                r[0]: (r[1], r[2])
+                for r in await conn.execute(
+                    text(
+                        "SELECT column_name, is_nullable, column_default "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = 'jobs'"
+                    )
+                )
+            }
+            nullable, default = columns["artist"]
+            assert nullable == "NO"
+            assert default == "''::text"
+
+            await conn.execute(
+                text(
+                    "INSERT INTO jobs (id, source_type, source_ref, status, "
+                    "attempt, idempotency_key, profile_version, created_at, "
+                    "updated_at) VALUES (:id, 'url', 'x', 'pending', 0, "
+                    "'artist-default-probe', 1, now(), now())"
+                ),
+                {"id": uuid.uuid4()},
+            )
+            probed = await conn.execute(
+                text("SELECT artist FROM jobs WHERE idempotency_key = 'artist-default-probe'")
+            )
+            assert probed.scalar_one() == ""
+
             # idempotency_key uniqueness is enforced at the DB, not just app code
             with pytest.raises(Exception, match="uq_jobs_idempotency_key"):
                 for _i in range(2):
