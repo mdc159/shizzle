@@ -79,9 +79,11 @@ services:
       # SHIZZLE_ALLOW_TEST_PIPELINE=1 (invariant C7): on 2026-08-19 it published
       # a track row with no media behind it. The heartbeat (which /api/health
       # reads) runs regardless of pipeline.
-      # Cloud mode REQUIRES RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID in .env:
-      # the orchestrator refuses to start without them, so the stack can never
-      # accept uploads it is unable to dispatch and publish.
+      # Parked cloud is a valid state: with RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID
+      # unset (the RunPod path is not connected yet) the orchestrator still
+      # starts and beats, and new jobs fail closed at dispatch with
+      # RUNPOD_DISPATCH_FAILED. Set both variables in .env when the cloud path
+      # is connected.
       SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-cloud}
     volumes:
       - appdata:/app/data

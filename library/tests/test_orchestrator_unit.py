@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -468,18 +469,32 @@ async def _run_cloud_orch(settings, fake: FakeRunPodClient):
     return orch, task
 
 
-def test_cloud_orchestrator_requires_runpod_config(settings):
-    """Cloud mode without RunPod credentials must not start: the stack would
-    otherwise accept uploads it can never dispatch or publish."""
+def test_cloud_orchestrator_parked_without_runpod_config(settings, caplog):
+    """Cloud mode without RunPod credentials is the valid parked state: the
+    orchestrator still starts (its heartbeat feeds /api/health) and logs one
+    WARNING; new jobs fail closed at dispatch."""
     settings.shizzle_pipeline = "cloud"
     settings.runpod_api_key = ""
     settings.runpod_endpoint_id = ""
-    with pytest.raises(RuntimeError, match="RUNPOD_API_KEY"):
-        Orchestrator(settings, worker_id="cloud-misconfigured")
+    with caplog.at_level(logging.WARNING, logger="shizzle_server.orchestrator.loop"):
+        orch = Orchestrator(settings, worker_id="cloud-parked")
+    assert any(
+        record.levelno == logging.WARNING
+        and "RunPod not configured" in record.message
+        and "RUNPOD_DISPATCH_FAILED" in record.message
+        for record in caplog.records
+    )
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
 
+    assert isinstance(orch.runpod, NotConfiguredRunPodClient)
+
+    # Configured cloud mode starts without the warning.
+    caplog.clear()
     settings.runpod_api_key = "key"
     settings.runpod_endpoint_id = "endpoint"
-    Orchestrator(settings, worker_id="cloud-configured")  # starts fine
+    with caplog.at_level(logging.WARNING, logger="shizzle_server.orchestrator.loop"):
+        Orchestrator(settings, worker_id="cloud-configured")
+    assert not caplog.records
 
 
 async def test_not_configured_runpod_client_reports_dispatch_failure():
