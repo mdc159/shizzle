@@ -259,10 +259,18 @@ contrast only when egregious).
 
 Not in CI today, by choice:
 
-- **knip** (`player/knip.json` exists) and **Playwright** (`player/e2e`,
-  `player/playwright.config.ts` exist) do not run in `ci.yml`. The player job
-  builds and lints only. Adding them is a follow-up, not a gap in this
-  package.
+- **knip** (`player/knip.json` exists) does not run in `ci.yml`. Adding it
+  is a follow-up, not a gap in this package.
+- **The mocked Playwright spec is an approved required-check
+  responsibility.** The `player` job builds and lints, then installs
+  headless Chromium (`npx playwright install --with-deps chromium`) and runs
+  `player/e2e/library-scroll.spec.ts` — the fully mocked library-drawer
+  browser spec (no backend, no credentials) — on every execution. This
+  makes the required `player` check depend on the Playwright browser CDN:
+  a CDN outage blocks merges until it recovers. That coupling was accepted
+  deliberately in PR #12 so the browser coverage actually counts; caching
+  `~/.cache/ms-playwright` keyed on the Playwright version is the
+  follow-up that softens it.
 - **library mypy is informational** — `continue-on-error: true` on a 23-error
   strict-mode baseline (recorded in PR #1). Fixing the debt and turning the
   gate hard is the typing-debt follow-up.
