@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from ..db.repository import JobRepository
+from ..db.repository import JobRepository, PublishRefusedError
 from ..errors import ErrorCode, StageError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -672,16 +672,22 @@ async def publish_job(
     if result.verification is not None:
         integrity["publisher"] = result.verification.to_integrity()
 
-    track = await jobs.publish_track(
-        job.id,
-        title=manifest.get("title") or job.title or job.id.hex,
-        artist=manifest.get("artist") or job.artist or "",
-        duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
-        s3_prefix=result.s3_prefix,
-        manifest_key=result.manifest_key,
-        generation=generation,
-        integrity=integrity,
-    )
+    try:
+        track = await jobs.publish_track(
+            job.id,
+            title=manifest.get("title") or job.title or job.id.hex,
+            artist=manifest.get("artist") or job.artist or "",
+            duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
+            s3_prefix=result.s3_prefix,
+            manifest_key=result.manifest_key,
+            generation=generation,
+            integrity=integrity,
+        )
+    except PublishRefusedError as exc:
+        # Invariant C7: a refused location cannot become valid on retry.
+        raise StageError(
+            ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
+        ) from exc
     return track, result
 
 

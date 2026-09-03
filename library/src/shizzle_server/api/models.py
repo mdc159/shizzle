@@ -61,8 +61,8 @@ class JobListResponse(BaseModel):
 
 class SubmitUrlRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
-    title: str | None = None
-    artist: str | None = None
+    title: str | None = Field(None, max_length=1024)
+    artist: str | None = Field(None, max_length=1024)
 
 
 class AuthRequest(BaseModel):

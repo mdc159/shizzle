@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 class Orchestrator:
     def __init__(self, settings: Settings | None = None, *, worker_id: str | None = None) -> None:
         self.settings = settings or get_settings()
+        if self.settings.cloud_pipeline and not (
+            self.settings.runpod_api_key and self.settings.runpod_endpoint_id
+        ):
+            # The parked-cloud state is valid: the RunPod path is not connected
+            # yet, and the heartbeat (which /api/health reads) must keep
+            # beating. New jobs fail closed at dispatch instead.
+            logger.warning(
+                "cloud pipeline: RunPod not configured; new jobs will fail "
+                "closed at dispatch (RUNPOD_DISPATCH_FAILED)"
+            )
         self.worker_id = worker_id or os.environ.get(
             "SHIZZLE_WORKER_ID", f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         )

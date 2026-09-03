@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import text
 
 from shizzle_server.db.models import JobStage, SourceType, utcnow
-from shizzle_server.db.repository import track_id_for_job
+from shizzle_server.db.repository import PublishRefusedError, track_id_for_job
 
 from .conftest import make_upload_job, wait_for
 
@@ -169,6 +169,40 @@ class TestDuplicateCompletion:
         assert again.id == all_tracks[0].id
         events = [e.event for e in await job_repo.list_events(job.id)]
         assert events.count("track_published") == 1
+
+
+class TestConcurrentRefusal:
+    async def test_concurrent_refusals_record_one_event(self, pg_repos, data_dir):
+        """Two publishers racing the same C7 refusal: publish_track locks the
+        job row FOR UPDATE before the check-and-insert, so the second
+        transaction observes the first's commit and exactly one
+        publish_refused event lands (real Postgres row lock)."""
+        job_repo, track_repo, _ = pg_repos
+        job = await make_upload_job(job_repo, data_dir)
+        for a, b in [
+            (JobStage.pending, JobStage.downloading),
+            (JobStage.downloading, JobStage.splitting),
+            (JobStage.splitting, JobStage.verifying),
+            (JobStage.verifying, JobStage.publishing),
+        ]:
+            await job_repo.advance(job.id, from_stage=a, to_stage=b)
+
+        kwargs = {
+            "title": "Phantom",
+            "duration_seconds": 1.0,
+            "s3_prefix": f"local/{job.id.hex}",
+            "manifest_key": f"local/{job.id.hex}/stems.json",
+        }
+        results = await asyncio.gather(
+            job_repo.publish_track(job.id, **kwargs),
+            job_repo.publish_track(job.id, **kwargs),
+            return_exceptions=True,
+        )
+        assert len(results) == 2
+        assert all(isinstance(r, PublishRefusedError) for r in results)
+        events = [e.event for e in await job_repo.list_events(job.id)]
+        assert events.count("publish_refused") == 1
+        assert await track_repo.list_tracks() == []
 
 
 class TestRetrySchedule:

@@ -38,18 +38,37 @@ class RunPodClient(Protocol):
 
 
 class NotConfiguredRunPodClient:
-    """Fail loudly if a cloud handler is reached without RunPod settings."""
+    """Parked-cloud stand-in used while cloud mode lacks RunPod settings.
+
+    The orchestrator starts in the valid parked-cloud state when
+    SHIZZLE_PIPELINE=cloud has no RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID — it
+    logs a warning and keeps its heartbeat green — with this client in place
+    until configuration arrives. Fresh dispatches fail closed with a
+    non-retryable RUNPOD_DISPATCH_FAILED (a job that cannot start is
+    terminally misconfigured). Polling an already-dispatched remote job
+    raises the same code but retryable: the failure says nothing about the
+    remote job, so the dispatched handler parks it and it reconciles on the
+    first poll after credentials return.
+    """
+
+    _DETAIL = (
+        "RunPod is not configured: SHIZZLE_PIPELINE=cloud requires "
+        "RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID"
+    )
 
     async def dispatch(
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
     ) -> str:
-        raise NotImplementedError("RunPod is not configured")
+        del job_id, idempotency_key, payload
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
     async def poll(self, runpod_job_id: str) -> dict[str, Any]:
-        raise NotImplementedError("RunPod is not configured")
+        del runpod_job_id
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=True)
 
     async def cancel(self, runpod_job_id: str) -> None:
-        raise NotImplementedError("RunPod is not configured")
+        del runpod_job_id
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
 
 class HttpRunPodClient:

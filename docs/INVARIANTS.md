@@ -292,14 +292,16 @@ passes; a failed candidate stays outside the library; retry is idempotent.
 
 ### C7 — track rows point at real published objects
 
-**Invariant:** A track row MUST be created only with an `s3_prefix` under
-`tracks/` and a `manifest_key` ending in `/manifest.json`; the repository
-refuses anything else, recording a `publish_refused` job event instead of
-publishing. The stub test pipeline MUST require the explicit opt-in
-`SHIZZLE_ALLOW_TEST_PIPELINE` (default off), and `/api/library` MUST never
-list a row outside `tracks/`.
+**Invariant:** A track row MUST be created only with a non-empty canonical
+`s3_prefix` under `tracks/` (no empty segments or trailing slash) and the
+`manifest_key` equal to `<s3_prefix>/manifest.json`; the repository refuses
+anything else, recording a `publish_refused` job event (at most once per job
+— the refusal is deterministic and the check-and-insert is serialized on the
+job row FOR UPDATE) instead of publishing. The stub test pipeline MUST
+require the explicit opt-in `SHIZZLE_ALLOW_TEST_PIPELINE` (default off), and
+`/api/library` MUST never list a row outside `tracks/`.
 - Where: `library/src/shizzle_server/db/repository.py:105`, `library/src/shizzle_server/db/repository.py:601`, `library/src/shizzle_server/db/repository.py:745`, `library/src/shizzle_server/orchestrator/pipelines.py:179`, `library/src/shizzle_server/settings.py:52`
-- Guarded by: `library/tests/test_publish_guard.py::test_2026_08_19_phantom_replay_fails_closed`, `library/tests/test_publish_guard.py::test_publish_track_refuses_local_prefix_and_records_event`, `library/tests/test_publish_guard.py::test_publish_track_refuses_non_manifest_key`, `library/tests/test_publish_guard.py::test_list_tracks_never_lists_non_tracks_prefix`, `library/tests/test_publish_guard.py::test_build_pipeline_refuses_test_pipeline_without_opt_in`
+- Guarded by: `library/tests/test_publish_guard.py::test_2026_08_19_phantom_replay_fails_closed`, `library/tests/test_publish_guard.py::test_publish_track_refuses_local_prefix_and_records_event`, `library/tests/test_publish_guard.py::test_publish_track_refuses_non_manifest_key`, `library/tests/test_publish_guard.py::test_publish_track_refuses_bare_tracks_prefix`, `library/tests/test_publish_guard.py::test_publish_track_refuses_manifest_outside_prefix`, `library/tests/test_publish_guard.py::test_publish_track_refusal_is_recorded_once`, `library/tests/test_publish_guard.py::test_publish_track_refusal_locks_job_row_before_event_check`, `library/tests/test_publish_guard.py::test_list_tracks_never_lists_non_tracks_prefix`, `library/tests/test_publish_guard.py::test_build_pipeline_refuses_test_pipeline_without_opt_in`, `library/tests/contract/test_orchestrator_postgres.py::TestConcurrentRefusal`
 - Violation smell: a `local/` or otherwise non-S3 prefix reaching the tracks
   table (the 2026-08-19 phantom), or `SHIZZLE_PIPELINE=test` selected
   without the opt-in flag.

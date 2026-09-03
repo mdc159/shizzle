@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ from shizzle_server.orchestrator.stages import (
     StageContext,
     _age_seconds,
     handle_dispatched,
+    handle_splitting,
 )
 from shizzle_server.settings import Settings
 
@@ -457,10 +459,130 @@ def _stub_cloud_intake(monkeypatch) -> None:
 
 async def _run_cloud_orch(settings, fake: FakeRunPodClient):
     settings.shizzle_pipeline = "cloud"
+    # Placeholder credentials so the orchestrator skips the parked-cloud
+    # warning path; the fake client replaces the HTTP one below.
+    settings.runpod_api_key = "unit-test-key"
+    settings.runpod_endpoint_id = "unit-test-endpoint"
     orch = Orchestrator(settings, worker_id="cloud-unit")
     orch.runpod = fake
     task = asyncio.create_task(orch.run_forever())
     return orch, task
+
+
+def test_cloud_orchestrator_parked_without_runpod_config(settings, caplog):
+    """Cloud mode without RunPod credentials is the valid parked state: the
+    orchestrator still starts (its heartbeat feeds /api/health) and logs one
+    WARNING; new jobs fail closed at dispatch."""
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_api_key = ""
+    settings.runpod_endpoint_id = ""
+    with caplog.at_level(logging.WARNING, logger="shizzle_server.orchestrator.loop"):
+        orch = Orchestrator(settings, worker_id="cloud-parked")
+    assert any(
+        record.levelno == logging.WARNING
+        and "RunPod not configured" in record.message
+        and "RUNPOD_DISPATCH_FAILED" in record.message
+        for record in caplog.records
+    )
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+
+    assert isinstance(orch.runpod, NotConfiguredRunPodClient)
+
+    # Configured cloud mode starts without the warning.
+    caplog.clear()
+    settings.runpod_api_key = "key"
+    settings.runpod_endpoint_id = "endpoint"
+    with caplog.at_level(logging.WARNING, logger="shizzle_server.orchestrator.loop"):
+        Orchestrator(settings, worker_id="cloud-configured")
+    assert not caplog.records
+
+
+async def test_not_configured_runpod_client_reports_dispatch_failure():
+    """If a cloud handler is still reached unconfigured, a fresh dispatch
+    fails with RUNPOD_DISPATCH_FAILED (non-retryable), not a generic
+    INTERNAL."""
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+
+    client = NotConfiguredRunPodClient()
+    with pytest.raises(StageError) as excinfo:
+        await client.dispatch(job_id=uuid.uuid4(), idempotency_key="k", payload={})
+    assert excinfo.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert excinfo.value.retryable is False
+    assert "RUNPOD_API_KEY" in excinfo.value.detail
+
+    # Polling an already-dispatched remote job stays retryable: the failure
+    # says nothing about that job, so the handler parks it until credentials
+    # return instead of failing it permanently.
+    with pytest.raises(StageError) as poll_exc:
+        await client.poll("rp-parked")
+    assert poll_exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert poll_exc.value.retryable is True
+
+
+async def test_parked_cloud_parks_inflight_dispatched_job(
+    settings, job_repo, session_factory, upload_job
+):
+    """A job dispatched before RunPod credentials vanished must park, not
+    fail: with the unconfigured client the poll failure carries no signal
+    about the remote job, so even a heartbeat past the stall window must not
+    trip the stall watchdog."""
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_worker_stall_seconds = 300.0
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    async with session_factory() as session, session.begin():
+        job = await session.get(Job, upload_job.id)
+        job.runpod_job_id = "rp-parked"
+        job.worker_phase = "extracting"
+        # Stale past the stall window: would be killed on a real poll outage.
+        job.worker_heartbeat_at = utcnow() - timedelta(seconds=3600)
+
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=NotConfiguredRunPodClient(),
+        worker_id="parked",
+    )
+    assert await handle_dispatched(ctx) is None
+
+    job = await job_repo.get_job(upload_job.id)
+    assert job.status == JobStage.dispatched  # parked, not failed
+    assert job.worker_phase == "extracting"  # not marked failed
+
+
+async def test_cloud_pipeline_fails_inflight_splitting_job(settings, job_repo, upload_job):
+    """A job that entered `splitting` before a mid-flight switch to the cloud
+    profile fails clearly and terminally instead of running the local splitter
+    into cloud verification."""
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_api_key = "unit-test-key"
+    settings.runpod_endpoint_id = "unit-test-endpoint"
+    for a, b in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.splitting),
+    ]:
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b)
+
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="profile-switch",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_splitting(ctx)
+    assert excinfo.value.retryable is False
+    assert "profile switched mid-flight" in excinfo.value.detail
 
 
 async def test_cloud_dispatched_e2e_records_progress_and_completes(
@@ -501,7 +623,11 @@ async def test_cloud_dispatched_stable_phase_remains_live(
     """Repeated successful polls in one phase refresh liveness without events."""
     _stub_cloud_intake(monkeypatch)
     settings.runpod_poll_seconds = 0.02
-    settings.runpod_worker_stall_seconds = 1.0
+    # The stall watchdog must never fire here: a 1.0 s threshold is reachable
+    # by a slow CI runner between polls (master flaked on exactly that), and
+    # 30 s exceeds the 15 s wait timeout below, so the watchdog can only fire
+    # in a run that has already failed.
+    settings.runpod_worker_stall_seconds = 30.0
     fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "working"}}])
     orch, task = await _run_cloud_orch(settings, fake)
     try:

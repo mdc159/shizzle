@@ -207,8 +207,8 @@ async def media_session(request: Request, _auth: None = Protected) -> JSONRespon
 async def upload_file(
     request: Request,
     file: UploadFile,
-    title: str | None = Form(None),
-    artist: str | None = Form(None),
+    title: str | None = Form(None, max_length=1024),
+    artist: str | None = Form(None, max_length=1024),
     _auth: None = Protected,
 ) -> dict:
     """Accept an MP4 upload, persist it, and create a pending job row.
@@ -216,7 +216,8 @@ async def upload_file(
     Optional multipart fields ``title``/``artist``: when the user typed both
     they win verbatim; a title alone is parsed for its artist; otherwise the
     filename stem is parsed. The resolved pair is stored on the job and
-    echoed in the response.
+    echoed in the response. Both fields are length-bounded (1024) so
+    metadata cannot bypass the upload size guard.
     """
     settings = _settings(request)
     if not file.filename:

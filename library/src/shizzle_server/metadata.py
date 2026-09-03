@@ -87,6 +87,19 @@ _TRAILING_JUNK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Multi-word junk phrases are also stripped with a plain-space delimiter
+# ("Song Official Music Video"). Single tokens are not: a real title may
+# legitimately end in "Video" or "Audio", so those still need a dash/comma.
+_TRAILING_JUNK_PHRASE_RE = re.compile(
+    r"(?:\s+(?:"
+    r"official\s+(?:music|lyric)\s+video"
+    r"|official\s+(?:video|audio)"
+    r"|(?:music|lyric)\s+video"
+    r"|full\s+hd"
+    r"))+\s*$",
+    re.IGNORECASE,
+)
+
 _SPACE_BEFORE_COMMA_RE = re.compile(r"\s+,")
 
 
@@ -141,6 +154,7 @@ def _clean_title_tail(title: str) -> str:
     while previous != title:
         previous = title
         title = _TRAILING_JUNK_RE.sub("", title)
+        title = _TRAILING_JUNK_PHRASE_RE.sub("", title)
     return title.strip().strip(" -–—,").strip()
 
 

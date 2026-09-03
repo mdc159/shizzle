@@ -76,32 +76,6 @@ export async function uploadFile(file: File, metadata?: SourceMetadata): Promise
 }
 
 /**
- * Submit a source URL for stem separation. Optional title/artist are sent
- * alongside the URL when present (the control plane parses the source name
- * for whichever fields are omitted).
- */
-export async function submitUrl(url: string, metadata?: SourceMetadata): Promise<{ jobId: string }> {
-  const title = metadata?.title?.trim();
-  const artist = metadata?.artist?.trim();
-
-  const response = await authFetch('/api/submit-url', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url,
-      ...(title ? { title } : {}),
-      ...(artist ? { artist } : {}),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Submit failed: ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-/**
  * Fetch library of completed tracks.
  */
 export async function getLibrary(): Promise<Track[]> {
