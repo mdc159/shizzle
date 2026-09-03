@@ -1,0 +1,356 @@
+{
+  "schema": "shizzle-track-metadata-fix-v1-run",
+  "applied_at": "2026-09-03T00:21:06.010331+00:00",
+  "database_host": "postgres",
+  "mapping": "/tmp/ops/track-metadata-2026-09-02.json",
+  "counts": {
+    "mapping_entries": 29,
+    "tracks_updated": 26,
+    "tracks_unchanged": 1,
+    "deleted": 2
+  },
+  "tracks": [
+    {
+      "id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+      "before": {
+        "artist": "",
+        "title": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "It's a Long Way to the Top"
+      },
+      "note": ""
+    },
+    {
+      "id": "a54803e6-f334-5991-9112-f17ca7365a0f",
+      "before": {
+        "artist": "",
+        "title": "AC DC - Let There Be Rock (Official Video)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "Let There Be Rock"
+      },
+      "note": ""
+    },
+    {
+      "id": "4ed567d1-31ba-5ab7-994a-247fadff921b",
+      "before": {
+        "artist": "",
+        "title": "AC DC - Let's Get It Up (Official Video)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "Let's Get It Up"
+      },
+      "note": ""
+    },
+    {
+      "id": "f5b84806-25e7-5bbd-bb13-fa894a88753a",
+      "before": {
+        "artist": "",
+        "title": "AC DC - Ride On (Stade De France, Paris, June 2001)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "Ride On (live, Stade de France 2001)"
+      },
+      "note": ""
+    },
+    {
+      "id": "9c835433-050d-5342-a02b-e2791927db92",
+      "before": {
+        "artist": "",
+        "title": "AC DC - Shoot To Thrill (Iron Man 2 Version)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "Shoot to Thrill (Iron Man 2 version)"
+      },
+      "note": ""
+    },
+    {
+      "id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+      "before": {
+        "artist": "",
+        "title": "AC DC - Walk All Over You (Official Video)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "Walk All Over You"
+      },
+      "note": ""
+    },
+    {
+      "id": "1edee1b7-0dff-5e20-922b-deb6c3ef4ce7",
+      "before": {
+        "artist": "",
+        "title": "AC DC - You Shook Me All Night Long (Official 4K Video)"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "You Shook Me All Night Long"
+      },
+      "note": ""
+    },
+    {
+      "id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+      "before": {
+        "artist": "",
+        "title": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction"
+      },
+      "after": {
+        "artist": "AC/DC",
+        "title": "You Shook Me All Night Long (with Steven Tyler, 2003 Hall of Fame induction)"
+      },
+      "note": ""
+    },
+    {
+      "id": "d24e81ba-28a0-520a-a766-0925f4e1e161",
+      "before": {
+        "artist": "",
+        "title": "Alice In Chains - Man in the Box (Official Video)"
+      },
+      "after": {
+        "artist": "Alice in Chains",
+        "title": "Man in the Box"
+      },
+      "note": ""
+    },
+    {
+      "id": "1f3b9397-ca05-526e-9901-2b73ab686062",
+      "before": {
+        "artist": "",
+        "title": "BLACK SABBATH -  Into The Void  (Live Video)"
+      },
+      "after": {
+        "artist": "Black Sabbath",
+        "title": "Into the Void (live)"
+      },
+      "note": ""
+    },
+    {
+      "id": "fc51be9b-c773-52b5-9b5c-4ebaa419b196",
+      "before": {
+        "artist": "",
+        "title": "Mr. Brownstone"
+      },
+      "after": {
+        "artist": "Guns N' Roses",
+        "title": "Mr. Brownstone"
+      },
+      "note": ""
+    },
+    {
+      "id": "7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d",
+      "before": {
+        "artist": "",
+        "title": "My Michelle"
+      },
+      "after": {
+        "artist": "Guns N' Roses",
+        "title": "My Michelle"
+      },
+      "note": ""
+    },
+    {
+      "id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+      "before": {
+        "artist": "",
+        "title": "Sweet Child O' Mine"
+      },
+      "after": {
+        "artist": "Guns N' Roses",
+        "title": "Sweet Child o' Mine"
+      },
+      "note": ""
+    },
+    {
+      "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+      "before": {
+        "artist": "",
+        "title": "Metallica Orion (Philadelphia, PA - May 23, 2025)"
+      },
+      "after": {
+        "artist": "Metallica",
+        "title": "Orion (live, Philadelphia 2025)"
+      },
+      "note": ""
+    },
+    {
+      "id": "ffee538e-8627-58f0-a02b-25cc60f7a29e",
+      "before": {
+        "artist": "",
+        "title": "Mother Love Bone - Star Dog Champion ( official video)"
+      },
+      "after": {
+        "artist": "Mother Love Bone",
+        "title": "Stardog Champion"
+      },
+      "note": ""
+    },
+    {
+      "id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+      "before": {
+        "artist": "",
+        "title": "Pearl Jam - Black - Acústico - Unplugged - HD"
+      },
+      "after": {
+        "artist": "Pearl Jam",
+        "title": "Black (Unplugged)"
+      },
+      "note": "source title has mojibake in 'Acústico'; match on id prefix"
+    },
+    {
+      "id": "05ced267-c681-48c8-a8a7-3bc7c4e5f10e",
+      "before": {
+        "artist": "Peter Frampton",
+        "title": "Black Hole Sun (Guitar Center Sessions)"
+      },
+      "after": {
+        "artist": "Peter Frampton",
+        "title": "Black Hole Sun (Guitar Center Sessions)"
+      },
+      "note": ""
+    },
+    {
+      "id": "427a17cb-50da-5e2b-9312-99c2ed4a28d0",
+      "before": {
+        "artist": "",
+        "title": "Skid Row - Monkey Business (Official Music Video)"
+      },
+      "after": {
+        "artist": "Skid Row",
+        "title": "Monkey Business"
+      },
+      "note": ""
+    },
+    {
+      "id": "99ec0110-1990-5d3c-8d69-e8ae76cad03d",
+      "before": {
+        "artist": "",
+        "title": "Soundgarden - Outshined"
+      },
+      "after": {
+        "artist": "Soundgarden",
+        "title": "Outshined"
+      },
+      "note": ""
+    },
+    {
+      "id": "06ce033c-2345-548b-866f-a0266348fe15",
+      "before": {
+        "artist": "",
+        "title": "Soundgarden - Spoonman"
+      },
+      "after": {
+        "artist": "Soundgarden",
+        "title": "Spoonman"
+      },
+      "note": ""
+    },
+    {
+      "id": "297389b3-bac0-5ae6-a144-bf7a8c4b6718",
+      "before": {
+        "artist": "",
+        "title": "Stone Temple Pilots - Plush (Official Music Video)"
+      },
+      "after": {
+        "artist": "Stone Temple Pilots",
+        "title": "Plush"
+      },
+      "note": ""
+    },
+    {
+      "id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+      "before": {
+        "artist": "",
+        "title": "Temple Of The Dog - Hunger Strike"
+      },
+      "after": {
+        "artist": "Temple of the Dog",
+        "title": "Hunger Strike"
+      },
+      "note": ""
+    },
+    {
+      "id": "0244dc21-af79-5797-acfd-2dd94aa09392",
+      "before": {
+        "artist": "",
+        "title": "Temple of the Dog - War Pigs (Black Sabbath cover) – Live in San Francisco"
+      },
+      "after": {
+        "artist": "Temple of the Dog",
+        "title": "War Pigs (Black Sabbath cover, live in San Francisco)"
+      },
+      "note": "source title has mojibake dash; match on id prefix"
+    },
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "before": {
+        "artist": "TOOL",
+        "title": "The Pot"
+      },
+      "after": {
+        "artist": "Tool",
+        "title": "The Pot"
+      },
+      "note": ""
+    },
+    {
+      "id": "52eb3b91-9906-5b8b-9100-1f9f4bdc0522",
+      "before": {
+        "artist": "",
+        "title": "Van Halen - (Oh) Pretty Woman (Official Music Video)"
+      },
+      "after": {
+        "artist": "Van Halen",
+        "title": "(Oh) Pretty Woman"
+      },
+      "note": ""
+    },
+    {
+      "id": "0329507a-b933-5eb5-8088-b1cd6f8feb98",
+      "before": {
+        "artist": "",
+        "title": "Van Halen - Hot For Teacher (Official Music Video)"
+      },
+      "after": {
+        "artist": "Van Halen",
+        "title": "Hot for Teacher"
+      },
+      "note": ""
+    },
+    {
+      "id": "4bd3d013-4dc2-5438-9926-962bd99029c4",
+      "before": {
+        "artist": "",
+        "title": "Van Halen - You Really Got Me (Official Music Video)"
+      },
+      "after": {
+        "artist": "Van Halen",
+        "title": "You Really Got Me"
+      },
+      "note": ""
+    }
+  ],
+  "deletions": [
+    {
+      "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+      "before": {
+        "artist": "",
+        "title": "Mother Love Bone - Stardog Champion"
+      },
+      "note": "duplicate of ffee538e (Mother Love Bone, Stardog Champion); both legacy imports, this one 29.97 fps 304.5 s, the kept one is the official video at 30 fps 300.7 s; decided by Mike 2026-09-02"
+    },
+    {
+      "id": "75fae991-7ddc-5187-bd06-a828fde89db2",
+      "before": {
+        "artist": "",
+        "title": "Van Halen - Runnin' With The Devil (Official Music Video)"
+      },
+      "note": "phantom row: s3_prefix local/9fe2c9a570f4449abf55bcd96f7159da, no manifest in S3; created 2026-08-19 by job 9fe2c9a5 through a stub test_pipeline path that published in under a second; nothing to play; Mike 2026-09-02"
+    }
+  ]
+}

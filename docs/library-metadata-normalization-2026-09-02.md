@@ -149,7 +149,11 @@ on a rerun as "already applied" and verify via `/api/library` instead.
 
 ## Run record
 
-**Not yet applied.** After the production run, paste the JSON from
-`ops/data/track-metadata-2026-09-02.run.json` (timestamp, database host,
-counts, per-track before/after) here, and note the operator and the dry-run
-review that preceded it.
+Applied to production on 2026-09-03 00:21:06 UTC from the api container
+on the VPS (compose project `shizzle`), after a clean dry run. Counts from the run
+record (`ops/data/track-metadata-2026-09-02.run.json`): mapping entries 29,
+tracks updated 26, unchanged 1, soft-deleted 2.
+The public library listed 27 tracks with zero empty artists immediately afterwards.
+The dry run first aborted on one mapping entry whose full id had been mistyped; the
+entry was changed to prefix resolution (commit `82022ed`) and the dry run re-run clean
+before applying.
