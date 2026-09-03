@@ -19,6 +19,19 @@ const fixture = JSON.parse(
   readFileSync(fileURLToPath(new URL('fixtures/source_titles.json', import.meta.url)), 'utf-8')
 ) as { rows: GoldenRow[] };
 
+// The copy above exists only because the e2e runner stays inside player/.
+// Guard against drift so a backend fixture change cannot leave it stale.
+const backendFixture = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL('../../library/tests/fixtures/source_titles.json', import.meta.url)),
+    'utf-8'
+  )
+) as { rows: GoldenRow[] };
+
+test('player fixture is a verbatim copy of the backend golden fixture', () => {
+  expect(fixture).toEqual(backendFixture);
+});
+
 // Served and transformed on the fly by the Vite dev server. Kept in a
 // variable so the browser-native dynamic import stays verbatim (knip cannot
 // resolve Vite's absolute /src paths and would flag a literal specifier).
@@ -30,28 +43,38 @@ interface ParseResult {
   confident: boolean;
 }
 
-for (const row of fixture.rows) {
-  test(`parity: ${row.raw}`, async ({ page }) => {
-    test.setTimeout(60_000);
+// The parity cases import /src/lib/sourceTitle.ts through the Vite dev
+// server, which only exists for local runs: against a deployed stack
+// (SHIZZLE_E2E_BASE_URL) there is no dev server to transform and serve it.
+test.describe('parser parity with the control plane', () => {
+  test.skip(
+    !!process.env.SHIZZLE_E2E_BASE_URL,
+    'imports /src via the Vite dev server; run locally without SHIZZLE_E2E_BASE_URL'
+  );
 
-    // The page is just a module host: the Vite dev server transforms and
-    // serves the module, so the test exercises the exact code the upload
-    // dialog ships.
-    await page.goto('/');
-    const result = await page.evaluate(
-      async ({ raw, modulePath }: { raw: string; modulePath: string }) => {
-        const { parseSourceTitle } = (await import(modulePath)) as {
-          parseSourceTitle: (value: string) => ParseResult;
-        };
-        return parseSourceTitle(raw);
-      },
-      { raw: row.raw, modulePath: SOURCE_TITLE_MODULE }
-    );
+  for (const row of fixture.rows) {
+    test(`parity: ${row.raw}`, async ({ page }) => {
+      test.setTimeout(60_000);
 
-    expect(result).toEqual({
-      artist: row.parser_artist,
-      title: row.parser_title,
-      confident: row.parser_confident,
+      // The page is just a module host: the Vite dev server transforms and
+      // serves the module, so the test exercises the exact code the upload
+      // dialog ships.
+      await page.goto('/');
+      const result = await page.evaluate(
+        async ({ raw, modulePath }: { raw: string; modulePath: string }) => {
+          const { parseSourceTitle } = (await import(modulePath)) as {
+            parseSourceTitle: (value: string) => ParseResult;
+          };
+          return parseSourceTitle(raw);
+        },
+        { raw: row.raw, modulePath: SOURCE_TITLE_MODULE }
+      );
+
+      expect(result).toEqual({
+        artist: row.parser_artist,
+        title: row.parser_title,
+        confident: row.parser_confident,
+      });
     });
-  });
-}
+  }
+});

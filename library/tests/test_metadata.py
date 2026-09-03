@@ -37,12 +37,14 @@ _JUNK_PATTERNS = [
     r"\b8k\b",
     r"\b1080p\b",
     r"\b720p\b",
+    r"\b2160p\b",
     r"\bremaster(ed)?\b",
     r"\bresync\b",
     r"\bupscale\b",
     r"\bvisuali[sz]er\b",
     r"\bmusic\s+video\b",
     r"\blyric\s+video\b",
+    r"\blyrics?\b",
 ]
 
 
@@ -86,7 +88,22 @@ def test_strips_file_extension():
         ("Band - Song [Official Music Video], Full HD (Remaster, Resync and Upscale)", "Song"),
         ("Band - Song (Visualizer)", "Song"),
         ("Band - Song (Lyrics)", "Song"),
+        # Whitespace-delimited multi-word junk phrases (no dash or comma).
+        ("Band - Song Official Music Video", "Song"),
+        ("Band - Song Music Video", "Song"),
+        ("Band - Song Official Lyric Video", "Song"),
+        ("Band - Song Official Audio", "Song"),
+        ("Band - Song Full HD", "Song"),
+        # ...but a bare trailing single token is kept: real titles can end
+        # in "Video" or "Audio".
+        ("Band - Song Video", "Song Video"),
         ("Pearl Jam - Black - Acústico - Unplugged - HD", "Black - Acústico - Unplugged"),
+        # Dangling separators and empty brackets are junk too.
+        ("Band - Song -", "Song"),
+        ("Band - Song ()", "Song"),
+        ("Band - Song []", "Song"),
+        # Non-media suffixes are part of the title, not an extension.
+        ("Band - Song.v1", "Song.v1"),
     ],
 )
 def test_platform_junk_removed(raw, title):
@@ -189,9 +206,13 @@ def test_parser_output_is_pinned(row):
 
 @pytest.mark.parametrize("row", ROWS, ids=[r["id"][:8] for r in ROWS])
 def test_no_junk_tokens_survive(row):
+    # Run the parser live: checking the fixture's parser_title field would
+    # only re-assert self-authored data and could not catch a parser
+    # regression that leaks junk.
+    parsed = parse_source_title(row["raw"])
     for pattern in _JUNK_PATTERNS:
-        assert not re.search(pattern, row["parser_title"], re.IGNORECASE), (
-            f"{row['id'][:8]}: junk {pattern!r} in {row['parser_title']!r}"
+        assert not re.search(pattern, parsed.title, re.IGNORECASE), (
+            f"{row['id'][:8]}: junk {pattern!r} in {parsed.title!r}"
         )
 
 

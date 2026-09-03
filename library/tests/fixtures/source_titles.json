@@ -318,6 +318,105 @@
       "parser_artist": "Van Halen",
       "parser_title": "(Oh) Pretty Woman",
       "parser_confident": true
+    },
+    {
+      "id": "d55ddf82-bb52-5f9a-be44-1214ecbb984a",
+      "raw": "Soundgarden - Fell On Black Days Official Video",
+      "raw_artist": "",
+      "expect_artist": "Soundgarden",
+      "expect_title": "Fell On Black Days",
+      "has_separator": true,
+      "parser_artist": "Soundgarden",
+      "parser_title": "Fell On Black Days",
+      "parser_confident": true
+    },
+    {
+      "id": "6ed922d3-5371-5585-8214-216e97b673bc",
+      "raw": "Tool - Schism Music Video",
+      "raw_artist": "",
+      "expect_artist": "Tool",
+      "expect_title": "Schism",
+      "has_separator": true,
+      "parser_artist": "Tool",
+      "parser_title": "Schism",
+      "parser_confident": true
+    },
+    {
+      "id": "7c71c028-b41d-5e22-b2a3-83318ebb553d",
+      "raw": "AC DC featuring Steven Tyler - You Shook Me All Night Long",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "You Shook Me All Night Long (featuring Steven Tyler)",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "You Shook Me All Night Long (featuring Steven Tyler)",
+      "parser_confident": true
+    },
+    {
+      "id": "385479ee-5059-53c3-adfa-d2e773112690",
+      "raw": "Nirvana - Lithium ()",
+      "raw_artist": "",
+      "expect_artist": "Nirvana",
+      "expect_title": "Lithium",
+      "has_separator": true,
+      "parser_artist": "Nirvana",
+      "parser_title": "Lithium",
+      "parser_confident": true
+    },
+    {
+      "id": "b10fdfd1-2998-5edb-9769-841bd7f3b9c9",
+      "raw": "Metallica - One.v1",
+      "raw_artist": "",
+      "expect_artist": "Metallica",
+      "expect_title": "One.v1",
+      "has_separator": true,
+      "parser_artist": "Metallica",
+      "parser_title": "One.v1",
+      "parser_confident": true
+    },
+    {
+      "id": "b3843044-7c0a-5074-ad07-a8ca72abb5aa",
+      "raw": "Van Halen - Panama -",
+      "raw_artist": "",
+      "expect_artist": "Van Halen",
+      "expect_title": "Panama",
+      "has_separator": true,
+      "parser_artist": "Van Halen",
+      "parser_title": "Panama",
+      "parser_confident": true
+    },
+    {
+      "id": "6665d59d-4ced-5a11-afd2-8cd201882311",
+      "raw": "Soundgarden - Black Hole Sun (Official Videos)",
+      "raw_artist": "",
+      "expect_artist": "Soundgarden",
+      "expect_title": "Black Hole Sun",
+      "has_separator": true,
+      "parser_artist": "Soundgarden",
+      "parser_title": "Black Hole Sun",
+      "parser_confident": true
+    },
+    {
+      "id": "24dc57a1-18a6-566a-9e37-b2ec95fbc8c5",
+      "raw": "Pearl Jam - Jeremy (Official 8K Video)",
+      "raw_artist": "",
+      "expect_artist": "Pearl Jam",
+      "expect_title": "Jeremy",
+      "has_separator": true,
+      "parser_artist": "Pearl Jam",
+      "parser_title": "Jeremy",
+      "parser_confident": true
+    },
+    {
+      "id": "a31a36be-c554-58cc-89d0-72cf862288ee",
+      "raw": "Alice In Chains - Rooster (Remaster & Resync)",
+      "raw_artist": "",
+      "expect_artist": "Alice In Chains",
+      "expect_title": "Rooster",
+      "has_separator": true,
+      "parser_artist": "Alice In Chains",
+      "parser_title": "Rooster",
+      "parser_confident": true
     }
   ]
 }

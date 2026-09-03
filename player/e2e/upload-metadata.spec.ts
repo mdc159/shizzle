@@ -60,6 +60,9 @@ test('upload dialog prefills title and artist from the file name and sends them'
   await expect(artistInput).toHaveValue('Van Halen');
 
   // Both fields stay editable; the edited values are what get uploaded.
+  // Use edited values that do NOT appear in the file name, so the body
+  // assertions below cannot pass off the multipart file part's filename.
+  await titleInput.fill('Hot For Teacher (edited title)');
   await artistInput.fill('Van Halen (edited)');
 
   const submit = page.getByRole('button', { name: 'Split Stems' });
@@ -68,7 +71,7 @@ test('upload dialog prefills title and artist from the file name and sends them'
 
   await expect.poll(() => uploadBody, { timeout: 10_000 }).not.toBeNull();
   expect(uploadBody!).toContain('name="title"');
-  expect(uploadBody!).toContain('Hot For Teacher');
+  expect(uploadBody!).toContain('Hot For Teacher (edited title)');
   expect(uploadBody!).toContain('name="artist"');
   expect(uploadBody!).toContain('Van Halen (edited)');
   expect(uploadBody!).toContain('name="file"');
