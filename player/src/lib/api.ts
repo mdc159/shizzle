@@ -45,12 +45,23 @@ export async function refreshMediaSession(): Promise<{ cloudfront: boolean }> {
   return response.json();
 }
 
+/** Optional clean metadata that overrides the server-side name parsing. */
+interface SourceMetadata {
+  title?: string;
+  artist?: string;
+}
+
 /**
- * Upload a video file for stem separation.
+ * Upload a video file for stem separation. Optional title/artist ride along
+ * as multipart fields so the track lands in the library with clean metadata.
  */
-export async function uploadFile(file: File): Promise<{ jobId: string }> {
+export async function uploadFile(file: File, metadata?: SourceMetadata): Promise<{ jobId: string }> {
   const formData = new FormData();
   formData.append('file', file);
+  const title = metadata?.title?.trim();
+  const artist = metadata?.artist?.trim();
+  if (title) formData.append('title', title);
+  if (artist) formData.append('artist', artist);
 
   const response = await authFetch('/api/upload', {
     method: 'POST',
@@ -59,6 +70,32 @@ export async function uploadFile(file: File): Promise<{ jobId: string }> {
 
   if (!response.ok) {
     throw new Error(`Upload failed: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Submit a source URL for stem separation. Optional title/artist are sent
+ * alongside the URL when present (the control plane parses the source name
+ * for whichever fields are omitted).
+ */
+export async function submitUrl(url: string, metadata?: SourceMetadata): Promise<{ jobId: string }> {
+  const title = metadata?.title?.trim();
+  const artist = metadata?.artist?.trim();
+
+  const response = await authFetch('/api/submit-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url,
+      ...(title ? { title } : {}),
+      ...(artist ? { artist } : {}),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Submit failed: ${response.statusText}`);
   }
 
   return response.json();
