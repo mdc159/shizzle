@@ -34,6 +34,17 @@ for required_path in .env compose.prod.yml Caddyfile player incoming/compose.pro
   fi
 done
 
+# E6: the passcode gate is never silently open in production. Fail before
+# the transaction when the production .env leaves SHIZZLE_PASSCODE empty or
+# missing, unless SHIZZLE_ALLOW_OPEN_GATE=1 is set deliberately. The last
+# assignment wins, matching compose .env semantics (same as PREV_IMAGE).
+PASSCODE_VALUE=$(sed -n 's/^SHIZZLE_PASSCODE=//p' .env | tail -n 1)
+OPEN_GATE_VALUE=$(sed -n 's/^SHIZZLE_ALLOW_OPEN_GATE=//p' .env | tail -n 1)
+if [ -z "$PASSCODE_VALUE" ] && [ "$OPEN_GATE_VALUE" != "1" ]; then
+  echo "Cannot deploy: SHIZZLE_PASSCODE is empty or missing in .env — the passcode gate would be silently open (invariant E6). Set SHIZZLE_PASSCODE, or SHIZZLE_ALLOW_OPEN_GATE=1 for a deliberate open deployment." >&2
+  exit 1
+fi
+
 PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
 PREV_TAG=$(sed -n 's/^SHIZZLE_API_TAG=//p' .env | tail -n 1)
 if [ -z "$PREV_IMAGE" ] && [ -z "$PREV_TAG" ]; then

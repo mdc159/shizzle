@@ -43,7 +43,7 @@ IMAGE="ghcr.io/mdc159/shizzle/api:sha-$TARGET@sha256:$DIGEST"
 new_fixture() {
   PROD="$TMP/prod-$1"
   mkdir -p "$PROD/player" "$PROD/incoming/dist"
-  printf 'POSTGRES_USER=shizzle\nPOSTGRES_DB=shizzle\nSHIZZLE_API_TAG=sha-old\n' > "$PROD/.env"
+  printf 'POSTGRES_USER=shizzle\nPOSTGRES_DB=shizzle\nSHIZZLE_API_TAG=sha-old\nSHIZZLE_PASSCODE=test-passcode\n' > "$PROD/.env"
   printf 'old-compose\n' > "$PROD/compose.prod.yml"
   printf 'old-caddy\n' > "$PROD/Caddyfile"
   printf 'old-player\n' > "$PROD/player/index.html"
@@ -99,6 +99,35 @@ touch "$PROD/.rollback-release-target"
 if run_deploy; then echo "stale transaction unexpectedly deployed" >&2; exit 1; fi
 grep -Fx old-compose "$PROD/compose.prod.yml"
 test ! -e "$PROD/.rollback-release.tar.gz"
+
+# E6: an empty or missing SHIZZLE_PASSCODE must stop the deploy before the
+# transaction; only an explicit SHIZZLE_ALLOW_OPEN_GATE=1 overrides it.
+new_fixture empty-passcode
+sed -i 's/^SHIZZLE_PASSCODE=test-passcode$/SHIZZLE_PASSCODE=/' "$PROD/.env"
+if run_deploy 2> "$TMP/empty-passcode.err"; then
+  echo "empty passcode unexpectedly deployed" >&2
+  exit 1
+fi
+grep -F 'SHIZZLE_PASSCODE is empty or missing' "$TMP/empty-passcode.err"
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture missing-passcode
+sed -i '/^SHIZZLE_PASSCODE=/d' "$PROD/.env"
+if run_deploy 2> "$TMP/missing-passcode.err"; then
+  echo "missing passcode unexpectedly deployed" >&2
+  exit 1
+fi
+grep -F 'SHIZZLE_PASSCODE is empty or missing' "$TMP/missing-passcode.err"
+grep -Fx old-compose "$PROD/compose.prod.yml"
+test ! -e "$PROD/.rollback-release.tar.gz"
+
+new_fixture open-gate-opt-in
+sed -i '/^SHIZZLE_PASSCODE=/d' "$PROD/.env"
+printf 'SHIZZLE_ALLOW_OPEN_GATE=1\n' >> "$PROD/.env"
+run_deploy
+grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$PROD/.env"
+grep -F 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
 
 new_fixture pull-failure
 DOCKER_FAIL=pull
