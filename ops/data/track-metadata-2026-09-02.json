@@ -1,7 +1,7 @@
 {
   "schema": "shizzle-track-metadata-fix-v1",
   "prepared": "2026-09-02",
-  "prepared_by": "Claude (orchestrator) from /api/library on 2026-09-02; awaiting Mike's approval",
+  "prepared_by": "Claude (orchestrator) from /api/library on 2026-09-02; approved by Mike 2026-09-02",
   "rules": [
     "artist and title are separate fields; the title never repeats the artist",
     "drop platform junk: (Official Music Video), [Official Video], HD, 4K, Remaster/Resync/Upscale notes",
@@ -41,7 +41,7 @@
       "expect_id_prefix": "5cbd16b6",
       "artist": "Pearl Jam",
       "title": "Black (Unplugged)",
-      "note": "source title has mojibake in 'Acústico'; match on id prefix"
+      "note": "source title has mojibake where 'Acústico' should be; match on id prefix"
     },
     {
       "id": "d24e81ba",
@@ -60,7 +60,7 @@
       "expect_id_prefix": "0244dc21",
       "artist": "Temple of the Dog",
       "title": "War Pigs (Black Sabbath cover, live in San Francisco)",
-      "note": "source title has mojibake dash; match on id prefix"
+      "note": "source title has mojibake where an em dash should be; match on id prefix"
     },
     {
       "id": "c4072b04",

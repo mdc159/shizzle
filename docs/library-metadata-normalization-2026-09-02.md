@@ -5,7 +5,8 @@ embed the artist (`Van Halen - Runnin' With The Devil`), some carry platform
 junk (`(Official Music Video)`, `HD`, `4K`, remaster/resync/upscale notes),
 artist casing drifts (`TOOL` vs `Tool`), and a few titles arrived with
 mojibake from a bad source decode. This change rewrites
-`tracks.artist` and `tracks.title` for 27 non-deleted tracks and soft-deletes
+`tracks.artist` and `tracks.title` for 26 non-deleted tracks (a 27th is
+pinned unchanged by its `expect` block) and soft-deletes
 2 rows (a duplicate and a phantom; see "Deletions" below) from a reviewed
 mapping. No generation, pointer, manifest, or S3 object changes — publication
 immutability (INVARIANTS C1–C6) is untouched; this is a plain row update, not
@@ -51,10 +52,15 @@ The mapping is
   aborts with exit 2 before any write.
 - Without `--apply` the script is a dry run: it prints the before/after
   tables and changes nothing.
-- With `--apply`, all changes happen in ONE transaction, then every touched
-  row is re-read and asserted against the target, and a JSON run record is
-  written (timestamp, database host without credentials, per-track
-  before/after, counts).
+- With `--apply`, all changes happen in ONE transaction: library coverage
+  and every row's before-values are revalidated under row locks, the writes
+  are flushed and each locked row is verified against its target, and
+  coverage is checked once more before commit — any drift rolls the whole
+  transaction back. Afterwards a JSON run record is written atomically
+  (timestamp, database host without credentials, mapping path + sha256,
+  per-track before/after, counts). The report destination is reserved
+  before any database write; if the post-commit report write still fails,
+  the full record JSON is printed to stdout and the command exits 1.
 
 ## Before/after table
 
@@ -80,14 +86,14 @@ new title.
 | b7a980db | (dry run prints) | (dry run prints) | Guns N' Roses | Sweet Child o' Mine | |
 | 22f0177d | (dry run prints) | (dry run prints) | Metallica | Orion (live, Philadelphia 2025) | |
 | ffee538e | (dry run prints) | (dry run prints) | Mother Love Bone | Stardog Champion | kept duplicate; 234a7b1c soft-deleted, see Deletions |
-| 5cbd16b6 | (dry run prints) | (dry run prints, mojibake in 'Acústico') | Pearl Jam | Black (Unplugged) | source title has mojibake; matched on id prefix |
+| 5cbd16b6 | (dry run prints) | (dry run prints, mojibake where 'Acústico' should be) | Pearl Jam | Black (Unplugged) | source title mojibake where 'Acústico' should be; matched on id prefix |
 | 05ced267 | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | no change; row pinned by expect |
 | 427a17cb | (dry run prints) | (dry run prints) | Skid Row | Monkey Business | |
 | 99ec0110 | (dry run prints) | (dry run prints) | Soundgarden | Outshined | |
 | 06ce033c | (dry run prints) | (dry run prints) | Soundgarden | Spoonman | |
 | 297389b3 | (dry run prints) | (dry run prints) | Stone Temple Pilots | Plush | |
 | 20d172a7 | (dry run prints) | (dry run prints) | Temple of the Dog | Hunger Strike | |
-| 0244dc21 | (dry run prints) | (dry run prints, mojibake dash) | Temple of the Dog | War Pigs (Black Sabbath cover, live in San Francisco) | source title has mojibake dash; matched on id prefix |
+| 0244dc21 | (dry run prints) | (dry run prints, mojibake where an em dash should be) | Temple of the Dog | War Pigs (Black Sabbath cover, live in San Francisco) | source title mojibake where an em dash should be; matched on id prefix |
 | f995371a | TOOL | The Pot | Tool | The Pot | casing fix |
 | 52eb3b91 | (dry run prints) | (dry run prints) | Van Halen | (Oh) Pretty Woman | |
 | 0329507a | (dry run prints) | (dry run prints) | Van Halen | Hot for Teacher | |
@@ -112,9 +118,11 @@ route; media objects and generation history retained):
 The box receives no source code, so ship the script and mapping to the VPS and
 run them inside the api image (which has `shizzle_server` and SQLAlchemy
 installed and carries `DATABASE_URL` in its compose environment). From a repo
-checkout:
+checkout (the target directory is not created by deployment, so make it
+first):
 
 ```bash
+ssh <vps> mkdir -p /opt/shizzle/prod/ops-normalize
 scp ops/normalize_track_metadata.py \
     ops/data/track-metadata-2026-09-02.json \
     <vps>:/opt/shizzle/prod/ops-normalize/
@@ -142,10 +150,20 @@ docker compose -p shizzle -f compose.prod.yml run --rm --no-deps \
 ```
 
 Exit 2 means a validation violation — nothing was written; read the printed
-list, fix the mapping or investigate the library, and dry run again. A rerun
+list, fix the mapping or investigate the library, and dry run again. Exit 1
+after APPLY means the database transaction committed but the run record could
+not be written; the full record JSON is printed to stdout, so save it
+manually as the report. A rerun
 after a successful apply is safe: `expect` blocks then mismatch by design
 (the row already holds the new values), so do not rerun blindly; treat exit 2
 on a rerun as "already applied" and verify via `/api/library` instead.
+
+**Do not rerun `ops/import_legacy_library.py` against the legacy inventory.**
+Its idempotent path still calls `TrackRepository.upsert_imported` for every
+already-published folder, which rewrites `title`/`artist` from the old
+manifests and clears `deleted_at` — a rerun would undo this normalization and
+resurrect the deleted Stardog duplicate. A persistent exclusion in the
+importer or its source inventory is a tracked follow-up.
 
 ## Run record
 
