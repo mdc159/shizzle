@@ -5,8 +5,9 @@ Two implementations:
 - LocalPipeline — reuses processing.run_pipeline (ffmpeg + Demucs on this
   host/container). Keeps the Phase 1 golden-clip flow working, now DB-backed.
 - TestPipeline — deterministic marker-file pipeline for fault-injection tests
-  (kill/restart, retry schedules). Selected with SHIZZLE_PIPELINE=test; it
-  never runs in normal operation.
+  (kill/restart, retry schedules). Selected with SHIZZLE_PIPELINE=test plus
+  the explicit SHIZZLE_ALLOW_TEST_PIPELINE=1 opt-in; it can never run in
+  normal operation (invariant C7).
 
 Both are idempotent per stage: work already completed (marker/manifest on
 disk) is skipped on re-run, so a crashed orchestrator can safely re-execute
@@ -104,6 +105,10 @@ class LocalPipeline:
 class TestPipeline:
     """Fault-injection pipeline (SHIZZLE_PIPELINE=test) — test instrumentation only.
 
+    Selecting it requires SHIZZLE_ALLOW_TEST_PIPELINE=1 (invariant C7): the
+    stub produces no media, and a production container that ran it published
+    a phantom library row on 2026-08-19.
+
     Effects are counted in <job_dir>/effects.log ("<job_dir_name> <stage>" per
     line, appended only when real work happens), and completion is marked with
     .<stage>.done files, mirroring how the real pipeline's on-disk outputs make
@@ -173,5 +178,11 @@ class TestPipeline:
 
 def build_pipeline(settings: Settings) -> Pipeline:
     if settings.shizzle_pipeline == "test":
+        if not settings.shizzle_allow_test_pipeline:
+            raise RuntimeError(
+                "SHIZZLE_PIPELINE=test requires SHIZZLE_ALLOW_TEST_PIPELINE=1: "
+                "the test pipeline is a stub that produces no media and must "
+                "never run in normal operation (invariant C7)"
+            )
         return TestPipeline(settings)
     return LocalPipeline()

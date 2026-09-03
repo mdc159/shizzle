@@ -37,6 +37,20 @@ async def test_get_missing_job_returns_none(job_repo):
     assert await job_repo.get_job(uuid.uuid4()) is None
 
 
+async def test_create_job_persists_artist_and_defaults_empty(job_repo):
+    job = await job_repo.create_job(
+        source_type=SourceType.upload,
+        source_ref="source.mp4",
+        title="Runnin' With The Devil",
+        artist="Van Halen",
+    )
+    assert (await job_repo.get_job(job.id)).artist == "Van Halen"
+
+    bare = await job_repo.create_job(source_type=SourceType.url, source_ref="https://x")
+    fetched = await job_repo.get_job(bare.id)
+    assert fetched.artist == ""  # never NULL: consumers read it unconditionally
+
+
 async def test_idempotency_key_unique(job_repo):
     await job_repo.create_job(
         source_type=SourceType.url, source_ref="https://x", idempotency_key="dup-key"
@@ -96,8 +110,8 @@ async def test_track_soft_delete_and_library_filter(job_repo, track_repo, upload
         upload_job.id,
         title="Test Track",
         duration_seconds=12.5,
-        s3_prefix=f"local/{upload_job.id.hex}",
-        manifest_key=f"local/{upload_job.id.hex}/stems.json",
+        s3_prefix=f"tracks/{track_id_for_job(upload_job.id)}/1",
+        manifest_key=f"tracks/{track_id_for_job(upload_job.id)}/1/manifest.json",
     )
     assert track.id == track_id_for_job(upload_job.id)
 

@@ -61,13 +61,15 @@ class TestKillAndRestart:
         assert current.lease_owner == "worker-a"  # orphaned lease
 
         # Second instance: must wait out the expired lease, reclaim, resume.
+        # Terminal state is FAILED at publishing: the C7 guard refuses the
+        # test pipeline's local/ placeholder row.
         spawn_orchestrator("worker-b", shizzle_test_stage_sleep="2")
-        ready = await wait_for(
-            lambda: self._ready(job_repo, job.id),
+        settled = await wait_for(
+            lambda: self._failed(job_repo, job.id),
             timeout=60,
-            desc="job ready after restart",
+            desc="job failed at publishing after restart",
         )
-        assert ready.status == JobStage.ready
+        assert settled.error_code == "PUBLISH_FAILED"
 
         # Idempotency proven by the effect counter: every sub-stage's effect
         # happened exactly once — completed work (marker present) was not
@@ -76,18 +78,18 @@ class TestKillAndRestart:
         for sub in ("extracting", "splitting", "encoding"):
             assert effects.count(sub) == 1, f"{sub} effects: {effects}"
 
-        # Exactly one track row; lease reclaim is on the record.
-        tracks = await track_repo.list_tracks()
-        assert [t.id for t in tracks] == [track_id_for_job(job.id)]
+        # No track row (C7); lease reclaim and the refusal are on the record.
+        assert await track_repo.list_tracks() == []
         events = [e.event for e in await job_repo.list_events(job.id)]
         assert "lease_reclaimed" in events
-        assert events.count("track_published") == 1
+        assert events.count("publish_refused") == 1
+        assert "track_published" not in events
         assert events[0] == "created"  # unbroken history from birth
 
     @staticmethod
-    async def _ready(job_repo, job_id):
+    async def _failed(job_repo, job_id):
         job = await job_repo.get_job(job_id)
-        return job if job is not None and job.status == JobStage.ready else None
+        return job if job is not None and job.status == JobStage.failed else None
 
 
 class TestLeaseExpiry:
@@ -111,13 +113,13 @@ class TestLeaseExpiry:
 
         spawn_orchestrator("survivor")
         await wait_for(
-            lambda: TestKillAndRestart._ready(job_repo, job.id),
+            lambda: TestKillAndRestart._failed(job_repo, job.id),
             timeout=30,
-            desc="survivor completes the orphaned job",
+            desc="survivor takes over the orphaned job (fails at publishing, C7)",
         )
         events = [e.event for e in await job_repo.list_events(job.id)]
         assert "lease_reclaimed" in events
-        assert len(await track_repo.list_tracks()) == 1
+        assert await track_repo.list_tracks() == []
 
     async def test_live_lease_not_stolen(self, pg_repos, data_dir):
         """SKIP LOCKED + lease predicate: an unexpired lease blocks claims."""
@@ -145,8 +147,8 @@ class TestDuplicateCompletion:
         kwargs = {
             "title": "Dup",
             "duration_seconds": 1.0,
-            "s3_prefix": f"local/{job.id.hex}",
-            "manifest_key": f"local/{job.id.hex}/stems.json",
+            "s3_prefix": f"tracks/{track_id_for_job(job.id)}/1",
+            "manifest_key": f"tracks/{track_id_for_job(job.id)}/1/manifest.json",
         }
         results = await asyncio.gather(
             job_repo.publish_track(job.id, **kwargs),
@@ -176,14 +178,16 @@ class TestRetrySchedule:
         job_repo, track_repo, _ = pg_repos
         job = await make_upload_job(job_repo, data_dir)
 
-        # Two injected failures, then success. Base backoff 1 s -> delays 1 s, 2 s.
+        # Two injected failures, then split succeeds. Base backoff 1 s ->
+        # delays 1 s, 2 s. Publishing is then refused (C7): terminal failed.
         spawn_orchestrator("retrier", shizzle_test_fail_times="2")
-        ready = await wait_for(
-            lambda: TestKillAndRestart._ready(job_repo, job.id),
+        settled = await wait_for(
+            lambda: TestKillAndRestart._failed(job_repo, job.id),
             timeout=45,
-            desc="job ready after retries",
+            desc="job retried, then failed at publishing",
         )
-        assert ready.attempt == 2
+        assert settled.attempt == 2
+        assert settled.error_code == "PUBLISH_FAILED"
 
         events = await job_repo.list_events(job.id)
         retries = [e for e in events if e.event == "retry_scheduled"]
@@ -200,7 +204,7 @@ class TestRetrySchedule:
         gap = (completed[0].created_at - retries[1].created_at).total_seconds()
         assert gap >= 2.0, f"retry ran {gap:.2f}s after schedule; expected >= 2s backoff"
 
-        assert len(await track_repo.list_tracks()) == 1
+        assert await track_repo.list_tracks() == []
 
 
 class TestConcurrentOrchestrators:
@@ -214,23 +218,25 @@ class TestConcurrentOrchestrators:
         spawn_orchestrator("peer-1", shizzle_test_stage_sleep="0.3")
         spawn_orchestrator("peer-2", shizzle_test_stage_sleep="0.3")
 
-        async def all_ready():
+        async def all_settled():
             for j in jobs:
                 job = await job_repo.get_job(j.id)
-                if job.status != JobStage.ready:
+                if job.status != JobStage.failed:
                     return None
             return True
 
-        await wait_for(all_ready, timeout=60, desc="all four jobs ready")
+        await wait_for(all_settled, timeout=60, desc="all four jobs failed at publishing")
 
-        tracks = await track_repo.list_tracks()
-        assert {t.id for t in tracks} == {track_id_for_job(j.id) for j in jobs}
+        # Every job ran exactly once and was refused exactly once (C7): no
+        # track rows, one publish_refused per job.
+        assert await track_repo.list_tracks() == []
         for j in jobs:
             effects = _effects_for(data_dir, j.id.hex)
             for sub in ("extracting", "splitting", "encoding"):
                 assert effects.count(sub) == 1, f"job {j.id.hex}: {effects}"
             events = [e.event for e in await job_repo.list_events(j.id)]
-            assert events.count("track_published") == 1
+            assert events.count("publish_refused") == 1
+            assert "track_published" not in events
 
 
 class TestUrlStub:
@@ -263,6 +269,36 @@ class TestSchemaContract:
             }
             assert {"jobs", "job_events", "tracks", "orchestrator_heartbeats"} <= tables
             assert "alembic_version" in tables
+
+            # 0005_job_artist: jobs.artist is NOT NULL with a '' default so
+            # pre-migration rows stay valid.
+            columns = {
+                r[0]: (r[1], r[2])
+                for r in await conn.execute(
+                    text(
+                        "SELECT column_name, is_nullable, column_default "
+                        "FROM information_schema.columns "
+                        "WHERE table_name = 'jobs'"
+                    )
+                )
+            }
+            nullable, default = columns["artist"]
+            assert nullable == "NO"
+            assert default == "''::text"
+
+            await conn.execute(
+                text(
+                    "INSERT INTO jobs (id, source_type, source_ref, status, "
+                    "attempt, idempotency_key, profile_version, created_at, "
+                    "updated_at) VALUES (:id, 'url', 'x', 'pending', 0, "
+                    "'artist-default-probe', 1, now(), now())"
+                ),
+                {"id": uuid.uuid4()},
+            )
+            probed = await conn.execute(
+                text("SELECT artist FROM jobs WHERE idempotency_key = 'artist-default-probe'")
+            )
+            assert probed.scalar_one() == ""
 
             # idempotency_key uniqueness is enforced at the DB, not just app code
             with pytest.raises(Exception, match="uq_jobs_idempotency_key"):

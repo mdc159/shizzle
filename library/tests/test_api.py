@@ -9,6 +9,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from shizzle_server.db.models import JobStage
+from shizzle_server.db.repository import track_id_for_job
 from shizzle_server.main import create_app
 
 
@@ -57,16 +58,103 @@ async def test_upload_rejects_non_video(client):
     assert resp.status_code == 400
 
 
+async def test_upload_parses_artist_and_cleans_title_from_filename(client):
+    c, app = client
+    resp = await c.post(
+        "/api/upload",
+        files={
+            "file": (
+                "Van Halen - Runnin' With The Devil (Official Music Video).mp4",
+                b"fake mp4 bytes",
+                "video/mp4",
+            )
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Runnin' With The Devil"
+    assert body["artist"] == "Van Halen"
+
+    status = (await c.get(f"/api/jobs/{body['jobId']}")).json()
+    assert status["title"] == "Runnin' With The Devil"
+    assert status["artist"] == "Van Halen"
+
+
+async def test_upload_explicit_title_and_artist_win(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("raw name.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"title": "Black Hole Sun (Guitar Center Sessions)", "artist": "Peter Frampton"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Black Hole Sun (Guitar Center Sessions)"
+    assert body["artist"] == "Peter Frampton"
+
+
+async def test_upload_title_without_artist_is_parsed(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("raw name.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"title": "Tool - The Pot (Official Video)"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "The Pot"
+    assert body["artist"] == "Tool"
+
+
+async def test_upload_typed_artist_overrides_filename(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("sg - spoonman.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"artist": "Soundgarden"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "spoonman"
+    assert body["artist"] == "Soundgarden"
+
+
 async def test_submit_url_creates_job(client):
     c, _ = client
     resp = await c.post("/api/submit-url", json={"url": "https://youtube.com/watch?v=x"})
     assert resp.status_code == 200
-    job_id = resp.json()["jobId"]
+    body = resp.json()
+    assert body["title"] is None
+    assert body["artist"] == ""
+    job_id = body["jobId"]
     status = (await c.get(f"/api/jobs/{job_id}")).json()
     assert status["sourceType"] == "url"
 
     bad = await c.post("/api/submit-url", json={"url": "not a url"})
     assert bad.status_code == 400
+
+
+async def test_submit_url_parses_title_and_accepts_artist(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/submit-url",
+        json={
+            "url": "https://youtube.com/watch?v=x",
+            "title": "AC DC - Let There Be Rock (Official Video)",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Let There Be Rock"
+    assert body["artist"] == "AC DC"
+
+    resp = await c.post(
+        "/api/submit-url",
+        json={"url": "https://youtube.com/watch?v=y", "title": "The Pot", "artist": "TOOL"},
+    )
+    body = resp.json()
+    assert body["title"] == "The Pot"
+    assert body["artist"] == "TOOL"  # typed artist wins; no re-casing
 
 
 async def test_job_history_pagination_newest_first(client):
@@ -129,51 +217,47 @@ async def test_job_events_and_worker_fields(client):
     assert all(event["createdAt"] for event in events)
 
 
-async def test_library_track_serving_and_soft_delete(client, upload_job):
+async def test_library_track_serving_and_soft_delete(client, upload_job, session_factory):
+    from shizzle_server.db.models import Track
+
     c, app = client
-    repo = app.state.job_repo
     settings = app.state.settings
 
-    # Drive the fixture job to published state
-    for a, b in [
-        (JobStage.pending, JobStage.downloading),
-        (JobStage.downloading, JobStage.splitting),
-        (JobStage.splitting, JobStage.verifying),
-        (JobStage.verifying, JobStage.publishing),
-    ]:
-        await repo.advance(upload_job.id, from_stage=a, to_stage=b)
-    track = await repo.publish_track(
-        upload_job.id,
-        title="Golden",
-        duration_seconds=30.0,
-        s3_prefix=f"local/{upload_job.id.hex}",
-        manifest_key=f"local/{upload_job.id.hex}/stems.json",
-    )
+    # A local/ placeholder row (the pre-C7 shape). publish_track now refuses
+    # this shape, so insert the row directly to exercise the serving routes.
+    track_id = track_id_for_job(upload_job.id)
+    async with session_factory() as session, session.begin():
+        session.add(
+            Track(
+                id=track_id,
+                title="Golden",
+                duration_seconds=30.0,
+                s3_prefix=f"local/{upload_job.id.hex}",
+                manifest_key=f"local/{upload_job.id.hex}/stems.json",
+            )
+        )
     job_dir = settings.data_dir / upload_job.id.hex
     (job_dir / "stems.json").write_text(json.dumps({"version": 3, "title": "Golden"}))
 
-    # Library lists the track with a track-served publicUrl
+    # C7 defensive filter: the library never lists a row outside tracks/.
     lib = (await c.get("/api/library")).json()
-    assert lib["total"] == 1
-    entry = lib["tracks"][0]
-    assert entry["title"] == "Golden"
-    assert entry["publicUrl"] == f"/api/tracks/{track.id}"
+    assert lib["total"] == 0
 
-    # Manifest serving through the track route
-    manifest = await c.get(f"/api/tracks/{track.id}/stems.json")
+    # Direct-URL local serving still works for the row that exists.
+    manifest = await c.get(f"/api/tracks/{track_id}/stems.json")
     assert manifest.status_code == 200
     assert manifest.json()["title"] == "Golden"
 
     # Traversal guard carried over
-    evil = await c.get(f"/api/tracks/{track.id}/..%2f..%2fsecrets.txt")
+    evil = await c.get(f"/api/tracks/{track_id}/..%2f..%2fsecrets.txt")
     assert evil.status_code in (403, 404)
 
-    # Soft delete removes it from the library but keeps the row
-    deleted = await c.delete(f"/api/tracks/{track.id}")
+    # Soft delete keeps the row but serving stops
+    deleted = await c.delete(f"/api/tracks/{track_id}")
     assert deleted.status_code == 200
     assert (await c.get("/api/library")).json()["total"] == 0
-    assert (await c.get(f"/api/tracks/{track.id}/stems.json")).status_code == 404
-    assert (await c.delete(f"/api/tracks/{track.id}")).status_code == 404
+    assert (await c.get(f"/api/tracks/{track_id}/stems.json")).status_code == 404
+    assert (await c.delete(f"/api/tracks/{track_id}")).status_code == 404
 
 
 async def test_health_reports_db_and_orchestrator(client):

@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # "test"   — deterministic marker-file pipeline for fault-injection tests
     #            (sleeps, effect counters; see orchestrator/testing.py).
     shizzle_pipeline: str = "local"
+    # Explicit opt-in required for shizzle_pipeline="test" (default OFF).
+    # The test pipeline is a stub: it marks stages done without producing
+    # media. A production container that accidentally ran it published a
+    # phantom, unplayable library row on 2026-08-19 (invariant C7).
+    shizzle_allow_test_pipeline: bool = False
     # Fault-injection knobs, read only by the "test" pipeline.
     shizzle_test_stage_sleep: float = 0.0
     shizzle_test_fail_times: int = 0

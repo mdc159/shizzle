@@ -675,7 +675,7 @@ async def publish_job(
     track = await jobs.publish_track(
         job.id,
         title=manifest.get("title") or job.title or job.id.hex,
-        artist=manifest.get("artist", "") or "",
+        artist=manifest.get("artist") or job.artist or "",
         duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
         s3_prefix=result.s3_prefix,
         manifest_key=result.manifest_key,

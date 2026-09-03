@@ -20,6 +20,7 @@ from ..db.models import Job, JobStage, SourceType, utcnow
 from ..db.repository import (
     InvalidTransition,
     JobRepository,
+    PublishRefusedError,
     pending_runpod_dispatch,
     track_id_for_job,
 )
@@ -432,7 +433,10 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
 
     Cloud path: transform the verified package into a browser generation and
     publish immutably (manifest last) via JobRepository.publish_track. Local
-    path: reuse the on-disk pipeline describe + a local placeholder prefix.
+    path: reuse the on-disk pipeline describe + a local placeholder prefix —
+    which publish_track REFUSES (invariant C7): a local/ row has no object in
+    S3 and can never play, so the job fails non-retryably with PUBLISH_FAILED
+    and a publish_refused event instead of creating a phantom library row.
     """
     if ctx.settings.cloud_pipeline:
         return await cloud.cloud_publishing(ctx)
@@ -442,7 +446,7 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
         await ctx.jobs.publish_track(
             ctx.job.id,
             title=manifest.get("title") or ctx.job.title or ctx.job.id.hex,
-            artist=manifest.get("artist", ""),
+            artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0)),
             s3_prefix=local_prefix,
             manifest_key=f"{local_prefix}/stems.json",
@@ -451,6 +455,9 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
         )
     except StageError:
         raise
+    except PublishRefusedError as e:
+        # Deterministic: re-running cannot change the refused location.
+        raise StageError(ErrorCode.PUBLISH_FAILED, str(e)[:500], retryable=False) from e
     except Exception as e:
         raise StageError(ErrorCode.PUBLISH_FAILED, str(e)[:500]) from e
     ctx.published = True

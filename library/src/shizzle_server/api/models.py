@@ -20,6 +20,7 @@ class JobResponse(BaseModel):
     status: JobStage
     sourceType: str
     title: str | None = None
+    artist: str = ""
     attempt: int
     error: str | None = None
     errorCode: str | None = None
@@ -38,6 +39,7 @@ class JobResponse(BaseModel):
             status=job.status,
             sourceType=job.source_type.value,
             title=job.title,
+            artist=job.artist,
             attempt=job.attempt,
             error=job.error_detail,
             errorCode=job.error_code,
@@ -60,6 +62,7 @@ class JobListResponse(BaseModel):
 class SubmitUrlRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
     title: str | None = None
+    artist: str | None = None
 
 
 class AuthRequest(BaseModel):

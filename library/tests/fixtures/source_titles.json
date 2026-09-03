@@ -1,0 +1,323 @@
+{
+  "rows": [
+    {
+      "id": "75fae991-7ddc-5187-bd06-a828fde89db2",
+      "raw": "Van Halen - Runnin' With The Devil (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Van Halen",
+      "expect_title": "Runnin' With the Devil",
+      "has_separator": true,
+      "parser_artist": "Van Halen",
+      "parser_title": "Runnin' With The Devil",
+      "parser_confident": true
+    },
+    {
+      "id": "05ced267-c681-48c8-a8a7-3bc7c4e5f10e",
+      "raw": "Black Hole Sun (Guitar Center Sessions)",
+      "raw_artist": "Peter Frampton",
+      "expect_artist": "Peter Frampton",
+      "expect_title": "Black Hole Sun (Guitar Center Sessions)",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "Black Hole Sun (Guitar Center Sessions)",
+      "parser_confident": false
+    },
+    {
+      "id": "f995371a-7d9b-5dbb-82d2-0000dc80aacf",
+      "raw": "The Pot",
+      "raw_artist": "TOOL",
+      "expect_artist": "Tool",
+      "expect_title": "The Pot",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "The Pot",
+      "parser_confident": false
+    },
+    {
+      "id": "5cbd16b6-0e25-5508-829b-61285dfda463",
+      "raw": "Pearl Jam - Black - Acústico - Unplugged - HD",
+      "raw_artist": "",
+      "expect_artist": "Pearl Jam",
+      "expect_title": "Black (Unplugged)",
+      "has_separator": true,
+      "parser_artist": "Pearl Jam",
+      "parser_title": "Black - Acústico - Unplugged",
+      "parser_confident": true
+    },
+    {
+      "id": "d24e81ba-28a0-520a-a766-0925f4e1e161",
+      "raw": "Alice In Chains - Man in the Box (Official Video)",
+      "raw_artist": "",
+      "expect_artist": "Alice in Chains",
+      "expect_title": "Man in the Box",
+      "has_separator": true,
+      "parser_artist": "Alice In Chains",
+      "parser_title": "Man in the Box",
+      "parser_confident": true
+    },
+    {
+      "id": "4bd3d013-4dc2-5438-9926-962bd99029c4",
+      "raw": "Van Halen - You Really Got Me (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Van Halen",
+      "expect_title": "You Really Got Me",
+      "has_separator": true,
+      "parser_artist": "Van Halen",
+      "parser_title": "You Really Got Me",
+      "parser_confident": true
+    },
+    {
+      "id": "0244dc21-af79-5797-acfd-2dd94aa09392",
+      "raw": "Temple of the Dog - War Pigs (Black Sabbath cover) – Live in San Francisco",
+      "raw_artist": "",
+      "expect_artist": "Temple of the Dog",
+      "expect_title": "War Pigs (Black Sabbath cover, live in San Francisco)",
+      "has_separator": true,
+      "parser_artist": "Temple of the Dog",
+      "parser_title": "War Pigs (Black Sabbath cover) – Live in San Francisco",
+      "parser_confident": true
+    },
+    {
+      "id": "c4072b04-008e-5f1b-985b-f12903a9cf24",
+      "raw": "AC DC - It's A Long Way To The Top [Official Music Video], Full HD (Remaster, Resync and Upscale)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "It's a Long Way to the Top",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "It's A Long Way To The Top",
+      "parser_confident": true
+    },
+    {
+      "id": "297389b3-bac0-5ae6-a144-bf7a8c4b6718",
+      "raw": "Stone Temple Pilots - Plush (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Stone Temple Pilots",
+      "expect_title": "Plush",
+      "has_separator": true,
+      "parser_artist": "Stone Temple Pilots",
+      "parser_title": "Plush",
+      "parser_confident": true
+    },
+    {
+      "id": "22f0177d-d464-50bb-8c24-1eb92b101276",
+      "raw": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+      "raw_artist": "",
+      "expect_artist": "Metallica",
+      "expect_title": "Orion (live, Philadelphia 2025)",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "Metallica Orion (Philadelphia, PA - May 23, 2025)",
+      "parser_confident": false
+    },
+    {
+      "id": "fc51be9b-c773-52b5-9b5c-4ebaa419b196",
+      "raw": "Mr. Brownstone",
+      "raw_artist": "",
+      "expect_artist": "Guns N' Roses",
+      "expect_title": "Mr. Brownstone",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "Mr. Brownstone",
+      "parser_confident": false
+    },
+    {
+      "id": "ffee538e-8627-58f0-a02b-25cc60f7a29e",
+      "raw": "Mother Love Bone - Star Dog Champion ( official video)",
+      "raw_artist": "",
+      "expect_artist": "Mother Love Bone",
+      "expect_title": "Stardog Champion (official video)",
+      "has_separator": true,
+      "parser_artist": "Mother Love Bone",
+      "parser_title": "Star Dog Champion",
+      "parser_confident": true
+    },
+    {
+      "id": "20d172a7-7d83-5b64-90c9-b6dacc91764b",
+      "raw": "Temple Of The Dog - Hunger Strike",
+      "raw_artist": "",
+      "expect_artist": "Temple of the Dog",
+      "expect_title": "Hunger Strike",
+      "has_separator": true,
+      "parser_artist": "Temple Of The Dog",
+      "parser_title": "Hunger Strike",
+      "parser_confident": true
+    },
+    {
+      "id": "0329507a-b933-5eb5-8088-b1cd6f8feb98",
+      "raw": "Van Halen - Hot For Teacher (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Van Halen",
+      "expect_title": "Hot for Teacher",
+      "has_separator": true,
+      "parser_artist": "Van Halen",
+      "parser_title": "Hot For Teacher",
+      "parser_confident": true
+    },
+    {
+      "id": "06ce033c-2345-548b-866f-a0266348fe15",
+      "raw": "Soundgarden - Spoonman",
+      "raw_artist": "",
+      "expect_artist": "Soundgarden",
+      "expect_title": "Spoonman",
+      "has_separator": true,
+      "parser_artist": "Soundgarden",
+      "parser_title": "Spoonman",
+      "parser_confident": true
+    },
+    {
+      "id": "4ed567d1-31ba-5ab7-994a-247fadff921b",
+      "raw": "AC DC - Let's Get It Up (Official Video)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "Let's Get It Up",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "Let's Get It Up",
+      "parser_confident": true
+    },
+    {
+      "id": "b7a980db-c30a-5a6f-8554-191f3a13a444",
+      "raw": "Sweet Child O' Mine",
+      "raw_artist": "",
+      "expect_artist": "Guns N' Roses",
+      "expect_title": "Sweet Child o' Mine",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "Sweet Child O' Mine",
+      "parser_confident": false
+    },
+    {
+      "id": "7c8d8cf7-778e-5fe4-8299-3ab380fe4e2d",
+      "raw": "My Michelle",
+      "raw_artist": "",
+      "expect_artist": "Guns N' Roses",
+      "expect_title": "My Michelle",
+      "has_separator": false,
+      "parser_artist": "",
+      "parser_title": "My Michelle",
+      "parser_confident": false
+    },
+    {
+      "id": "234a7b1c-6313-53ca-8d02-b319083e25d5",
+      "raw": "Mother Love Bone - Stardog Champion",
+      "raw_artist": "",
+      "expect_artist": "Mother Love Bone",
+      "expect_title": "Stardog Champion",
+      "has_separator": true,
+      "parser_artist": "Mother Love Bone",
+      "parser_title": "Stardog Champion",
+      "parser_confident": true
+    },
+    {
+      "id": "9c835433-050d-5342-a02b-e2791927db92",
+      "raw": "AC DC - Shoot To Thrill (Iron Man 2 Version)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "Shoot to Thrill (Iron Man 2 version)",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "Shoot To Thrill (Iron Man 2 Version)",
+      "parser_confident": true
+    },
+    {
+      "id": "427a17cb-50da-5e2b-9312-99c2ed4a28d0",
+      "raw": "Skid Row - Monkey Business (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Skid Row",
+      "expect_title": "Monkey Business",
+      "has_separator": true,
+      "parser_artist": "Skid Row",
+      "parser_title": "Monkey Business",
+      "parser_confident": true
+    },
+    {
+      "id": "f5b84806-25e7-5bbd-bb13-fa894a88753a",
+      "raw": "AC DC - Ride On (Stade De France, Paris, June 2001)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "Ride On (live, Stade de France 2001)",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "Ride On (Stade De France, Paris, June 2001)",
+      "parser_confident": true
+    },
+    {
+      "id": "99ec0110-1990-5d3c-8d69-e8ae76cad03d",
+      "raw": "Soundgarden - Outshined",
+      "raw_artist": "",
+      "expect_artist": "Soundgarden",
+      "expect_title": "Outshined",
+      "has_separator": true,
+      "parser_artist": "Soundgarden",
+      "parser_title": "Outshined",
+      "parser_confident": true
+    },
+    {
+      "id": "1edee1b7-0dff-5e20-922b-deb6c3ef4ce7",
+      "raw": "AC DC - You Shook Me All Night Long (Official 4K Video)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "You Shook Me All Night Long",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "You Shook Me All Night Long",
+      "parser_confident": true
+    },
+    {
+      "id": "a54803e6-f334-5991-9112-f17ca7365a0f",
+      "raw": "AC DC - Let There Be Rock (Official Video)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "Let There Be Rock",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "Let There Be Rock",
+      "parser_confident": true
+    },
+    {
+      "id": "c1c4ec31-058d-5729-86a5-fb3d8f3e65ae",
+      "raw": "AC DC with Steven Tyler -  You Shook Me All Night Long    2003 Induction",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "You Shook Me All Night Long (with Steven Tyler, 2003 Hall of Fame induction)",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "You Shook Me All Night Long 2003 Induction (with Steven Tyler)",
+      "parser_confident": true
+    },
+    {
+      "id": "e9bc18b1-eef6-5793-84c3-f26b6c4f45b1",
+      "raw": "AC DC - Walk All Over You (Official Video)",
+      "raw_artist": "",
+      "expect_artist": "AC/DC",
+      "expect_title": "Walk All Over You",
+      "has_separator": true,
+      "parser_artist": "AC DC",
+      "parser_title": "Walk All Over You",
+      "parser_confident": true
+    },
+    {
+      "id": "1f3b9397-ca05-526e-9901-2b73ab686062",
+      "raw": "BLACK SABBATH -  Into The Void  (Live Video)",
+      "raw_artist": "",
+      "expect_artist": "Black Sabbath",
+      "expect_title": "Into the Void (live)",
+      "has_separator": true,
+      "parser_artist": "BLACK SABBATH",
+      "parser_title": "Into The Void (Live Video)",
+      "parser_confident": true
+    },
+    {
+      "id": "52eb3b91-9906-5b8b-9100-1f9f4bdc0522",
+      "raw": "Van Halen - (Oh) Pretty Woman (Official Music Video)",
+      "raw_artist": "",
+      "expect_artist": "Van Halen",
+      "expect_title": "(Oh) Pretty Woman",
+      "has_separator": true,
+      "parser_artist": "Van Halen",
+      "parser_title": "(Oh) Pretty Woman",
+      "parser_confident": true
+    }
+  ]
+}

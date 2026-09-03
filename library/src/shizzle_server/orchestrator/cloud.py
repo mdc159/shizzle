@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..api.media import s3_client
 from ..db.models import JobStage
-from ..db.repository import track_id_for_job
+from ..db.repository import PublishRefusedError, track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..publish.lossless_intake import (
     IntakeError,
@@ -308,7 +308,9 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
         candidate = ctx.job_dir / "candidate"
         title = ctx.job.title or ctx.job.id.hex
-        manifest = await asyncio.to_thread(transform, pkg, source, candidate, title, "")
+        manifest = await asyncio.to_thread(
+            transform, pkg, source, candidate, title, ctx.job.artist or ""
+        )
         staged = await asyncio.to_thread(
             stage, s3, bucket, track_id, GENERATION, candidate, manifest
         )
@@ -319,7 +321,7 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         await ctx.jobs.publish_track(
             ctx.job.id,
             title=manifest.get("title") or title,
-            artist=manifest.get("artist", "") or "",
+            artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
             s3_prefix=result.s3_prefix,
             manifest_key=result.manifest_key,
@@ -329,6 +331,11 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
     except StageError:
         raise
     except IntakeError as exc:
+        raise StageError(
+            ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
+        ) from exc
+    except PublishRefusedError as exc:
+        # Invariant C7: a refused location cannot become valid on retry.
         raise StageError(
             ErrorCode.PUBLISH_FAILED, str(exc)[:500], retryable=False
         ) from exc

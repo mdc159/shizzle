@@ -75,10 +75,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
       DATA_DIR: /app/data
-      # No Demucs in this image; no new ingest at launch. The heartbeat (which
-      # /api/health reads) runs regardless of pipeline. `test` avoids the
-      # missing-Demucs warning path.
-      SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-test}
+      # Production runs the cloud pipeline. The `test` stub is refused unless
+      # SHIZZLE_ALLOW_TEST_PIPELINE=1 (invariant C7): on 2026-08-19 it published
+      # a track row with no media behind it. The heartbeat (which /api/health
+      # reads) runs regardless of pipeline.
+      SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-cloud}
     volumes:
       - appdata:/app/data
     depends_on:

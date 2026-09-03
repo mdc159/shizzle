@@ -50,26 +50,28 @@ async def run_orchestrator_until(settings, predicate_coro):
         await asyncio.wait_for(task, timeout=10)
 
 
-async def test_upload_job_runs_to_ready_and_publishes_track(
+async def test_upload_job_reaches_publishing_then_is_refused(
     settings, job_repo, track_repo, upload_job
 ):
+    """The test pipeline sails through the stages, then the C7 publish guard
+    refuses the local/ placeholder row: no track, job failed non-retryably."""
     job = await run_orchestrator_until(
-        settings, wait_for_status(job_repo, upload_job.id, JobStage.ready)
+        settings, wait_for_status(job_repo, upload_job.id, JobStage.failed)
     )
-    assert job.error_code is None
-    assert job.track_id == track_id_for_job(upload_job.id)
+    assert job.error_code == "PUBLISH_FAILED"
+    assert job.attempt == 0
+    assert job.track_id is None
     # Stage timings recorded for every executed stage
     assert set(job.stage_timings) >= {"pending", "downloading", "splitting", "verifying"}
-    # Track row exists with the local placeholder prefix, generation 1
-    track = await track_repo.get(job.track_id)
-    assert track is not None
-    assert track.generation == 1
-    assert track.s3_prefix == f"local/{upload_job.id.hex}"
-    # Event history is unbroken: created .. stage_completed*4 .. track_published
+    # No phantom track row
+    assert await track_repo.get(track_id_for_job(upload_job.id)) is None
+    assert await track_repo.list_tracks() == []
+    # Event history is unbroken: created .. stage_completed*4 .. publish_refused, failed
     events = [e.event for e in await job_repo.list_events(upload_job.id)]
     assert events[0] == "created"
     assert events.count("stage_completed") == 4
-    assert "track_published" in events
+    assert "publish_refused" in events
+    assert "track_published" not in events
 
 
 async def test_url_job_fails_with_structured_ytdlp_blocked(settings, job_repo):
@@ -83,12 +85,15 @@ async def test_url_job_fails_with_structured_ytdlp_blocked(settings, job_repo):
     assert "failed" in events and "retry_scheduled" not in events
 
 
-async def test_retry_schedule_honored_then_succeeds(settings, job_repo, upload_job):
-    settings.shizzle_test_fail_times = 2  # two injected retryable failures
+async def test_retry_schedule_honored_until_publish_refusal(settings, job_repo, upload_job):
+    settings.shizzle_test_fail_times = 2  # two injected retryable failures in split
     job = await run_orchestrator_until(
-        settings, wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=20)
+        settings, wait_for_status(job_repo, upload_job.id, JobStage.failed, timeout=20)
     )
     assert job.attempt == 2
+    # Splitting recovered after the scheduled retries; publishing was then
+    # refused non-retryably (C7).
+    assert job.error_code == "PUBLISH_FAILED"
     events = await job_repo.list_events(upload_job.id)
     retries = [e for e in events if e.event == "retry_scheduled"]
     assert [e.detail["attempt"] for e in retries] == [1, 2]
@@ -161,8 +166,8 @@ async def test_duplicate_completion_is_noop(job_repo, upload_job):
     kwargs = {
         "title": "T",
         "duration_seconds": 1.0,
-        "s3_prefix": f"local/{upload_job.id.hex}",
-        "manifest_key": f"local/{upload_job.id.hex}/stems.json",
+        "s3_prefix": f"tracks/{track_id_for_job(upload_job.id)}/1",
+        "manifest_key": f"tracks/{track_id_for_job(upload_job.id)}/1/manifest.json",
     }
     first = await job_repo.publish_track(upload_job.id, **kwargs)
     second = await job_repo.publish_track(upload_job.id, **kwargs)  # duplicate completion
@@ -197,8 +202,9 @@ async def test_orchestrator_heartbeat_written(settings, heartbeat_repo, job_repo
 async def test_effect_counter_stage_idempotency(settings, job_repo, upload_job):
     """The test pipeline's marker files mirror real on-disk idempotency:
     a re-run of split after completion must not repeat the effects."""
+    # Publishing is refused (C7), but every stage before it ran exactly once.
     await run_orchestrator_until(
-        settings, wait_for_status(job_repo, upload_job.id, JobStage.ready)
+        settings, wait_for_status(job_repo, upload_job.id, JobStage.failed)
     )
     effects_log = settings.data_dir / upload_job.id.hex / "effects.log"
     effects = effects_log.read_text().splitlines()
@@ -1238,6 +1244,76 @@ async def test_cloud_publish_cleans_job_dir_and_persists_verification(
         "worker_image": "worker:sha",
         "publisher": {"policy": "auto", "object_count": 8},
     }
+
+
+async def test_cloud_publish_plumbs_job_artist_to_manifest_and_track(
+    settings, job_repo, track_repo, monkeypatch
+):
+    """The manifest's artist comes from the job, and the track falls back to
+    the job's artist when the manifest carries none."""
+    from shizzle_server.db.models import SourceType
+
+    job_id = uuid.uuid4()
+    job_dir = settings.data_dir / job_id.hex
+    job_dir.mkdir(parents=True)
+    (job_dir / "source.mp4").write_bytes(b"fake video bytes")
+    job = await job_repo.create_job(
+        job_id=job_id,
+        source_type=SourceType.upload,
+        source_ref="source.mp4",
+        title="Spoonman",
+        artist="Soundgarden",
+    )
+    for before, after in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+        (JobStage.dispatched, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        job = await job_repo.advance(job.id, from_stage=before, to_stage=after)
+
+    class Verification:
+        def to_integrity(self):
+            return {"policy": "auto", "object_count": 8}
+
+    class FakePublisher:
+        def __init__(self, *_args):
+            pass
+
+        async def publish_async(self, *_args):
+            tid = track_id_for_job(job.id)
+            return SimpleNamespace(
+                s3_prefix=f"tracks/{tid}/1",
+                manifest_key=f"tracks/{tid}/1/manifest.json",
+                verification=Verification(),
+            )
+
+    transform_calls = []
+
+    def _transform(_pkg, _source, _candidate, title, artist):
+        transform_calls.append((title, artist))
+        return {"title": "Cloud", "duration": 1.0, "integrity": {}}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(
+        cloud, "load_and_verify_package", lambda _path: SimpleNamespace()
+    )
+    monkeypatch.setattr(cloud, "transform", _transform)
+    monkeypatch.setattr(cloud, "stage", lambda *_args: [])
+    monkeypatch.setattr(cloud, "Publisher", FakePublisher)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="publish-test",
+    )
+
+    assert await cloud.cloud_publishing(ctx) == JobStage.ready
+    assert transform_calls == [("Spoonman", "Soundgarden")]
+    track = await track_repo.get(track_id_for_job(job.id))
+    assert track.artist == "Soundgarden"
 
 
 async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(

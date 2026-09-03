@@ -92,6 +92,31 @@ def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
     return uuid.uuid5(_TRACK_NS, f"track:{job_id}")
 
 
+class PublishRefusedError(ValueError):
+    """A track row was refused because its storage location is not a real
+    published object prefix (invariant C7).
+
+    The 2026-08-19 phantom track proved a stub pipeline could publish a
+    ``local/...`` row with no object in S3; this guard makes that shape
+    impossible at the single point where a job creates its track row.
+    """
+
+
+def track_location_problem(s3_prefix: str, manifest_key: str) -> str | None:
+    """Return why a track location is not a real published object, or None.
+
+    Invariant C7: published tracks live under ``tracks/`` with the manifest
+    written last as ``.../manifest.json`` (C2). Anything else — the Phase 2
+    ``local/`` placeholder, an empty prefix — can never be a playable track.
+    """
+    problems = []
+    if not s3_prefix.startswith("tracks/"):
+        problems.append(f"s3_prefix {s3_prefix!r} is not under tracks/")
+    if not manifest_key.endswith("/manifest.json"):
+        problems.append(f"manifest_key {manifest_key!r} does not end in /manifest.json")
+    return "; ".join(problems) or None
+
+
 def track_id_for_import(source_ref: str) -> uuid.UUID:
     """Deterministic id for a track with no job behind it (library import).
 
@@ -138,6 +163,7 @@ class JobRepository:
         source_type: SourceType,
         source_ref: str,
         title: str | None = None,
+        artist: str = "",
         idempotency_key: str | None = None,
         profile_version: int = 1,
         input_checksum: str | None = None,
@@ -148,6 +174,7 @@ class JobRepository:
             source_type=source_type,
             source_ref=source_ref,
             title=title,
+            artist=artist,
             status=JobStage.pending,
             idempotency_key=idempotency_key or uuid.uuid4().hex,
             profile_version=profile_version,
@@ -589,7 +616,27 @@ class JobRepository:
         Idempotent: the track id is derived deterministically from the job id,
         so a crashed-and-rerun publishing stage (or a duplicate completion
         event) converges on the same row and does not double-publish.
+
+        Invariant C7: a location outside ``tracks/`` or without a
+        ``/manifest.json`` key is refused — a ``publish_refused`` job event
+        is recorded and :class:`PublishRefusedError` raised instead of
+        publishing a phantom row.
         """
+        problem = track_location_problem(s3_prefix, manifest_key)
+        if problem is not None:
+            async with self._sf() as session, session.begin():
+                session.add(
+                    JobEvent(
+                        job_id=job_id,
+                        event="publish_refused",
+                        detail={
+                            "s3_prefix": s3_prefix,
+                            "manifest_key": manifest_key,
+                            "reason": problem,
+                        },
+                    )
+                )
+            raise PublishRefusedError(problem)
         tid = track_id_for_job(job_id)
         try:
             return await self._publish_track_once(
@@ -697,7 +744,14 @@ class TrackRepository:
 
     async def list_tracks(self, *, include_deleted: bool = False) -> list[Track]:
         async with self._sf() as session:
-            stmt = select(Track).order_by(Track.created_at.desc(), Track.id)
+            # Invariant C7, defensive: a row whose objects are not under
+            # tracks/ can never play (the 2026-08-19 phantom was a local/
+            # placeholder), so the library never lists it.
+            stmt = (
+                select(Track)
+                .where(Track.s3_prefix.startswith("tracks/"))
+                .order_by(Track.created_at.desc(), Track.id)
+            )
             if not include_deleted:
                 stmt = stmt.where(Track.deleted_at.is_(None))
             res = await session.execute(stmt)
