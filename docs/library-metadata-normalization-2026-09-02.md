@@ -4,8 +4,9 @@ Operator feedback: the library's display metadata is inconsistent. Some titles
 embed the artist (`Van Halen - Runnin' With The Devil`), some carry platform
 junk (`(Official Music Video)`, `HD`, `4K`, remaster/resync/upscale notes),
 artist casing drifts (`TOOL` vs `Tool`), and a few titles arrived with
-mojibake from a bad source decode. This change rewrites only
-`tracks.artist` and `tracks.title` for every non-deleted track from a reviewed
+mojibake from a bad source decode. This change rewrites
+`tracks.artist` and `tracks.title` for 27 non-deleted tracks and soft-deletes
+2 rows (a duplicate and a phantom; see "Deletions" below) from a reviewed
 mapping. No generation, pointer, manifest, or S3 object changes — publication
 immutability (INVARIANTS C1–C6) is untouched; this is a plain row update, not
 a schema change (F3).
@@ -78,8 +79,7 @@ new title.
 | 7c8d8cf7 | (dry run prints) | (dry run prints) | Guns N' Roses | My Michelle | |
 | b7a980db | (dry run prints) | (dry run prints) | Guns N' Roses | Sweet Child o' Mine | |
 | 22f0177d | (dry run prints) | (dry run prints) | Metallica | Orion (live, Philadelphia 2025) | |
-| 234a7b1c | (dry run prints) | (dry run prints) | Mother Love Bone | Stardog Champion | |
-| ffee538e | (dry run prints) | (dry run prints) | Mother Love Bone | Stardog Champion (official video) | possible duplicate of 234a7b1c; kept distinct, Mike to decide whether to delete one |
+| ffee538e | (dry run prints) | (dry run prints) | Mother Love Bone | Stardog Champion | kept duplicate; 234a7b1c soft-deleted, see Deletions |
 | 5cbd16b6 | (dry run prints) | (dry run prints, mojibake in 'Acústico') | Pearl Jam | Black (Unplugged) | source title has mojibake; matched on id prefix |
 | 05ced267 | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | no change; row pinned by expect |
 | 427a17cb | (dry run prints) | (dry run prints) | Skid Row | Monkey Business | |
@@ -91,8 +91,21 @@ new title.
 | f995371a | TOOL | The Pot | Tool | The Pot | casing fix |
 | 52eb3b91 | (dry run prints) | (dry run prints) | Van Halen | (Oh) Pretty Woman | |
 | 0329507a | (dry run prints) | (dry run prints) | Van Halen | Hot for Teacher | |
-| 75fae991 | (empty) | Van Halen - Runnin' With The Devil (Official Music Video) | Van Halen | Runnin' With the Devil | duration recorded as 1.0 s; metadata fix only, duration left for a separate look |
 | 4bd3d013 | (dry run prints) | (dry run prints) | Van Halen | You Really Got Me | |
+
+## Deletions
+
+Two rows are soft-deleted (`deleted_at` set, same mechanism as the API DELETE
+route; media objects and generation history retained):
+
+- **234a7b1c — Mother Love Bone, Stardog Champion.** Duplicate of ffee538e.
+  Both are legacy imports; this copy is 29.97 fps / 304.5 s while the kept one
+  is the official video at 30 fps / 300.7 s. Decided by Mike 2026-09-02.
+- **75fae991 — (phantom row).** `s3_prefix` is
+  `local/9fe2c9a570f4449abf55bcd96f7159da` with no manifest in S3; created
+  2026-08-19 by job 9fe2c9a5 through a stub `test_pipeline` path that
+  published in under a second. Nothing to play. Mike 2026-09-02. (Its bogus
+  1.0 s duration goes away with the row; no separate duration fix needed.)
 
 ## How to run
 
