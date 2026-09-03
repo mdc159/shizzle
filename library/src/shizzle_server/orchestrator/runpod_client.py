@@ -54,12 +54,15 @@ class NotConfiguredRunPodClient:
     async def dispatch(
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
     ) -> str:
+        del job_id, idempotency_key, payload
         raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
     async def poll(self, runpod_job_id: str) -> dict[str, Any]:
+        del runpod_job_id
         raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
     async def cancel(self, runpod_job_id: str) -> None:
+        del runpod_job_id
         raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
 

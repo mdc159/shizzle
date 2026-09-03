@@ -163,12 +163,12 @@ async def test_publish_track_refusal_is_recorded_once(job_repo, track_repo, uplo
     """Crash-rerun idempotency (B11): the refusal is deterministic, so a
     re-run after a crash appends no duplicate publish_refused event."""
     await _publishing_job(job_repo, upload_job)
-    kwargs = dict(
-        title="Phantom",
-        duration_seconds=1.0,
-        s3_prefix=f"local/{upload_job.id.hex}",
-        manifest_key=f"local/{upload_job.id.hex}/stems.json",
-    )
+    kwargs = {
+        "title": "Phantom",
+        "duration_seconds": 1.0,
+        "s3_prefix": f"local/{upload_job.id.hex}",
+        "manifest_key": f"local/{upload_job.id.hex}/stems.json",
+    }
     with pytest.raises(PublishRefusedError):
         await job_repo.publish_track(upload_job.id, **kwargs)
     with pytest.raises(PublishRefusedError):
