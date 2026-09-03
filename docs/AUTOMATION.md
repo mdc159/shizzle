@@ -48,7 +48,10 @@ lost response.
 
 Runtime secrets (passcode, `POSTGRES_*`, `AWS_*`, CloudFront private key) are
 NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
-under `/opt/shizzle/prod` per invariant E3.
+under `/opt/shizzle/prod` per invariant E3. The production `.env` must also set
+`RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID`: the orchestrator defaults to
+`SHIZZLE_PIPELINE=cloud` and refuses to start without them, so the stack can
+never accept uploads it is unable to dispatch and publish.
 
 ## 3. Deploy procedure
 
