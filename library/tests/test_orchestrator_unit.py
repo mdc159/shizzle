@@ -1240,6 +1240,76 @@ async def test_cloud_publish_cleans_job_dir_and_persists_verification(
     }
 
 
+async def test_cloud_publish_plumbs_job_artist_to_manifest_and_track(
+    settings, job_repo, track_repo, monkeypatch
+):
+    """The manifest's artist comes from the job, and the track falls back to
+    the job's artist when the manifest carries none."""
+    from shizzle_server.db.models import SourceType
+
+    job_id = uuid.uuid4()
+    job_dir = settings.data_dir / job_id.hex
+    job_dir.mkdir(parents=True)
+    (job_dir / "source.mp4").write_bytes(b"fake video bytes")
+    job = await job_repo.create_job(
+        job_id=job_id,
+        source_type=SourceType.upload,
+        source_ref="source.mp4",
+        title="Spoonman",
+        artist="Soundgarden",
+    )
+    for before, after in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+        (JobStage.dispatched, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        job = await job_repo.advance(job.id, from_stage=before, to_stage=after)
+
+    class Verification:
+        def to_integrity(self):
+            return {"policy": "auto", "object_count": 8}
+
+    class FakePublisher:
+        def __init__(self, *_args):
+            pass
+
+        async def publish_async(self, *_args):
+            tid = track_id_for_job(job.id)
+            return SimpleNamespace(
+                s3_prefix=f"tracks/{tid}/1",
+                manifest_key=f"tracks/{tid}/1/manifest.json",
+                verification=Verification(),
+            )
+
+    transform_calls = []
+
+    def _transform(_pkg, _source, _candidate, title, artist):
+        transform_calls.append((title, artist))
+        return {"title": "Cloud", "duration": 1.0, "integrity": {}}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(
+        cloud, "load_and_verify_package", lambda _path: SimpleNamespace()
+    )
+    monkeypatch.setattr(cloud, "transform", _transform)
+    monkeypatch.setattr(cloud, "stage", lambda *_args: [])
+    monkeypatch.setattr(cloud, "Publisher", FakePublisher)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="publish-test",
+    )
+
+    assert await cloud.cloud_publishing(ctx) == JobStage.ready
+    assert transform_calls == [("Spoonman", "Soundgarden")]
+    track = await track_repo.get(track_id_for_job(job.id))
+    assert track.artist == "Soundgarden"
+
+
 async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(
     settings, job_repo, upload_job, monkeypatch
 ):

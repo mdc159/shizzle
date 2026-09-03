@@ -308,7 +308,9 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
         candidate = ctx.job_dir / "candidate"
         title = ctx.job.title or ctx.job.id.hex
-        manifest = await asyncio.to_thread(transform, pkg, source, candidate, title, "")
+        manifest = await asyncio.to_thread(
+            transform, pkg, source, candidate, title, ctx.job.artist or ""
+        )
         staged = await asyncio.to_thread(
             stage, s3, bucket, track_id, GENERATION, candidate, manifest
         )
@@ -319,7 +321,7 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         await ctx.jobs.publish_track(
             ctx.job.id,
             title=manifest.get("title") or title,
-            artist=manifest.get("artist", "") or "",
+            artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
             s3_prefix=result.s3_prefix,
             manifest_key=result.manifest_key,

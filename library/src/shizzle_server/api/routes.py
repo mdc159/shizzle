@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 
@@ -32,6 +32,7 @@ from ..db.repository import (
     PlaybackTelemetryRepository,
     TrackRepository,
 )
+from ..metadata import resolve_track_metadata
 from ..orchestrator.processing import get_duration
 from ..settings import Settings
 from . import cloudfront, media
@@ -203,8 +204,20 @@ async def media_session(request: Request, _auth: None = Protected) -> JSONRespon
 
 
 @router.post("/upload")
-async def upload_file(request: Request, file: UploadFile, _auth: None = Protected) -> dict:
-    """Accept an MP4 upload, persist it, and create a pending job row."""
+async def upload_file(
+    request: Request,
+    file: UploadFile,
+    title: str | None = Form(None),
+    artist: str | None = Form(None),
+    _auth: None = Protected,
+) -> dict:
+    """Accept an MP4 upload, persist it, and create a pending job row.
+
+    Optional multipart fields ``title``/``artist``: when the user typed both
+    they win verbatim; a title alone is parsed for its artist; otherwise the
+    filename stem is parsed. The resolved pair is stored on the job and
+    echoed in the response.
+    """
     settings = _settings(request)
     if not file.filename:
         raise HTTPException(400, "No file provided")
@@ -256,15 +269,17 @@ async def upload_file(request: Request, file: UploadFile, _auth: None = Protecte
     except Exception:
         pass  # If ffprobe fails here, let the pipeline handle it
 
+    metadata = resolve_track_metadata(title, artist, Path(file.filename).stem)
     job = await _jobs(request).create_job(
         job_id=job_id,
         source_type=SourceType.upload,
         source_ref="source.mp4",
-        title=Path(file.filename).stem,
+        title=metadata.title,
+        artist=metadata.artist,
         input_checksum=checksum,
         profile_version=settings.processing_profile_version,
     )
-    return {"jobId": job.id.hex}
+    return {"jobId": job.id.hex, "title": job.title, "artist": job.artist}
 
 
 @router.post("/submit-url")
@@ -275,13 +290,15 @@ async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Pro
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(400, "A valid http(s) URL is required")
 
+    metadata = resolve_track_metadata(body.title, body.artist, body.title)
     job = await _jobs(request).create_job(
         source_type=SourceType.url,
         source_ref=body.url,
-        title=body.title,
+        title=metadata.title or None,
+        artist=metadata.artist,
         profile_version=_settings(request).processing_profile_version,
     )
-    return {"jobId": job.id.hex}
+    return {"jobId": job.id.hex, "title": job.title, "artist": job.artist}
 
 
 # --- jobs --------------------------------------------------------------------

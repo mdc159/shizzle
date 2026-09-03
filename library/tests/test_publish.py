@@ -448,6 +448,52 @@ async def test_publish_job_writes_track_row_and_is_idempotent(s3, job_repo, uplo
     assert result.already_published is False
 
 
+async def test_publish_job_falls_back_to_job_artist(s3, job_repo, settings):
+    """When the manifest carries no artist, the track inherits the job's."""
+    from shizzle_server.db.models import SourceType
+
+    job_id = uuid.uuid4()
+    job_dir = settings.data_dir / job_id.hex
+    job_dir.mkdir(parents=True)
+    (job_dir / "source.mp4").write_bytes(b"fake video bytes")
+    job = await job_repo.create_job(
+        job_id=job_id,
+        source_type=SourceType.upload,
+        source_ref="source.mp4",
+        title="Spoonman",
+        artist="Soundgarden",
+    )
+    job = await _advance_to_publishing(job_repo, job)
+    track_id = track_id_for_job(job.id)
+
+    prefix = staging_prefix(track_id, 1)
+    uploads = []
+    for rel, data in STAGED_FILES.items():
+        s3.put_object(Bucket=BUCKET, Key=f"{prefix}{rel}", Body=data)
+        uploads.append({"file": rel, "sha256": _sha(data), "size_bytes": len(data)})
+
+    manifest = {k: v for k, v in MANIFEST.items() if k != "artist"}
+    track, _ = await publish_job(
+        jobs=job_repo,
+        publisher=Publisher(s3, BUCKET),
+        job=job,
+        worker_result={"uploads": uploads},
+        manifest=manifest,
+    )
+    assert track.artist == "Soundgarden"
+    assert track.title == "Test Track"  # manifest title still wins
+
+    # An empty-string manifest artist falls back the same way.
+    track2, _ = await publish_job(
+        jobs=job_repo,
+        publisher=Publisher(s3, BUCKET),
+        job=await job_repo.get_job(job.id),
+        worker_result={"uploads": uploads},
+        manifest={**MANIFEST, "artist": ""},
+    )
+    assert track2.artist == "Soundgarden"
+
+
 async def test_publish_job_maps_checksum_mismatch_to_stage_error(s3, job_repo, upload_job):
     from shizzle_server.errors import StageError
 

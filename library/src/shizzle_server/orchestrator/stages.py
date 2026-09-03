@@ -442,7 +442,7 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
         await ctx.jobs.publish_track(
             ctx.job.id,
             title=manifest.get("title") or ctx.job.title or ctx.job.id.hex,
-            artist=manifest.get("artist", ""),
+            artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0)),
             s3_prefix=local_prefix,
             manifest_key=f"{local_prefix}/stems.json",

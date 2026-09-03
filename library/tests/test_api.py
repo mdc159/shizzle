@@ -57,16 +57,103 @@ async def test_upload_rejects_non_video(client):
     assert resp.status_code == 400
 
 
+async def test_upload_parses_artist_and_cleans_title_from_filename(client):
+    c, app = client
+    resp = await c.post(
+        "/api/upload",
+        files={
+            "file": (
+                "Van Halen - Runnin' With The Devil (Official Music Video).mp4",
+                b"fake mp4 bytes",
+                "video/mp4",
+            )
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Runnin' With The Devil"
+    assert body["artist"] == "Van Halen"
+
+    status = (await c.get(f"/api/jobs/{body['jobId']}")).json()
+    assert status["title"] == "Runnin' With The Devil"
+    assert status["artist"] == "Van Halen"
+
+
+async def test_upload_explicit_title_and_artist_win(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("raw name.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"title": "Black Hole Sun (Guitar Center Sessions)", "artist": "Peter Frampton"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Black Hole Sun (Guitar Center Sessions)"
+    assert body["artist"] == "Peter Frampton"
+
+
+async def test_upload_title_without_artist_is_parsed(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("raw name.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"title": "Tool - The Pot (Official Video)"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "The Pot"
+    assert body["artist"] == "Tool"
+
+
+async def test_upload_typed_artist_overrides_filename(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/upload",
+        files={"file": ("sg - spoonman.mp4", b"fake mp4 bytes", "video/mp4")},
+        data={"artist": "Soundgarden"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "spoonman"
+    assert body["artist"] == "Soundgarden"
+
+
 async def test_submit_url_creates_job(client):
     c, _ = client
     resp = await c.post("/api/submit-url", json={"url": "https://youtube.com/watch?v=x"})
     assert resp.status_code == 200
-    job_id = resp.json()["jobId"]
+    body = resp.json()
+    assert body["title"] is None
+    assert body["artist"] == ""
+    job_id = body["jobId"]
     status = (await c.get(f"/api/jobs/{job_id}")).json()
     assert status["sourceType"] == "url"
 
     bad = await c.post("/api/submit-url", json={"url": "not a url"})
     assert bad.status_code == 400
+
+
+async def test_submit_url_parses_title_and_accepts_artist(client):
+    c, _ = client
+    resp = await c.post(
+        "/api/submit-url",
+        json={
+            "url": "https://youtube.com/watch?v=x",
+            "title": "AC DC - Let There Be Rock (Official Video)",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Let There Be Rock"
+    assert body["artist"] == "AC DC"
+
+    resp = await c.post(
+        "/api/submit-url",
+        json={"url": "https://youtube.com/watch?v=y", "title": "The Pot", "artist": "TOOL"},
+    )
+    body = resp.json()
+    assert body["title"] == "The Pot"
+    assert body["artist"] == "TOOL"  # typed artist wins; no re-casing
 
 
 async def test_job_history_pagination_newest_first(client):
