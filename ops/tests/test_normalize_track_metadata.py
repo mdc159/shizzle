@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -11,6 +13,7 @@ import unittest
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from shizzle_server.db import create_engine, create_session_factory
 from shizzle_server.db.models import Base, Track
@@ -151,7 +154,136 @@ class NormalizeTrackMetadataTests(unittest.TestCase):
             self.assertEqual(current.artist, track.artist)
             self.assertEqual(current.title, track.title)
         self.assertFalse(self.report_path.exists())
-        self.assertFalse(normalizer.DEFAULT_REPORT.exists())
+        # Note: DEFAULT_REPORT is the committed production run record, so it
+        # legitimately exists in a repo checkout; only the explicit --report
+        # path proves the dry run wrote nothing.
+
+    def test_malformed_mapping_top_level_is_mapping_error(self) -> None:
+        self.seed()
+        self.mapping_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+        self.assertEqual(self.run_cli("--apply", "--report", str(self.report_path)), 2)
+        self.assertFalse(self.report_path.exists())
+
+    def test_non_object_entry_collects_violation(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        mapping["tracks"].append("bogus")
+        mapping["tracks"].append(None)
+        self.write_mapping(mapping)
+        self.assertEqual(self.run_cli("--apply", "--report", str(self.report_path)), 2)
+        self.assertFalse(self.report_path.exists())
+        self.assertEqual(self.read_tracks()[TRACK_TOOL].artist, "TOOL")
+
+    def test_non_object_expect_collects_violation(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        mapping["tracks"][0]["expect"] = []
+        self.write_mapping(mapping)
+        self.assertEqual(self.run_cli("--apply", "--report", str(self.report_path)), 2)
+        self.assertFalse(self.report_path.exists())
+
+    def test_full_id_without_expect_aborts(self) -> None:
+        self.seed()
+        mapping = base_mapping()
+        del mapping["tracks"][0]["expect"]
+        self.write_mapping(mapping)
+        self.assertEqual(self.run_cli("--apply", "--report", str(self.report_path)), 2)
+        self.assertFalse(self.report_path.exists())
+        self.assertEqual(self.read_tracks()[TRACK_FULL].artist, "")
+
+    def test_apply_aborts_and_rolls_back_when_row_changed_since_validation(self) -> None:
+        self.seed()
+        planned = [
+            normalizer.PlannedChange(
+                track_id=TRACK_FULL,
+                old_artist="",
+                old_title="Van Halen - Runnin' With The Devil (Official Music Video)",
+                new_artist="Van Halen",
+                new_title="Runnin' With the Devil",
+                note="",
+            ),
+            normalizer.PlannedChange(
+                track_id=TRACK_MOJIBAKE,
+                old_artist="Pearl Jam",
+                old_title=MOJIBAKE_TITLE,
+                new_artist="Pearl Jam",
+                new_title="Black (Unplugged)",
+                note="",
+            ),
+            # Stale snapshot: the validated values no longer match the row.
+            normalizer.PlannedChange(
+                track_id=TRACK_TOOL,
+                old_artist="Somebody Else",
+                old_title="The Pot",
+                new_artist="Tool",
+                new_title="The Pot",
+                note="",
+            ),
+        ]
+        with self.assertRaises(RuntimeError):
+            asyncio.run(normalizer.apply_changes(self.database_url, planned))
+        after = self.read_tracks()
+        self.assertEqual(after[TRACK_FULL].artist, "")
+        self.assertEqual(after[TRACK_MOJIBAKE].title, MOJIBAKE_TITLE)
+        self.assertEqual(after[TRACK_TOOL].artist, "TOOL")
+
+    def test_apply_aborts_when_library_grew_since_validation(self) -> None:
+        self.seed()
+        planned = [
+            normalizer.PlannedChange(
+                track_id=TRACK_FULL,
+                old_artist="",
+                old_title="Van Halen - Runnin' With The Devil (Official Music Video)",
+                new_artist="Van Halen",
+                new_title="Runnin' With the Devil",
+                note="",
+            )
+        ]
+        with self.assertRaises(RuntimeError):
+            asyncio.run(normalizer.apply_changes(self.database_url, planned))
+        self.assertEqual(self.read_tracks()[TRACK_FULL].artist, "")
+
+    def test_apply_refuses_to_overwrite_default_report(self) -> None:
+        self.seed()
+        self.write_mapping(base_mapping())
+        existing = self.tmp / "existing-run.json"
+        existing.write_text("{}", encoding="utf-8")
+        original = normalizer.DEFAULT_REPORT
+        normalizer.DEFAULT_REPORT = existing
+        try:
+            code = self.run_cli("--apply")
+        finally:
+            normalizer.DEFAULT_REPORT = original
+        self.assertEqual(code, 2)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "{}")
+        self.assertEqual(self.read_tracks()[TRACK_TOOL].artist, "TOOL")
+
+    def test_report_path_that_is_a_directory_aborts_before_applying(self) -> None:
+        self.seed()
+        self.write_mapping(base_mapping())
+        self.report_path.mkdir()
+        code = self.run_cli("--apply", "--report", str(self.report_path))
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read_tracks()[TRACK_TOOL].artist, "TOOL")
+
+    def test_report_write_failure_after_commit_prints_record(self) -> None:
+        self.seed()
+        self.write_mapping(base_mapping())
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(normalizer.os, "replace", side_effect=OSError("boom")),
+            contextlib.redirect_stdout(stdout),
+        ):
+            code = self.run_cli("--apply", "--report", str(self.report_path))
+        self.assertEqual(code, 1)
+        self.assertFalse(self.report_path.exists())
+        # The changes committed; the full record is recoverable from stdout.
+        self.assertEqual(self.read_tracks()[TRACK_TOOL].artist, "Tool")
+        marker = '"schema": "shizzle-track-metadata-fix-v1-run"'
+        self.assertIn(marker, stdout.getvalue())
+        record = json.loads(stdout.getvalue()[stdout.getvalue().index("{"):])
+        self.assertEqual(record["counts"]["tracks_updated"], 3)
+        self.assertIn("mapping_sha256", record)
 
     def test_apply_rewrites_only_artist_and_title(self) -> None:
         self.seed()
