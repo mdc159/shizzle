@@ -11,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Loader2, Check, X, AlertCircle, Upload, Download } from 'lucide-react';
 import { uploadFile, getJobStatus } from '@/lib/api';
+import { parseSourceTitle } from '@/lib/sourceTitle';
 import { toast } from 'sonner';
 import type { JobStatus } from '@/types/karaoke';
 import { cn } from '@/lib/utils';
@@ -36,6 +37,9 @@ export const AddSourceModal: React.FC = () => {
   const isOpen = activeDrawer === 'source';
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [title, setTitle] = useState('');
+  const [artist, setArtist] = useState('');
+  const [artistUncertain, setArtistUncertain] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -115,6 +119,11 @@ export const AddSourceModal: React.FC = () => {
   const handleFileSelect = useCallback((file: File) => {
     setSelectedFile(file);
     setError(null);
+    // Prefill clean metadata from the file name; both stay editable.
+    const parsed = parseSourceTitle(file.name);
+    setTitle(parsed.title);
+    setArtist(parsed.artist);
+    setArtistUncertain(!parsed.confident);
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -129,14 +138,17 @@ export const AddSourceModal: React.FC = () => {
   }, [handleFileSelect]);
 
   const handleSubmit = async () => {
-    if (!selectedFile) return;
+    if (!selectedFile || !title.trim() || !artist.trim()) return;
 
     setLoading(true);
     setError(null);
     setJobStatus(null);
 
     try {
-      const result = await uploadFile(selectedFile);
+      const result = await uploadFile(selectedFile, {
+        title: title.trim(),
+        artist: artist.trim(),
+      });
       setJobId(result.jobId);
       setJobStatus({ jobId: result.jobId, status: 'pending' });
       toast.success('Processing started');
@@ -151,6 +163,9 @@ export const AddSourceModal: React.FC = () => {
   const handleClose = () => {
     stopPolling();
     setSelectedFile(null);
+    setTitle('');
+    setArtist('');
+    setArtistUncertain(false);
     setLoading(false);
     setError(null);
     setJobId(null);
@@ -172,6 +187,8 @@ export const AddSourceModal: React.FC = () => {
   };
 
   const currentStepIndex = getCurrentStepIndex();
+
+  const canSubmit = !!selectedFile && !!title.trim() && !!artist.trim() && !loading;
 
   const downloadUrl = jobId ? `/api/tracks/${jobId}/download` : null;
 
@@ -232,6 +249,42 @@ export const AddSourceModal: React.FC = () => {
               )}
             </div>
 
+            {selectedFile && (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <label htmlFor="source-title" className="text-xs font-medium text-zinc-400">
+                    Title
+                  </label>
+                  <input
+                    id="source-title"
+                    type="text"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Track title"
+                    className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="source-artist" className="text-xs font-medium text-zinc-400">
+                    Artist
+                  </label>
+                  <input
+                    id="source-artist"
+                    type="text"
+                    value={artist}
+                    onChange={(e) => setArtist(e.target.value)}
+                    placeholder="Artist name"
+                    className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+                  />
+                  {artistUncertain && (
+                    <p className="text-xs text-zinc-500">
+                      Couldn't tell the artist from the file name
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {error && (
               <div className="flex items-center gap-2 text-red-400 text-sm">
                 <AlertCircle className="h-4 w-4 shrink-0" />
@@ -242,7 +295,7 @@ export const AddSourceModal: React.FC = () => {
             <DialogFooter>
               <Button
                 onClick={handleSubmit}
-                disabled={!selectedFile || loading}
+                disabled={!canSubmit}
                 className="w-full"
               >
                 {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
