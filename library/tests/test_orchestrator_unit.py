@@ -560,7 +560,11 @@ async def test_cloud_dispatched_stable_phase_remains_live(
     """Repeated successful polls in one phase refresh liveness without events."""
     _stub_cloud_intake(monkeypatch)
     settings.runpod_poll_seconds = 0.02
-    settings.runpod_worker_stall_seconds = 1.0
+    # The stall watchdog must never fire here: a 1.0 s threshold is reachable
+    # by a slow CI runner between polls (master flaked on exactly that), and
+    # 30 s exceeds the 15 s wait timeout below, so the watchdog can only fire
+    # in a run that has already failed.
+    settings.runpod_worker_stall_seconds = 30.0
     fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "working"}}])
     orch, task = await _run_cloud_orch(settings, fake)
     try:
