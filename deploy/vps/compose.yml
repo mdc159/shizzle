@@ -3,6 +3,8 @@
 # `local` profile: the GPU reference pipeline on this machine (RTX 4070).
 #   docker compose -f deploy/vps/compose.yml --profile local up -d --build
 #   docker compose -f deploy/vps/compose.yml --profile local down
+# Since E6 made an empty passcode fail closed at startup, this profile sets
+# SHIZZLE_ALLOW_OPEN_GATE=1 explicitly (see local-server below).
 #
 # `stack` profile: the 4-service control plane mirroring the VPS layout
 # (api + orchestrator + postgres + caddy). Phase 2 — see specs Phase 2.4.
@@ -39,6 +41,14 @@ services:
       context: ../../library
       dockerfile: Dockerfile
     container_name: shizzle-local-server
+    environment:
+      # E6: startup is fail-closed on an empty passcode, so this profile
+      # makes its gate choice explicit. The local GPU reference server is a
+      # single-container dev pipeline behind the host Vite dev proxy, so it
+      # deliberately runs open; export SHIZZLE_PASSCODE (or set
+      # SHIZZLE_ALLOW_OPEN_GATE=0) in the shell to exercise the gate instead.
+      SHIZZLE_ALLOW_OPEN_GATE: ${SHIZZLE_ALLOW_OPEN_GATE:-1}
+      SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:-}
     ports:
       - "8001:8001"
     volumes:

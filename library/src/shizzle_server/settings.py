@@ -65,11 +65,13 @@ class Settings(BaseSettings):
     processing_profile_version: int = 1
 
     # --- auth (design spec §7) -----------------------------------------------
-    # One shared passcode friends enter once per device. When empty (the local
-    # and test default) the gate is OFF — every route is open, which keeps the
-    # single-container profile and the unit suite working with no secrets. Set
-    # a real value on the VPS to turn the gate on. Rotating the passcode (its
-    # value is bound into every token's signature) revokes all issued tokens.
+    # One shared passcode friends enter once per device. When empty the gate
+    # is OFF — every route is open — so startup refuses that state unless the
+    # deployment opts in explicitly (shizzle_allow_open_gate; E6). The local
+    # compose profile opts in deliberately, the unit suite opts in via its
+    # fixtures, and the VPS sets a real value to turn the gate on. Rotating
+    # the passcode (its value is bound into every token's signature) revokes
+    # all issued tokens.
     shizzle_passcode: str = ""
     # Explicit opt-in required to run with the passcode gate OPEN (default
     # OFF). An empty shizzle_passcode makes auth_enabled False and silently
@@ -116,7 +118,7 @@ class Settings(BaseSettings):
 
     @property
     def auth_gate_state(self) -> str:
-        """"on" when the passcode gate is active, "open" otherwise (E6 signal)."""
+        """Gate state: 'on' when the passcode gate is active, 'open' otherwise (E6)."""
         return "on" if self.auth_enabled else "open"
 
     def assert_auth_gate_safe(self) -> None:
