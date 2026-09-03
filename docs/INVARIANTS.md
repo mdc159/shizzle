@@ -418,6 +418,22 @@ MUST be under `tracks/`.
 - Violation smell: a wildcard `tracks/*` cookie where a file-scoped URL
   suffices, or signing a key outside `tracks/`.
 
+### E6 — the passcode gate is never silently open
+
+**Invariant:** An empty `SHIZZLE_PASSCODE` turns `auth_enabled` off and opens
+every protected route, so the API MUST refuse to start in that state unless
+`SHIZZLE_ALLOW_OPEN_GATE=1` is set deliberately; the deploy transaction MUST
+fail before touching files when the production `.env` lacks a passcode; and
+startup plus `/api/health` MUST report the gate state affirmatively
+(`auth gate: ON`/`auth gate: OPEN (SHIZZLE_ALLOW_OPEN_GATE=1)`,
+`authGate: "on"|"open"`). Neither logs nor health may carry the passcode or
+its length.
+- Where: `library/src/shizzle_server/settings.py` (`assert_auth_gate_safe`), `library/src/shizzle_server/main.py` (lifespan), `library/src/shizzle_server/api/routes.py` (`/api/health`), `deploy/vps/deploy-release.sh`
+- Guarded by: `library/tests/test_api.py::test_auth_gate_startup_refusal`, `library/tests/test_api.py::test_auth_gate_on_starts_and_reports`, `library/tests/test_api.py::test_auth_gate_open_opt_in_logs_and_reports`, `deploy/vps/tests/test_release_transaction.sh` (empty-passcode / missing-passcode / open-gate-opt-in cases)
+- Violation smell: a default, fallback, or fixture that runs the API with no
+  passcode and no explicit opt-in, or a health/log surface that hides the
+  gate state.
+
 ## F. Migration / DB conventions
 
 ### F1 — single linear migration chain

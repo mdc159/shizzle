@@ -50,6 +50,13 @@ Runtime secrets (passcode, `POSTGRES_*`, `AWS_*`, CloudFront private key) are
 NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
 under `/opt/shizzle/prod` per invariant E3.
 
+Passcode gate preflight (E6): `deploy-release.sh` fails before the transaction
+when `SHIZZLE_PASSCODE` is empty or missing in the production `.env`, unless
+`SHIZZLE_ALLOW_OPEN_GATE=1` is present as a deliberate opt-in. The API itself
+also refuses to start with an empty passcode and no opt-in, and reports the
+gate state at startup and in `/api/health` (`authGate`). An empty passcode is
+therefore a loud, blocking misconfiguration, never a silently open gate.
+
 ## 3. Deploy procedure
 
 **On merge to master:**
