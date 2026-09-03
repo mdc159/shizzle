@@ -16,14 +16,22 @@ Safety properties:
 * **All-or-nothing validation.** Every resolution problem (missing id, expect
   mismatch, ambiguous prefix, uncovered track, duplicate target) is collected
   and printed together; any violation aborts with exit 2 before any write.
-* **One transaction.** ``--apply`` revalidates coverage and every row's
-  before-values under row locks inside a single transaction, applies all
-  updates and soft deletes, then verifies each locked row against its target
-  and re-checks library coverage — any drift rolls back before commit.
-* **Recoverable run record.** The report destination is reserved before any
-  write; the record is written atomically after the commit, and if that
-  write still fails the full record JSON is printed to stdout so it can be
-  saved manually (exit 1).
+* **One transaction.** On PostgreSQL, ``--apply`` first locks the tracks
+  table in SHARE ROW EXCLUSIVE mode — which conflicts with the ROW
+  EXCLUSIVE lock every INSERT/UPDATE/DELETE needs — so no track can be
+  published, edited, or deleted between the coverage checks and COMMIT
+  (run applies in a quiet window: track writes block until the transaction
+  ends). The transaction then revalidates coverage and every row's
+  before-values under row locks, applies all updates and soft deletes,
+  re-reads each locked row against its target, and re-checks library
+  coverage — any drift rolls back before commit.
+* **Recoverable run record.** The mapping sha256 (and repo-path
+  eligibility) is captured from the loaded mapping bytes before any write,
+  so the record always identifies the mapping that was actually applied
+  even if the file is replaced or deleted mid-run. The report destination
+  is reserved before any write; the record is written atomically after the
+  commit, and if that write still fails the full record JSON is printed to
+  stdout so it can be saved manually (exit 1).
 * **Full coverage.** The mapping must name every non-deleted track; soft-deleted
   rows are ignored entirely.
 
@@ -45,6 +53,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -58,7 +67,7 @@ if SERVER_SRC.is_dir():
 
 from shizzle_server.db import create_engine, create_session_factory
 from shizzle_server.db.models import Track, utcnow
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
 MAPPING_SCHEMA = "shizzle-track-metadata-fix-v1"
@@ -109,8 +118,9 @@ def database_host(database_url: str) -> str:
         return "(unknown)"
 
 
-def load_mapping(path: Path) -> dict[str, Any]:
-    decoded: Any = json.loads(path.read_text(encoding="utf-8"))
+def load_mapping(path: Path) -> tuple[dict[str, Any], bytes]:
+    raw = path.read_bytes()
+    decoded: Any = json.loads(raw)
     if not isinstance(decoded, dict):
         raise TypeError(f"{path}: top-level value must be an object")
     mapping: dict[str, Any] = decoded
@@ -120,7 +130,7 @@ def load_mapping(path: Path) -> dict[str, Any]:
         )
     if not isinstance(mapping.get("tracks"), list):
         raise TypeError(f"{path}: 'tracks' must be a list")
-    return mapping
+    return mapping, raw
 
 
 def resolve(
@@ -172,9 +182,13 @@ def resolve(
             except ValueError:
                 full_id = None
             if full_id is not None:
-                if entry.get("expect_id_prefix") is None and expect is None:
+                note_anchored_delete = action == "delete" and bool(entry.get("note"))
+                if expect is None and not note_anchored_delete:
                     # A full id alone is not a baseline check: without expect
-                    # the plan would bless whatever the row currently holds.
+                    # an update would bless whatever the row currently holds,
+                    # and an expect_id_prefix only pins identity, not values.
+                    # Deletes may instead anchor on the human-checkable note
+                    # the delete rule above already requires.
                     violations.append(
                         f"{label}: full-id entries require an 'expect' block"
                     )
@@ -309,6 +323,22 @@ async def fetch_tracks(database_url: str) -> list[Track]:
         await engine.dispose()
 
 
+async def _lock_tracks_table(session: Any, dialect_name: str) -> None:
+    """Block concurrent track writes for the rest of the transaction.
+
+    On PostgreSQL, SHARE ROW EXCLUSIVE conflicts with the ROW EXCLUSIVE lock
+    that every INSERT/UPDATE/DELETE on tracks takes, so no track can be
+    published, edited, or deleted between the coverage checks and COMMIT —
+    and any writer already in flight must commit or roll back before the
+    lock is granted, making the coverage snapshot stable. SQLite (the test
+    backend) has no LOCK TABLE; its single-writer semantics make the race
+    unreachable there.
+    """
+    if dialect_name != "postgresql":
+        return
+    await session.execute(text("LOCK TABLE tracks IN SHARE ROW EXCLUSIVE MODE"))
+
+
 async def apply_changes(
     database_url: str, planned: list[PlannedChange]
 ) -> list[PlannedChange]:
@@ -321,14 +351,16 @@ async def apply_changes(
     session and this transaction, so the transaction revalidates everything
     it relies on before committing:
 
-    * library coverage is re-enumerated at the start of the transaction and
-      again just before commit (catches rows published mid-run under READ
-      COMMITTED; a row committed between the final check and COMMIT itself
-      is outside any non-serializable tool's reach and is caught on rerun);
+    * on PostgreSQL the transaction first locks the tracks table in SHARE
+      ROW EXCLUSIVE mode, so no track can be published, edited, or deleted
+      between the coverage checks and COMMIT (and two applies serialize
+      against each other);
+    * library coverage is re-enumerated right after the lock is taken and
+      again just before commit;
     * every locked row's artist/title must still equal the validated
       before-values, else the transaction aborts and rolls back;
-    * after the writes are flushed, every locked row is re-checked against
-      its target state before commit.
+    * after the writes are flushed, every locked row is re-read from the
+      database and checked against its target state before commit.
 
     Any mismatch raises, the context manager rolls back, and nothing is
     committed.
@@ -339,6 +371,7 @@ async def apply_changes(
     try:
         session_factory = create_session_factory(engine)
         async with session_factory() as session, session.begin():
+            await _lock_tracks_table(session, engine.dialect.name)
             result = await session.execute(
                 select(Track.id).where(Track.deleted_at.is_(None))
             )
@@ -367,10 +400,12 @@ async def apply_changes(
                     track.artist = change.new_artist
                     track.title = change.new_title
             await session.flush()
-            # Re-check every locked row against its target before committing;
+            # Re-read every locked row from the database and check it against
+            # its target before committing; populate_existing forces a fresh
+            # SELECT instead of returning the identity-mapped instance, and
             # the row locks mean no other transaction can have changed them.
             for change in planned:
-                track = await session.get(Track, change.track_id)
+                track = await session.get(Track, change.track_id, populate_existing=True)
                 if track is None:
                     raise RuntimeError(f"track {change.track_id} missing after apply")
                 if change.action == "delete":
@@ -401,8 +436,20 @@ async def apply_changes(
 
 
 def build_report(
-    *, database_url: str, mapping_path: Path, planned: list[PlannedChange]
+    *,
+    database_url: str,
+    mapping_path: Path,
+    mapping_sha256: str,
+    mapping_repo_path: str | None,
+    planned: list[PlannedChange],
 ) -> dict[str, Any]:
+    """Build the run record from the plan and the pre-captured mapping digest.
+
+    Reads no mutable state: the database transaction has already committed
+    by the time this runs, so a failure here must be impossible in practice
+    rather than merely unlikely — a crash would leave the committed run
+    without a record and bypass the stdout recovery path.
+    """
     updates = sorted((c for c in planned if c.action == "update"), key=_sort_key)
     deletions = sorted((c for c in planned if c.action == "delete"), key=_sort_key)
     report: dict[str, Any] = {
@@ -410,7 +457,7 @@ def build_report(
         "applied_at": datetime.now(UTC).isoformat(),
         "database_host": database_host(database_url),
         "mapping": str(mapping_path),
-        "mapping_sha256": hashlib.sha256(mapping_path.read_bytes()).hexdigest(),
+        "mapping_sha256": mapping_sha256,
         "counts": {
             "mapping_entries": len(planned),
             "tracks_updated": sum(1 for c in updates if c.changed),
@@ -435,11 +482,11 @@ def build_report(
             for change in deletions
         ],
     }
-    # When the mapping is byte-identical to the committed repo copy, record its
-    # repository-relative path so the run can be replayed from the audit record
-    # even if the applied path was ephemeral (e.g. /tmp/ops on the VPS).
-    if DEFAULT_MAPPING.is_file() and DEFAULT_MAPPING.read_bytes() == mapping_path.read_bytes():
-        report["mapping_repo_path"] = DEFAULT_MAPPING.relative_to(REPO_ROOT).as_posix()
+    # Repo-path eligibility was decided from the loaded mapping bytes before
+    # the apply, so the run can be replayed from the audit record even if the
+    # applied path was ephemeral (e.g. /tmp/ops on the VPS).
+    if mapping_repo_path is not None:
+        report["mapping_repo_path"] = mapping_repo_path
     return report
 
 
@@ -449,10 +496,18 @@ def main(argv: list[str] | None = None) -> int:
         print("DATABASE_URL or --database-url is required", file=sys.stderr)
         return 2
     try:
-        mapping = load_mapping(args.mapping)
+        mapping, mapping_bytes = load_mapping(args.mapping)
     except (OSError, TypeError, ValueError) as exc:
         print(f"mapping error: {exc}", file=sys.stderr)
         return 2
+    # Capture the mapping digest (and repo-path eligibility) from the loaded
+    # bytes now, before any write: the report built after the commit must
+    # identify the mapping that was actually applied, even if the file is
+    # replaced or deleted while the transaction runs.
+    mapping_sha256 = hashlib.sha256(mapping_bytes).hexdigest()
+    mapping_repo_path: str | None = None
+    if DEFAULT_MAPPING.is_file() and DEFAULT_MAPPING.read_bytes() == mapping_bytes:
+        mapping_repo_path = DEFAULT_MAPPING.relative_to(REPO_ROOT).as_posix()
 
     tracks = asyncio.run(fetch_tracks(args.database_url))
     planned, violations = resolve(mapping, tracks)
@@ -486,19 +541,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"report error: {report_path} is a directory", file=sys.stderr)
         return 2
     # Reserve the destination before touching the database so an ordinary
-    # filesystem error cannot produce an unrecorded mutation.
+    # filesystem error cannot produce an unrecorded mutation. mkstemp
+    # creates the probe with O_EXCL under a unique name, so a pre-existing
+    # probe-named file (or another run's sentinel) is never truncated.
     try:
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        probe = report_path.parent / f".{report_path.name}.probe"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        fd, probe = tempfile.mkstemp(
+            prefix=f".{report_path.name}.", suffix=".probe", dir=report_path.parent
+        )
+        os.close(fd)
+        os.unlink(probe)
     except OSError as exc:
         print(f"report error: cannot write to {report_path.parent}: {exc}", file=sys.stderr)
         return 2
 
     asyncio.run(apply_changes(args.database_url, planned))
     report = build_report(
-        database_url=args.database_url, mapping_path=args.mapping, planned=planned
+        database_url=args.database_url,
+        mapping_path=args.mapping,
+        mapping_sha256=mapping_sha256,
+        mapping_repo_path=mapping_repo_path,
+        planned=planned,
     )
     payload = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
     try:
