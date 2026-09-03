@@ -24,6 +24,7 @@ from shizzle_server.orchestrator.stages import (
     StageContext,
     _age_seconds,
     handle_dispatched,
+    handle_splitting,
 )
 from shizzle_server.settings import Settings
 
@@ -457,10 +458,68 @@ def _stub_cloud_intake(monkeypatch) -> None:
 
 async def _run_cloud_orch(settings, fake: FakeRunPodClient):
     settings.shizzle_pipeline = "cloud"
+    # Cloud mode refuses to start without RunPod credentials; the fake client
+    # replaces the HTTP one below, so placeholder values suffice here.
+    settings.runpod_api_key = "unit-test-key"
+    settings.runpod_endpoint_id = "unit-test-endpoint"
     orch = Orchestrator(settings, worker_id="cloud-unit")
     orch.runpod = fake
     task = asyncio.create_task(orch.run_forever())
     return orch, task
+
+
+def test_cloud_orchestrator_requires_runpod_config(settings):
+    """Cloud mode without RunPod credentials must not start: the stack would
+    otherwise accept uploads it can never dispatch or publish."""
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_api_key = ""
+    settings.runpod_endpoint_id = ""
+    with pytest.raises(RuntimeError, match="RUNPOD_API_KEY"):
+        Orchestrator(settings, worker_id="cloud-misconfigured")
+
+    settings.runpod_api_key = "key"
+    settings.runpod_endpoint_id = "endpoint"
+    Orchestrator(settings, worker_id="cloud-configured")  # starts fine
+
+
+async def test_not_configured_runpod_client_reports_dispatch_failure():
+    """If a cloud handler is still reached unconfigured, the job fails with
+    RUNPOD_DISPATCH_FAILED (non-retryable), not a generic INTERNAL."""
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+
+    client = NotConfiguredRunPodClient()
+    with pytest.raises(StageError) as excinfo:
+        await client.dispatch(job_id=uuid.uuid4(), idempotency_key="k", payload={})
+    assert excinfo.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert excinfo.value.retryable is False
+    assert "RUNPOD_API_KEY" in excinfo.value.detail
+
+
+async def test_cloud_pipeline_fails_inflight_splitting_job(settings, job_repo, upload_job):
+    """A job that entered `splitting` before a mid-flight switch to the cloud
+    profile fails clearly and terminally instead of running the local splitter
+    into cloud verification."""
+    settings.shizzle_pipeline = "cloud"
+    settings.runpod_api_key = "unit-test-key"
+    settings.runpod_endpoint_id = "unit-test-endpoint"
+    for a, b in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.splitting),
+    ]:
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b)
+
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id="profile-switch",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_splitting(ctx)
+    assert excinfo.value.retryable is False
+    assert "profile switched mid-flight" in excinfo.value.detail
 
 
 async def test_cloud_dispatched_e2e_records_progress_and_completes(

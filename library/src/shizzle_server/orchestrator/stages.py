@@ -413,6 +413,18 @@ def _runpod_error(payload: dict[str, Any]) -> str:
 
 async def handle_splitting(ctx: StageContext) -> JobStage:
     """Run the media pipeline (local Demucs path in Phase 2)."""
+    if ctx.settings.cloud_pipeline:
+        # Cloud jobs never enter `splitting` (downloading hands off to
+        # `dispatched`); a job here means the pipeline profile switched
+        # mid-flight. Running the local splitter would feed cloud
+        # verification a package shape it cannot prove, so fail clearly and
+        # terminally instead of burning retries.
+        raise StageError(
+            ErrorCode.INTERNAL,
+            "job reached splitting while the cloud pipeline is selected "
+            "(pipeline profile switched mid-flight); re-upload the source",
+            retryable=False,
+        )
     title = ctx.job.title or ctx.source_path.stem
     sub_timings = await ctx.pipeline.split(ctx.job_dir, ctx.source_path, title)
     if sub_timings:

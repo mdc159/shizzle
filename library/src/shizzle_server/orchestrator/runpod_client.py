@@ -38,18 +38,29 @@ class RunPodClient(Protocol):
 
 
 class NotConfiguredRunPodClient:
-    """Fail loudly if a cloud handler is reached without RunPod settings."""
+    """Fail loudly if a cloud handler is reached without RunPod settings.
+
+    Defense in depth: Orchestrator refuses to start in cloud mode without
+    credentials; if this client is still reached, surface the configuration
+    failure as a non-retryable RUNPOD_DISPATCH_FAILED rather than a generic
+    INTERNAL error.
+    """
+
+    _DETAIL = (
+        "RunPod is not configured: SHIZZLE_PIPELINE=cloud requires "
+        "RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID"
+    )
 
     async def dispatch(
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
     ) -> str:
-        raise NotImplementedError("RunPod is not configured")
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
     async def poll(self, runpod_job_id: str) -> dict[str, Any]:
-        raise NotImplementedError("RunPod is not configured")
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
     async def cancel(self, runpod_job_id: str) -> None:
-        raise NotImplementedError("RunPod is not configured")
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
 
 class HttpRunPodClient:
