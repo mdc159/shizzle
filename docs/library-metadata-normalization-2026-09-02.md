@@ -3,9 +3,11 @@
 Operator feedback: the library's display metadata is inconsistent. Some titles
 embed the artist (`Van Halen - Runnin' With The Devil`), some carry platform
 junk (`(Official Music Video)`, `HD`, `4K`, remaster/resync/upscale notes),
-artist casing drifts (`TOOL` vs `Tool`), and a few titles arrived with
-mojibake from a bad source decode. This change rewrites
-`tracks.artist` and `tracks.title` for 27 non-deleted tracks and soft-deletes
+artist casing drifts (`TOOL` vs `Tool`), and a few titles printed as mojibake
+in the library dump this mapping was prepared from (the stored values carry
+the correct characters — see the run record's before-values). This change rewrites
+`tracks.artist` and `tracks.title` for 26 non-deleted tracks (a 27th is
+pinned unchanged by its `expect` block) and soft-deletes
 2 rows (a duplicate and a phantom; see "Deletions" below) from a reviewed
 mapping. No generation, pointer, manifest, or S3 object changes — publication
 immutability (INVARIANTS C1–C6) is untouched; this is a plain row update, not
@@ -33,7 +35,10 @@ The mapping is
 - Entries carry either a full track `id` with an `expect {artist, title}`
   block (current values must match exactly) or an `expect_id_prefix` (8 hex
   chars, must match exactly one non-deleted track). Prefix matching exists so
-  mojibake titles never have to be retyped into the mapping.
+  long titles never have to be retyped into the mapping. A full `id` alone is
+  never sufficient: an `expect_id_prefix` pins identity, not values, so
+  update entries with a full `id` still require `expect`; only delete
+  entries may anchor on a `note` instead.
 - Entries may carry `"action": "delete"` to soft-delete a duplicate instead
   of renaming it. Delete entries resolve the same way (full `id` or
   `expect_id_prefix`) and must carry an `expect` block or a `note` saying why
@@ -51,17 +56,31 @@ The mapping is
   aborts with exit 2 before any write.
 - Without `--apply` the script is a dry run: it prints the before/after
   tables and changes nothing.
-- With `--apply`, all changes happen in ONE transaction, then every touched
-  row is re-read and asserted against the target, and a JSON run record is
-  written (timestamp, database host without credentials, per-track
-  before/after, counts).
+- With `--apply`, all changes happen in ONE transaction: on PostgreSQL the
+  transaction first locks the tracks table in SHARE ROW EXCLUSIVE mode, so
+  no track can be published, edited, or deleted between the coverage checks
+  and COMMIT (track writes block for the few seconds the apply takes — run
+  it in a quiet window). Library coverage and every row's before-values are
+  then revalidated under row locks, the writes are flushed and each locked
+  row is re-read and verified against its target, and coverage is checked
+  once more before commit — any drift rolls the whole transaction back.
+  Afterwards a JSON run record is written atomically
+  (timestamp, database host without credentials, mapping path + sha256,
+  per-track before/after, counts). The mapping sha256 is captured from the
+  loaded mapping bytes before any write, so the record identifies the
+  mapping actually applied even if the file is replaced mid-run. The report
+  destination is reserved before any database write; if the post-commit
+  report write still fails, the full record JSON is printed to stdout and
+  the command exits 1.
 
 ## Before/after table
 
 Old values are known from the mapping's `expect` blocks where present; for
-prefix-matched rows the dry run prints the exact current values (they contain
-mojibake and are deliberately not retyped here). Sorted by new artist, then
-new title.
+prefix-matched rows the exact stored values are in the run record's
+before-values. Two of those rows printed as mojibake in the library dump the
+mapping was prepared from, but the stored values carry the correct
+characters (`Acústico`, an en dash) — that is why they are not retyped here.
+Sorted by new artist, then new title.
 
 | id | old artist | old title | new artist | new title | note |
 |----|-----------|-----------|------------|-----------|------|
@@ -80,14 +99,14 @@ new title.
 | b7a980db | (dry run prints) | (dry run prints) | Guns N' Roses | Sweet Child o' Mine | |
 | 22f0177d | (dry run prints) | (dry run prints) | Metallica | Orion (live, Philadelphia 2025) | |
 | ffee538e | (dry run prints) | (dry run prints) | Mother Love Bone | Stardog Champion | kept duplicate; 234a7b1c soft-deleted, see Deletions |
-| 5cbd16b6 | (dry run prints) | (dry run prints, mojibake in 'Acústico') | Pearl Jam | Black (Unplugged) | source title has mojibake; matched on id prefix |
+| 5cbd16b6 | (run record) | (run record: stored value has the correct 'Acústico') | Pearl Jam | Black (Unplugged) | printed as mojibake in the library dump; stored value correct; matched on id prefix |
 | 05ced267 | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | Peter Frampton | Black Hole Sun (Guitar Center Sessions) | no change; row pinned by expect |
 | 427a17cb | (dry run prints) | (dry run prints) | Skid Row | Monkey Business | |
 | 99ec0110 | (dry run prints) | (dry run prints) | Soundgarden | Outshined | |
 | 06ce033c | (dry run prints) | (dry run prints) | Soundgarden | Spoonman | |
 | 297389b3 | (dry run prints) | (dry run prints) | Stone Temple Pilots | Plush | |
 | 20d172a7 | (dry run prints) | (dry run prints) | Temple of the Dog | Hunger Strike | |
-| 0244dc21 | (dry run prints) | (dry run prints, mojibake dash) | Temple of the Dog | War Pigs (Black Sabbath cover, live in San Francisco) | source title has mojibake dash; matched on id prefix |
+| 0244dc21 | (run record) | (run record: stored value has the correct '–') | Temple of the Dog | War Pigs (Black Sabbath cover, live in San Francisco) | printed as mojibake in the library dump; stored value correct; matched on id prefix |
 | f995371a | TOOL | The Pot | Tool | The Pot | casing fix |
 | 52eb3b91 | (dry run prints) | (dry run prints) | Van Halen | (Oh) Pretty Woman | |
 | 0329507a | (dry run prints) | (dry run prints) | Van Halen | Hot for Teacher | |
@@ -112,9 +131,11 @@ route; media objects and generation history retained):
 The box receives no source code, so ship the script and mapping to the VPS and
 run them inside the api image (which has `shizzle_server` and SQLAlchemy
 installed and carries `DATABASE_URL` in its compose environment). From a repo
-checkout:
+checkout (the target directory is not created by deployment, so make it
+first):
 
 ```bash
+ssh <vps> mkdir -p /opt/shizzle/prod/ops-normalize
 scp ops/normalize_track_metadata.py \
     ops/data/track-metadata-2026-09-02.json \
     <vps>:/opt/shizzle/prod/ops-normalize/
@@ -142,10 +163,20 @@ docker compose -p shizzle -f compose.prod.yml run --rm --no-deps \
 ```
 
 Exit 2 means a validation violation — nothing was written; read the printed
-list, fix the mapping or investigate the library, and dry run again. A rerun
+list, fix the mapping or investigate the library, and dry run again. Exit 1
+after APPLY means the database transaction committed but the run record could
+not be written; the full record JSON is printed to stdout, so save it
+manually as the report. A rerun
 after a successful apply is safe: `expect` blocks then mismatch by design
 (the row already holds the new values), so do not rerun blindly; treat exit 2
 on a rerun as "already applied" and verify via `/api/library` instead.
+
+**Do not rerun `ops/import_legacy_library.py` against the legacy inventory.**
+Its idempotent path still calls `TrackRepository.upsert_imported` for every
+already-published folder, which rewrites `title`/`artist` from the old
+manifests and clears `deleted_at` — a rerun would undo this normalization and
+resurrect the deleted Stardog duplicate. A persistent exclusion in the
+importer or its source inventory is a tracked follow-up.
 
 ## Run record
 
@@ -153,6 +184,11 @@ Applied to production on 2026-09-03 00:21:06 UTC from the api container
 on the VPS (compose project `shizzle`), after a clean dry run. Counts from the run
 record (`ops/data/track-metadata-2026-09-02.run.json`): mapping entries 29,
 tracks updated 26, unchanged 1, soft-deleted 2.
+The record's `mapping_sha256` is the sha256 of the committed mapping as git
+stores it (LF line endings); a CRLF checkout hashes differently, so verify
+against the blob, not a converted working-tree copy. The applied `/tmp/ops`
+copy differed from the committed mapping only in note wording (corrected in
+the follow-up hardening PR); no `expect`, target, or action fields changed.
 The public library listed 27 tracks with zero empty artists immediately afterwards.
 The dry run first aborted on one mapping entry whose full id had been mistyped; the
 entry was changed to prefix resolution (commit `82022ed`) and the dry run re-run clean

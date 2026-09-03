@@ -16,9 +16,22 @@ Safety properties:
 * **All-or-nothing validation.** Every resolution problem (missing id, expect
   mismatch, ambiguous prefix, uncovered track, duplicate target) is collected
   and printed together; any violation aborts with exit 2 before any write.
-* **One transaction.** ``--apply`` applies every update and soft delete in a
-  single transaction, then re-reads each row and asserts it matches the target
-  (``deleted_at`` set for deletions).
+* **One transaction.** On PostgreSQL, ``--apply`` first locks the tracks
+  table in SHARE ROW EXCLUSIVE mode — which conflicts with the ROW
+  EXCLUSIVE lock every INSERT/UPDATE/DELETE needs — so no track can be
+  published, edited, or deleted between the coverage checks and COMMIT
+  (run applies in a quiet window: track writes block until the transaction
+  ends). The transaction then revalidates coverage and every row's
+  before-values under row locks, applies all updates and soft deletes,
+  re-reads each locked row against its target, and re-checks library
+  coverage — any drift rolls back before commit.
+* **Recoverable run record.** The mapping sha256 (and repo-path
+  eligibility) is captured from the loaded mapping bytes before any write,
+  so the record always identifies the mapping that was actually applied
+  even if the file is replaced or deleted mid-run. The report destination
+  is reserved before any write; the record is written atomically after the
+  commit, and if that write still fails the full record JSON is printed to
+  stdout so it can be saved manually (exit 1).
 * **Full coverage.** The mapping must name every non-deleted track; soft-deleted
   rows are ignored entirely.
 
@@ -35,10 +48,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,7 +67,7 @@ if SERVER_SRC.is_dir():
 
 from shizzle_server.db import create_engine, create_session_factory
 from shizzle_server.db.models import Track, utcnow
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
 MAPPING_SCHEMA = "shizzle-track-metadata-fix-v1"
@@ -103,15 +118,19 @@ def database_host(database_url: str) -> str:
         return "(unknown)"
 
 
-def load_mapping(path: Path) -> dict[str, Any]:
-    mapping: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+def load_mapping(path: Path) -> tuple[dict[str, Any], bytes]:
+    raw = path.read_bytes()
+    decoded: Any = json.loads(raw)
+    if not isinstance(decoded, dict):
+        raise TypeError(f"{path}: top-level value must be an object")
+    mapping: dict[str, Any] = decoded
     if mapping.get("schema") != MAPPING_SCHEMA:
         raise ValueError(
             f"{path}: schema must be {MAPPING_SCHEMA!r}, got {mapping.get('schema')!r}"
         )
     if not isinstance(mapping.get("tracks"), list):
         raise TypeError(f"{path}: 'tracks' must be a list")
-    return mapping
+    return mapping, raw
 
 
 def resolve(
@@ -124,10 +143,23 @@ def resolve(
     claimed: dict[uuid.UUID, int] = {}
 
     for index, entry in enumerate(mapping["tracks"]):
+        if not isinstance(entry, dict):
+            violations.append(f"entry[{index}]: each track entry must be an object")
+            continue
         label = entry.get("id") or entry.get("expect_id_prefix") or f"entry[{index}]"
         action = entry.get("action", "update")
         if action not in {"update", "delete"}:
             violations.append(f"{label}: action must be 'update' or 'delete', got {action!r}")
+            continue
+        expect = entry.get("expect")
+        if expect is not None and (
+            not isinstance(expect, dict)
+            or not isinstance(expect.get("artist"), str)
+            or not isinstance(expect.get("title"), str)
+        ):
+            violations.append(
+                f"{label}: 'expect' must be an object with artist/title strings"
+            )
             continue
         if action == "update":
             for field in ("artist", "title"):
@@ -135,7 +167,7 @@ def resolve(
                     violations.append(f"{label}: missing target {field!r} string")
             if not isinstance(entry.get("artist"), str) or not isinstance(entry.get("title"), str):
                 continue
-        elif entry.get("expect") is None and not entry.get("note"):
+        elif expect is None and not entry.get("note"):
             # A delete must carry a human-checkable anchor: either an exact
             # expect block or a note saying why the track is a duplicate.
             violations.append(f"{label}: delete entries require an 'expect' block or a 'note'")
@@ -150,6 +182,17 @@ def resolve(
             except ValueError:
                 full_id = None
             if full_id is not None:
+                note_anchored_delete = action == "delete" and bool(entry.get("note"))
+                if expect is None and not note_anchored_delete:
+                    # A full id alone is not a baseline check: without expect
+                    # an update would bless whatever the row currently holds,
+                    # and an expect_id_prefix only pins identity, not values.
+                    # Deletes may instead anchor on the human-checkable note
+                    # the delete rule above already requires.
+                    violations.append(
+                        f"{label}: full-id entries require an 'expect' block"
+                    )
+                    continue
                 track = by_id.get(full_id)
                 if track is None:
                     violations.append(f"{label}: no non-deleted track with id {raw_id}")
@@ -179,14 +222,13 @@ def resolve(
         if track is None:
             violations.append(f"{label}: entry needs a full 'id' or an 'expect_id_prefix'")
             continue
-        expect = entry.get("expect")
         if expect is not None and (
-            track.artist != expect.get("artist") or track.title != expect.get("title")
+            track.artist != expect["artist"] or track.title != expect["title"]
         ):
             violations.append(
                 f"{label}: expect mismatch — current "
                 f"{track.artist!r} / {track.title!r} != expected "
-                f"{expect.get('artist')!r} / {expect.get('title')!r}"
+                f"{expect['artist']!r} / {expect['title']!r}"
             )
             continue
         if track.id in claimed:
@@ -281,58 +323,141 @@ async def fetch_tracks(database_url: str) -> list[Track]:
         await engine.dispose()
 
 
+async def _lock_tracks_table(session: Any, dialect_name: str) -> None:
+    """Block concurrent track writes for the rest of the transaction.
+
+    On PostgreSQL, SHARE ROW EXCLUSIVE conflicts with the ROW EXCLUSIVE lock
+    that every INSERT/UPDATE/DELETE on tracks takes, so no track can be
+    published, edited, or deleted between the coverage checks and COMMIT —
+    and any writer already in flight must commit or roll back before the
+    lock is granted, making the coverage snapshot stable. SQLite (the test
+    backend) has no LOCK TABLE; its single-writer semantics make the race
+    unreachable there.
+    """
+    if dialect_name != "postgresql":
+        return
+    await session.execute(text("LOCK TABLE tracks IN SHARE ROW EXCLUSIVE MODE"))
+
+
 async def apply_changes(
     database_url: str, planned: list[PlannedChange]
 ) -> list[PlannedChange]:
-    """Apply updates and soft deletes in one transaction, then re-read and assert.
+    """Apply updates and soft deletes in one transaction, verifying before commit.
 
     Soft delete uses the same mechanism as the API DELETE route
     (TrackRepository.soft_delete): row lock, set deleted_at = utcnow().
+
+    The validation snapshot from ``resolve`` can go stale between the dry-run
+    session and this transaction, so the transaction revalidates everything
+    it relies on before committing:
+
+    * on PostgreSQL the transaction first locks the tracks table in SHARE
+      ROW EXCLUSIVE mode, so no track can be published, edited, or deleted
+      between the coverage checks and COMMIT (and two applies serialize
+      against each other);
+    * library coverage is re-enumerated right after the lock is taken and
+      again just before commit;
+    * every locked row's artist/title must still equal the validated
+      before-values, else the transaction aborts and rolls back;
+    * after the writes are flushed, every locked row is re-read from the
+      database and checked against its target state before commit.
+
+    Any mismatch raises, the context manager rolls back, and nothing is
+    committed.
     """
+    planned_ids = {change.track_id for change in planned}
+    update_ids = {change.track_id for change in planned if change.action == "update"}
     engine = create_engine(database_url)
     try:
         session_factory = create_session_factory(engine)
         async with session_factory() as session, session.begin():
+            await _lock_tracks_table(session, engine.dialect.name)
+            result = await session.execute(
+                select(Track.id).where(Track.deleted_at.is_(None))
+            )
+            live_ids = set(result.scalars().all())
+            if live_ids != planned_ids:
+                missing = sorted(str(i) for i in planned_ids - live_ids)
+                extra = sorted(str(i) for i in live_ids - planned_ids)
+                raise RuntimeError(
+                    "library changed since validation; aborting. "
+                    f"planned ids no longer live: {missing}; "
+                    f"newly live uncovered ids: {extra}"
+                )
             for change in planned:
                 track = await session.get(Track, change.track_id, with_for_update=True)
                 if track is None or track.deleted_at is not None:
                     raise RuntimeError(f"track {change.track_id} vanished mid-apply; aborting")
+                if track.artist != change.old_artist or track.title != change.old_title:
+                    raise RuntimeError(
+                        f"track {change.track_id} changed since validation "
+                        f"({track.artist!r} / {track.title!r} != validated "
+                        f"{change.old_artist!r} / {change.old_title!r}); aborting"
+                    )
                 if change.action == "delete":
                     track.deleted_at = utcnow()
                 else:
                     track.artist = change.new_artist
                     track.title = change.new_title
-        # Re-read every touched row and assert it matches the target.
-        async with session_factory() as session:
+            await session.flush()
+            # Re-read every locked row from the database and check it against
+            # its target before committing; populate_existing forces a fresh
+            # SELECT instead of returning the identity-mapped instance, and
+            # the row locks mean no other transaction can have changed them.
             for change in planned:
-                track = await session.get(Track, change.track_id)
+                track = await session.get(Track, change.track_id, populate_existing=True)
                 if track is None:
                     raise RuntimeError(f"track {change.track_id} missing after apply")
                 if change.action == "delete":
                     if track.deleted_at is None:
                         raise RuntimeError(
-                            f"track {change.track_id} re-read mismatch: deleted_at not set"
+                            f"track {change.track_id} verify mismatch: deleted_at not set"
                         )
                 elif track.artist != change.new_artist or track.title != change.new_title:
                     raise RuntimeError(
-                        f"track {change.track_id} re-read mismatch: "
+                        f"track {change.track_id} verify mismatch: "
                         f"{track.artist!r} / {track.title!r}"
                     )
+            # Final coverage check: any row published and committed during this
+            # transaction is visible now and aborts the commit.
+            result = await session.execute(
+                select(Track.id).where(Track.deleted_at.is_(None))
+            )
+            remaining_ids = set(result.scalars().all())
+            if remaining_ids != update_ids:
+                extra = sorted(str(i) for i in remaining_ids - update_ids)
+                raise RuntimeError(
+                    "library changed during apply; aborting before commit. "
+                    f"uncovered newly live ids: {extra}"
+                )
     finally:
         await engine.dispose()
     return planned
 
 
 def build_report(
-    *, database_url: str, mapping_path: Path, planned: list[PlannedChange]
+    *,
+    database_url: str,
+    mapping_path: Path,
+    mapping_sha256: str,
+    mapping_repo_path: str | None,
+    planned: list[PlannedChange],
 ) -> dict[str, Any]:
+    """Build the run record from the plan and the pre-captured mapping digest.
+
+    Reads no mutable state: the database transaction has already committed
+    by the time this runs, so a failure here must be impossible in practice
+    rather than merely unlikely — a crash would leave the committed run
+    without a record and bypass the stdout recovery path.
+    """
     updates = sorted((c for c in planned if c.action == "update"), key=_sort_key)
     deletions = sorted((c for c in planned if c.action == "delete"), key=_sort_key)
-    return {
+    report: dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "applied_at": datetime.now(UTC).isoformat(),
         "database_host": database_host(database_url),
         "mapping": str(mapping_path),
+        "mapping_sha256": mapping_sha256,
         "counts": {
             "mapping_entries": len(planned),
             "tracks_updated": sum(1 for c in updates if c.changed),
@@ -357,6 +482,12 @@ def build_report(
             for change in deletions
         ],
     }
+    # Repo-path eligibility was decided from the loaded mapping bytes before
+    # the apply, so the run can be replayed from the audit record even if the
+    # applied path was ephemeral (e.g. /tmp/ops on the VPS).
+    if mapping_repo_path is not None:
+        report["mapping_repo_path"] = mapping_repo_path
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -365,10 +496,18 @@ def main(argv: list[str] | None = None) -> int:
         print("DATABASE_URL or --database-url is required", file=sys.stderr)
         return 2
     try:
-        mapping = load_mapping(args.mapping)
+        mapping, mapping_bytes = load_mapping(args.mapping)
     except (OSError, TypeError, ValueError) as exc:
         print(f"mapping error: {exc}", file=sys.stderr)
         return 2
+    # Capture the mapping digest (and repo-path eligibility) from the loaded
+    # bytes now, before any write: the report built after the commit must
+    # identify the mapping that was actually applied, even if the file is
+    # replaced or deleted while the transaction runs.
+    mapping_sha256 = hashlib.sha256(mapping_bytes).hexdigest()
+    mapping_repo_path: str | None = None
+    if DEFAULT_MAPPING.is_file() and DEFAULT_MAPPING.read_bytes() == mapping_bytes:
+        mapping_repo_path = DEFAULT_MAPPING.relative_to(REPO_ROOT).as_posix()
 
     tracks = asyncio.run(fetch_tracks(args.database_url))
     planned, violations = resolve(mapping, tracks)
@@ -390,15 +529,55 @@ def main(argv: list[str] | None = None) -> int:
         print("dry run: no changes made (pass --apply to write)")
         return 0
 
+    report_path = args.report or DEFAULT_REPORT
+    if args.report is None and report_path.exists():
+        print(
+            f"refusing to overwrite {report_path}: that is the committed "
+            "production run record; pass --report with an explicit path",
+            file=sys.stderr,
+        )
+        return 2
+    if report_path.is_dir():
+        print(f"report error: {report_path} is a directory", file=sys.stderr)
+        return 2
+    # Reserve the destination before touching the database so an ordinary
+    # filesystem error cannot produce an unrecorded mutation. mkstemp
+    # creates the probe with O_EXCL under a unique name, so a pre-existing
+    # probe-named file (or another run's sentinel) is never truncated.
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, probe = tempfile.mkstemp(
+            prefix=f".{report_path.name}.", suffix=".probe", dir=report_path.parent
+        )
+        os.close(fd)
+        os.unlink(probe)
+    except OSError as exc:
+        print(f"report error: cannot write to {report_path.parent}: {exc}", file=sys.stderr)
+        return 2
+
     asyncio.run(apply_changes(args.database_url, planned))
     report = build_report(
-        database_url=args.database_url, mapping_path=args.mapping, planned=planned
+        database_url=args.database_url,
+        mapping_path=args.mapping,
+        mapping_sha256=mapping_sha256,
+        mapping_repo_path=mapping_repo_path,
+        planned=planned,
     )
-    report_path = args.report or DEFAULT_REPORT
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    payload = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    try:
+        tmp_path = report_path.parent / f".{report_path.name}.tmp"
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, report_path)
+    except OSError as exc:
+        # The database transaction already committed; do not lose the record.
+        print(
+            f"ERROR: changes were committed but the run record could not be "
+            f"written to {report_path}: {exc}",
+            file=sys.stderr,
+        )
+        print("the run record JSON follows on stdout; save it as the report", file=sys.stderr)
+        print(payload)
+        return 1
     print(f"applied; report -> {report_path}")
     return 0
 
