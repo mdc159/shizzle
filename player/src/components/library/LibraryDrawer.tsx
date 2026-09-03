@@ -1,6 +1,15 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useStore } from '@/stores/useStore';
 import { getLibrary } from '@/lib/api';
+import {
+  filterTracks,
+  isLibrarySort,
+  LIBRARY_SORT_OPTIONS,
+  LIBRARY_SORT_STORAGE_KEY,
+  normalizeForSearch,
+  sortTracks,
+  type LibrarySort,
+} from '@/lib/libraryView';
 import type { Track } from '@/types/karaoke';
 import {
   Sheet,
@@ -10,7 +19,7 @@ import {
   SheetDescription
 } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
-import { Loader2, Music, Play, RefreshCw, AlertCircle, Plus } from 'lucide-react';
+import { Loader2, Music, Play, RefreshCw, AlertCircle, Plus, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 // Format duration as mm:ss
@@ -25,6 +34,26 @@ export const LibraryDrawer: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortBy, setSortByState] = useState<LibrarySort>(() => {
+    try {
+      const stored = localStorage.getItem(LIBRARY_SORT_STORAGE_KEY);
+      if (isLibrarySort(stored)) return stored;
+    } catch {
+      // localStorage unavailable (e.g. blocked storage) — use the default.
+    }
+    return 'newest';
+  });
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const setSortBy = (next: LibrarySort) => {
+    setSortByState(next);
+    try {
+      localStorage.setItem(LIBRARY_SORT_STORAGE_KEY, next);
+    } catch {
+      // Persistence is best-effort; the in-session choice still applies.
+    }
+  };
 
   const isOpen = activeDrawer === 'library';
 
@@ -62,9 +91,28 @@ export const LibraryDrawer: React.FC = () => {
     setActiveDrawer('source');
   };
 
+  const visibleTracks = useMemo(
+    () => sortTracks(filterTracks(tracks, searchQuery), sortBy),
+    [tracks, searchQuery, sortBy]
+  );
+
+  const isFiltering = normalizeForSearch(searchQuery).length > 0;
+
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && setActiveDrawer('none')}>
-      <SheetContent side="left" className="flex flex-col w-[400px] sm:w-[540px] sm:max-w-none border-r-zinc-800 bg-zinc-950 text-zinc-100">
+      <SheetContent
+        side="left"
+        className="flex flex-col w-[400px] sm:w-[540px] sm:max-w-none border-r-zinc-800 bg-zinc-950 text-zinc-100"
+        onEscapeKeyDown={(e) => {
+          if (searchQuery.length > 0) {
+            // Clear the search instead of dismissing the drawer. Radix fires
+            // this on DialogPrimitive.Content before closing; preventDefault
+            // cancels the dismiss. Empty query falls through and closes.
+            e.preventDefault();
+            setSearchQuery('');
+          }
+        }}
+      >
         <SheetHeader>
           <div className="flex items-center justify-between">
             <SheetTitle className="text-zinc-100 text-2xl">Library</SheetTitle>
@@ -89,14 +137,59 @@ export const LibraryDrawer: React.FC = () => {
               </Button>
             </div>
           </div>
-          <SheetDescription className="text-zinc-500">
+          <SheetDescription className="text-zinc-500" aria-live="polite">
             {tracks.length > 0
-              ? `${tracks.length} track${tracks.length === 1 ? '' : 's'} available`
+              ? isFiltering && visibleTracks.length < tracks.length
+                ? `${visibleTracks.length} of ${tracks.length} tracks`
+                : `${tracks.length} track${tracks.length === 1 ? '' : 's'} available`
               : 'Select a track to start singing.'}
           </SheetDescription>
         </SheetHeader>
 
-        <div className="mt-8 flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
+        <div className="mt-4 space-y-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search title or artist"
+              aria-label="Search library"
+              className="w-full rounded-md border border-zinc-800 bg-zinc-900 pl-9 pr-8 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-600 focus:outline-none"
+            />
+            {searchQuery.length > 0 && (
+              <button
+                type="button"
+                aria-label="Clear search"
+                onClick={() => {
+                  setSearchQuery('');
+                  searchInputRef.current?.focus();
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+          <label htmlFor="library-sort" className="sr-only">
+            Sort library
+          </label>
+          <select
+            id="library-sort"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as LibrarySort)}
+            className="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-zinc-600 focus:outline-none"
+          >
+            {LIBRARY_SORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-4 flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
           {loading ? (
             <div className="flex flex-col items-center justify-center p-8 gap-3">
               <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />
@@ -124,21 +217,35 @@ export const LibraryDrawer: React.FC = () => {
                 Add Your First Track
               </Button>
             </div>
+          ) : visibleTracks.length === 0 ? (
+            <div className="flex flex-col items-center justify-center p-8 gap-2 text-center">
+              <p className="text-zinc-400">No matching tracks</p>
+              <p className="text-sm text-zinc-600">Try a different title or artist</p>
+            </div>
           ) : (
             <div className="grid gap-2">
-              {tracks.map(track => (
+              {visibleTracks.map(track => (
                 <div
                   key={track.id}
-                  className="group flex items-center justify-between p-3 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  data-testid="library-track-row"
+                  className="group flex items-center justify-between p-2.5 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500"
                   onClick={() => handleSelect(track)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      if (e.key === ' ') e.preventDefault();
+                      handleSelect(track);
+                    }
+                  }}
                 >
-                  <div className="flex items-center gap-4">
-                    <div className="h-10 w-10 flex items-center justify-center rounded bg-zinc-900 group-hover:bg-zinc-800 text-zinc-600 group-hover:text-zinc-300">
-                      <Music className="h-5 w-5" />
+                  <div className="flex items-center gap-3">
+                    <div className="h-8 w-8 flex items-center justify-center rounded bg-zinc-900 group-hover:bg-zinc-800 text-zinc-600 group-hover:text-zinc-300">
+                      <Music className="h-4 w-4" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h4 className="font-medium text-zinc-200 truncate">{track.title}</h4>
-                      <div className="flex items-center gap-2 text-sm text-zinc-500">
+                      <h4 className="text-sm font-medium text-zinc-200 truncate">{track.title}</h4>
+                      <div className="flex items-center gap-2 text-xs text-zinc-500">
                         <span className="truncate">{track.artist}</span>
                         {track.duration > 0 && (
                           <>
@@ -153,11 +260,15 @@ export const LibraryDrawer: React.FC = () => {
                   <Button
                     size="icon"
                     variant="ghost"
+                    // Not a tab stop: the row itself is focusable and does
+                    // the same thing. Stays mouse-clickable and appears on
+                    // group-focus-within / focus-visible.
+                    tabIndex={-1}
                     onClick={(e) => {
                       e.stopPropagation();
                       handleSelect(track);
                     }}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity"
                   >
                     <Play className="h-4 w-4" />
                   </Button>
