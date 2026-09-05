@@ -3,12 +3,18 @@
 This is a reference for the retained importer, not a production setup step.
 [Current browser manifests](../interfaces/shizzle-browser-v1/spec.md) are the
 supported delivery boundary. The [review](REVIEW.md) records why rerunning
-`ops/import_legacy_library.py` can reset active generations and deletion state.
+`ops/import_legacy_library.py` could reset active generations and deletion
+state before the rerun guard.
 
 The importer reads older `karaoke/pub/<job>/stems.json` records and normalizes
 their browser shape. Some inputs reference missing split stems or WAV media;
 they cannot be admitted as six-stem browser tracks merely because a manifest
-exists.
+exists. Rerunning that importer is now guarded, not blocked outright: an
+existing track row whose generation has advanced past 1 is pre-skipped, and a
+soft-deleted row makes `upsert_imported` raise `ImportConflict` (both land in
+status `skipped-existing-advanced`, issue #33), so a rerun can no longer reset
+generations or resurrect deletions — but a live row still at generation 1
+keeps refreshing its metadata from the legacy manifests.
 
 | Input field/shape | Compatibility handling |
 |---|---|

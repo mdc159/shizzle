@@ -58,7 +58,11 @@ sys.path.insert(0, str(REPO_ROOT / "library" / "src"))
 import boto3  # noqa: E402
 
 from shizzle_server.db import create_engine, create_session_factory  # noqa: E402
-from shizzle_server.db.repository import TrackRepository, track_id_for_import  # noqa: E402
+from shizzle_server.db.repository import (  # noqa: E402
+    ImportConflict,
+    TrackRepository,
+    track_id_for_import,
+)
 from shizzle_server.publish import (  # noqa: E402
     MANIFEST_NAME,
     Publisher,
@@ -440,16 +444,37 @@ async def import_folder(
             return outcome
 
         repo = TrackRepository(session_factory)
-        _, created = await repo.upsert_imported(
-            track_id,
-            title=title,
-            artist=str(manifest["artist"]),
-            duration_seconds=float(manifest["duration"]),
-            s3_prefix=generation_prefix(track_id, GENERATION).rstrip("/"),
-            manifest_key=manifest_key(track_id, GENERATION),
-            generation=GENERATION,
-            integrity={**LEGACY_INTEGRITY, "legacy_folder": folder.name},
-        )
+        # Defense in depth (issue #33): never even attempt the write when the
+        # existing row has advanced past GENERATION — the repository would
+        # refuse it anyway.
+        existing = await repo.get(track_id)
+        if existing is not None and existing.generation != GENERATION:
+            outcome.status = "skipped-existing-advanced"
+            outcome.reason = (
+                f"row at generation {existing.generation}, importer pins {GENERATION}"
+            )
+            outcome.elapsed_s = round(time.monotonic() - started, 2)
+            logger.warning("%s SKIPPED: %s", label, outcome.reason)
+            return outcome
+        try:
+            _, created = await repo.upsert_imported(
+                track_id,
+                title=title,
+                artist=str(manifest["artist"]),
+                duration_seconds=float(manifest["duration"]),
+                s3_prefix=generation_prefix(track_id, GENERATION).rstrip("/"),
+                manifest_key=manifest_key(track_id, GENERATION),
+                generation=GENERATION,
+                integrity={**LEGACY_INTEGRITY, "legacy_folder": folder.name},
+            )
+        except ImportConflict as exc:
+            # e.g. a soft-deleted duplicate: the decision stands, do not
+            # resurrect it and do not fail the whole run (issue #33).
+            outcome.status = "skipped-existing-advanced"
+            outcome.reason = f"ImportConflict: {exc}"
+            outcome.elapsed_s = round(time.monotonic() - started, 2)
+            logger.warning("%s SKIPPED: %s", label, outcome.reason)
+            return outcome
         outcome.row_created = created
         outcome.elapsed_s = round(time.monotonic() - started, 2)
         logger.info(

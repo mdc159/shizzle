@@ -574,8 +574,8 @@ def test_multipart_copy_sets_content_type(s3):
     assert head["ContentLength"] == 4096
 
 
-async def test_upsert_imported_is_idempotent_and_undeletes(track_repo):
-    from shizzle_server.db.repository import track_id_for_import
+async def test_upsert_imported_same_generation_refresh_converges_and_refuses_deleted(track_repo):
+    from shizzle_server.db.repository import ImportConflict, track_id_for_import
 
     tid = track_id_for_import("karaoke/pub/07589117e9ab")
     track, created = await track_repo.upsert_imported(
@@ -588,9 +588,8 @@ async def test_upsert_imported_is_idempotent_and_undeletes(track_repo):
     )
     assert created is True and track.id == tid
 
-    await track_repo.soft_delete(tid)
-    assert await track_repo.list_tracks() == []
-
+    # Same-generation refresh of a LIVE row converges: metadata replaced, no
+    # duplicate row.
     track2, created2 = await track_repo.upsert_imported(
         tid,
         title="Pretty Woman (retitled)",
@@ -603,8 +602,87 @@ async def test_upsert_imported_is_idempotent_and_undeletes(track_repo):
     assert track2.id == tid
     assert track2.title == "Pretty Woman (retitled)"
     assert track2.artist == "Van Halen"
-    live = await track_repo.list_tracks()
-    assert [t.id for t in live] == [tid], "re-import must converge, not duplicate"
+    assert [t.id for t in await track_repo.list_tracks()] == [tid]
+
+    # A soft-deleted row is refused and stays deleted (issue #33: no
+    # importer rerun may resurrect an explicit deletion).
+    await track_repo.soft_delete(tid)
+    assert await track_repo.list_tracks() == []
+    with pytest.raises(ImportConflict) as exc:
+        await track_repo.upsert_imported(
+            tid,
+            title="Pretty Woman (undead)",
+            duration_seconds=273.707,
+            s3_prefix=f"tracks/{tid}/1",
+            manifest_key=f"tracks/{tid}/1/manifest.json",
+        )
+    assert exc.value.deleted is True
+    after = await track_repo.get(tid)
+    assert after is not None
+    assert after.deleted_at is not None, "refused upsert must not undelete"
+    assert after.title == "Pretty Woman (retitled)", "refused upsert must not rewrite metadata"
+
+
+async def test_upsert_imported_refuses_generation_reset_on_advanced_deleted_track(track_repo):
+    """Regression for issue #33: an importer rerun (generation pinned to 1)
+    against a track migrated to generation 3 with curated metadata and a soft
+    deletion must raise and leave the row untouched, with no ledger event."""
+    from shizzle_server.db.repository import ImportConflict, track_id_for_import
+
+    tid = track_id_for_import("karaoke/pub/generation-reset-probe")
+    await track_repo.upsert_imported(
+        tid,
+        title="Old imported title",
+        duration_seconds=200.0,
+        s3_prefix=f"tracks/{tid}/1",
+        manifest_key=f"tracks/{tid}/1/manifest.json",
+        generation=1,
+        integrity={"source": "legacy-import", "gates": "not-run"},
+    )
+    await track_repo.activate_generation(
+        tid,
+        expected_generation=1,
+        generation=3,
+        s3_prefix=f"tracks/{tid}/3",
+        manifest_key=f"tracks/{tid}/3/manifest.json",
+        integrity={"source": "audited-migration", "passed": True},
+    )
+    curated = await track_repo.get(tid)
+    assert curated is not None and curated.generation == 3
+    # Curate through the same refresh path the guard permits (live row,
+    # matching generation) so the fixture uses only public repository API.
+    curated_row, _ = await track_repo.upsert_imported(
+        tid,
+        title="Curated Title",
+        duration_seconds=200.0,
+        s3_prefix=f"tracks/{tid}/3",
+        manifest_key=f"tracks/{tid}/3/manifest.json",
+        generation=3,
+        integrity={"source": "audited-migration", "passed": True},
+    )
+    assert curated_row.title == "Curated Title"
+    await track_repo.soft_delete(tid)
+    ledger_before = await track_repo.list_generation_events(tid)
+
+    with pytest.raises(ImportConflict) as exc:
+        await track_repo.upsert_imported(
+            tid,
+            title="Old imported title",
+            duration_seconds=200.0,
+            s3_prefix=f"tracks/{tid}/1",
+            manifest_key=f"tracks/{tid}/1/manifest.json",
+            generation=1,
+            integrity={"source": "legacy-import", "gates": "not-run"},
+        )
+    assert exc.value.actual_generation == 3
+    assert exc.value.deleted is True
+
+    after = await track_repo.get(tid)
+    assert after is not None
+    assert after.generation == 3, "refused import must not reset the active generation"
+    assert after.deleted_at is not None, "refused import must not undelete"
+    assert after.title == "Curated Title", "refused import must not clobber curated metadata"
+    assert len(await track_repo.list_generation_events(tid)) == len(ledger_before)
 
 
 def test_track_id_for_import_is_deterministic_and_distinct_from_job_ids():
