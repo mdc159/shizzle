@@ -15,7 +15,12 @@ import pytest
 from sqlalchemy import text
 
 from shizzle_server.db.models import JobStage, SourceType, utcnow
-from shizzle_server.db.repository import PublishRefusedError, track_id_for_job
+from shizzle_server.db.repository import (
+    InvalidTransition,
+    PublishRefusedError,
+    track_id_for_job,
+)
+from shizzle_server.errors import ErrorCode
 
 from .conftest import make_upload_job, wait_for
 
@@ -121,6 +126,101 @@ class TestLeaseExpiry:
         assert "lease_reclaimed" in events
         assert await track_repo.list_tracks() == []
 
+    async def test_stale_worker_cannot_write_after_lease_reclaim(self, pg_repos, data_dir):
+        """B2 fence on stage-outcome writes, the Postgres counterpart of the
+        SQLite probe test: after the reclaim, the evicted worker's
+        fail/retry/advance/publish raise InvalidTransition and its progress
+        poll no-ops — the new owner's lease and the job state survive."""
+        job_repo, _, _ = pg_repos
+        job = await make_upload_job(job_repo, data_dir)
+        t0 = utcnow()
+        claimed = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+        assert claimed is not None and claimed.id == job.id
+        reclaimed = await job_repo.claim_next(
+            worker_id="B", lease_seconds=300.0, now=t0 + timedelta(seconds=60)
+        )
+        assert reclaimed is not None and reclaimed.lease_owner == "B"
+
+        with pytest.raises(InvalidTransition):
+            await job_repo.fail_job(
+                job.id,
+                error_code=ErrorCode.INTERNAL,
+                error_detail="stale worker failure",
+                worker_id="A",
+            )
+        with pytest.raises(InvalidTransition):
+            await job_repo.schedule_retry(
+                job.id,
+                worker_id="A",
+                error_code=ErrorCode.DEMUCS_FAILED,
+                error_detail="stale worker retry",
+                retry_in_seconds=30,
+            )
+        with pytest.raises(InvalidTransition):
+            await job_repo.advance(
+                job.id,
+                from_stage=JobStage.pending,
+                to_stage=JobStage.downloading,
+                worker_id="A",
+            )
+        survived = await job_repo.get_job(job.id)
+        assert survived.status is JobStage.pending
+        assert survived.lease_owner == "B"
+        assert survived.attempt == 0
+
+        # Walk B to publishing so the ownership fence — not the stage guard —
+        # is what rejects A's publish.
+        for a, b in [
+            (JobStage.pending, JobStage.downloading),
+            (JobStage.downloading, JobStage.splitting),
+            (JobStage.splitting, JobStage.verifying),
+            (JobStage.verifying, JobStage.publishing),
+        ]:
+            await job_repo.advance(job.id, from_stage=a, to_stage=b, worker_id="B")
+        tid = track_id_for_job(job.id)
+        with pytest.raises(InvalidTransition):
+            await job_repo.publish_track(
+                job.id,
+                worker_id="A",
+                title="Stale Publish",
+                duration_seconds=1.0,
+                s3_prefix=f"tracks/{tid}/1",
+                manifest_key=f"tracks/{tid}/1/manifest.json",
+            )
+        survived = await job_repo.get_job(job.id)
+        assert survived.status is JobStage.publishing
+        assert survived.lease_owner == "B"
+
+        # The C7 refusal path writes an event, so it is fenced the same way:
+        # A's invalid-location publish raises instead of recording
+        # publish_refused.
+        with pytest.raises(InvalidTransition):
+            await job_repo.publish_track(
+                job.id,
+                worker_id="A",
+                title="Stale Phantom",
+                duration_seconds=1.0,
+                s3_prefix=f"local/{job.id.hex}",
+                manifest_key=f"local/{job.id.hex}/stems.json",
+            )
+        assert not any(
+            event.event == "publish_refused"
+            for event in await job_repo.list_events(job.id)
+        )
+        survived = await job_repo.get_job(job.id)
+        assert survived.status is JobStage.publishing
+        assert survived.lease_owner == "B"
+
+        assert (
+            await job_repo.record_worker_progress(
+                job.id, phase="downloading", worker_id="A"
+            )
+            is False
+        )
+        after = await job_repo.get_job(job.id)
+        assert after.worker_phase is None
+        assert after.worker_heartbeat_at is None
+
     async def test_live_lease_not_stolen(self, pg_repos, data_dir):
         """SKIP LOCKED + lease predicate: an unexpired lease blocks claims."""
         job_repo, _, _ = pg_repos
@@ -136,19 +236,22 @@ class TestDuplicateCompletion:
         deterministic id, second write converges (real Postgres unique pk)."""
         job_repo, track_repo, _ = pg_repos
         job = await make_upload_job(job_repo, data_dir)
+        claimed = await job_repo.claim_next(worker_id="dup-publisher", lease_seconds=120)
+        assert claimed is not None and claimed.id == job.id
         for a, b in [
             (JobStage.pending, JobStage.downloading),
             (JobStage.downloading, JobStage.splitting),
             (JobStage.splitting, JobStage.verifying),
             (JobStage.verifying, JobStage.publishing),
         ]:
-            await job_repo.advance(job.id, from_stage=a, to_stage=b)
+            await job_repo.advance(job.id, from_stage=a, to_stage=b, worker_id="dup-publisher")
 
         kwargs = {
             "title": "Dup",
             "duration_seconds": 1.0,
             "s3_prefix": f"tracks/{track_id_for_job(job.id)}/1",
             "manifest_key": f"tracks/{track_id_for_job(job.id)}/1/manifest.json",
+            "worker_id": "dup-publisher",
         }
         results = await asyncio.gather(
             job_repo.publish_track(job.id, **kwargs),
@@ -179,19 +282,22 @@ class TestConcurrentRefusal:
         publish_refused event lands (real Postgres row lock)."""
         job_repo, track_repo, _ = pg_repos
         job = await make_upload_job(job_repo, data_dir)
+        claimed = await job_repo.claim_next(worker_id="refuser", lease_seconds=120)
+        assert claimed is not None and claimed.id == job.id
         for a, b in [
             (JobStage.pending, JobStage.downloading),
             (JobStage.downloading, JobStage.splitting),
             (JobStage.splitting, JobStage.verifying),
             (JobStage.verifying, JobStage.publishing),
         ]:
-            await job_repo.advance(job.id, from_stage=a, to_stage=b)
+            await job_repo.advance(job.id, from_stage=a, to_stage=b, worker_id="refuser")
 
         kwargs = {
             "title": "Phantom",
             "duration_seconds": 1.0,
             "s3_prefix": f"local/{job.id.hex}",
             "manifest_key": f"local/{job.id.hex}/stems.json",
+            "worker_id": "refuser",
         }
         results = await asyncio.gather(
             job_repo.publish_track(job.id, **kwargs),
@@ -377,15 +483,15 @@ class TestDispatchedPark:
     ):
         job_repo, _, _ = pg_repos
         job = await make_upload_job(job_repo, data_dir)
+        claimed = await job_repo.claim_next(worker_id="A", lease_seconds=120)
+        assert claimed is not None and claimed.id == job.id
         for a, b in [
             (JobStage.pending, JobStage.downloading),
             (JobStage.downloading, JobStage.dispatched),
         ]:
-            await job_repo.advance(job.id, from_stage=a, to_stage=b)
+            await job_repo.advance(job.id, from_stage=a, to_stage=b, worker_id="A")
 
-        # Worker A claims the dispatched job; worker B is locked out (live lease).
-        claimed = await job_repo.claim_next(worker_id="A", lease_seconds=120)
-        assert claimed is not None and claimed.id == job.id
+        # Worker A's live lease locks worker B out.
         assert await job_repo.claim_next(worker_id="B", lease_seconds=120) is None
 
         # A parks: lease freed, recheck scheduled, attempt untouched.

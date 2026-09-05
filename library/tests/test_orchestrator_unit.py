@@ -156,20 +156,71 @@ async def test_renew_and_release_lease_ownership(job_repo, upload_job):
     assert job.lease_owner is None and job.lease_expires_at is None
 
 
+async def test_stage_error_yields_when_lease_was_lost(settings, job_repo, upload_job):
+    """Issue #19: after a reclaim, the evicted worker's error handling must
+    not fail or retry the job — _handle_stage_error treats InvalidTransition
+    as "lease lost" and stops applying effects (B2)."""
+    orch = Orchestrator(settings, worker_id="stale-loop")
+    try:
+        claimed = await job_repo.claim_next(worker_id="stale-loop", lease_seconds=60)
+        assert claimed is not None and claimed.id == upload_job.id
+        await job_repo.advance(
+            upload_job.id,
+            from_stage=JobStage.pending,
+            to_stage=JobStage.downloading,
+            worker_id="stale-loop",
+        )
+        await job_repo.advance(
+            upload_job.id,
+            from_stage=JobStage.downloading,
+            to_stage=JobStage.splitting,
+            worker_id="stale-loop",
+        )
+        # A peer reclaims the expired lease out from under the loop.
+        async with job_repo._sf() as session, session.begin():
+            row = await session.get(Job, upload_job.id)
+            row.lease_expires_at = utcnow() - timedelta(seconds=1)
+        reclaimed = await job_repo.claim_next(worker_id="peer", lease_seconds=60)
+        assert reclaimed is not None and reclaimed.lease_owner == "peer"
+
+        job = await job_repo.get_job(upload_job.id)
+        await orch._handle_stage_error(
+            job,
+            JobStage.splitting,
+            StageError(ErrorCode.DEMUCS_FAILED, "boom", retryable=True),
+        )
+        await orch._handle_stage_error(
+            job,
+            JobStage.splitting,
+            StageError(ErrorCode.INTERNAL, "fatal", retryable=False),
+        )
+
+        survived = await job_repo.get_job(upload_job.id)
+        assert survived.status is JobStage.splitting
+        assert survived.lease_owner == "peer"
+        assert survived.attempt == 0
+        assert survived.error_code is None
+    finally:
+        await orch.engine.dispose()
+
+
 async def test_duplicate_completion_is_noop(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="dup-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     for a, b in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.splitting),
         (JobStage.splitting, JobStage.verifying),
         (JobStage.verifying, JobStage.publishing),
     ]:
-        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b)
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b, worker_id="dup-test")
 
     kwargs = {
         "title": "T",
         "duration_seconds": 1.0,
         "s3_prefix": f"tracks/{track_id_for_job(upload_job.id)}/1",
         "manifest_key": f"tracks/{track_id_for_job(upload_job.id)}/1/manifest.json",
+        "worker_id": "dup-test",
     }
     first = await job_repo.publish_track(upload_job.id, **kwargs)
     second = await job_repo.publish_track(upload_job.id, **kwargs)  # duplicate completion
@@ -177,7 +228,10 @@ async def test_duplicate_completion_is_noop(job_repo, upload_job):
 
     events = [e.event for e in await job_repo.list_events(upload_job.id)]
     assert events.count("track_published") == 1
-    assert events.count("duplicate_completion_ignored") == 1
+    # No duplicate_completion_ignored event: a ready job holds no lease, so a
+    # completion arriving after ready can only be a stale writer, and the
+    # duplicate path is a no-write no-op (B2).
+    assert "duplicate_completion_ignored" not in events
 
     job = await job_repo.get_job(upload_job.id)
     assert job.status == JobStage.ready
@@ -187,10 +241,24 @@ async def test_dispatched_stage_is_claimed_by_loop(job_repo):
     """``dispatched`` is owned by the claim-based RunPod reconciler (WS4): the
     lease loop claims it and handle_dispatched parks between polls."""
     job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://x")
-    await job_repo.advance(job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading)
-    await job_repo.advance(job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched)
     claimed = await job_repo.claim_next(worker_id="A", lease_seconds=120)
-    assert claimed is not None and claimed.id == job.id and claimed.status == JobStage.dispatched
+    assert claimed is not None and claimed.id == job.id
+    await job_repo.advance(
+        job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="A",
+    )
+    await job_repo.advance(
+        job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="A",
+    )
+    await job_repo.release_lease(job.id, worker_id="A")
+    reclaimed = await job_repo.claim_next(worker_id="A", lease_seconds=120)
+    assert reclaimed is not None and reclaimed.id == job.id
+    assert reclaimed.status == JobStage.dispatched
 
 
 async def test_orchestrator_heartbeat_written(settings, heartbeat_repo, job_repo):
@@ -445,7 +513,10 @@ def _stub_cloud_intake(monkeypatch) -> None:
     async def _publish(ctx):
         tid = track_id_for_job(ctx.job.id)
         await ctx.jobs.publish_track(
-            ctx.job.id, title=ctx.job.title or ctx.job.id.hex, artist="",
+            ctx.job.id,
+            worker_id=ctx.worker_id,
+            title=ctx.job.title or ctx.job.id.hex,
+            artist="",
             duration_seconds=1.0, s3_prefix=f"tracks/{tid}/1",
             manifest_key=f"tracks/{tid}/1/manifest.json", generation=1, integrity={},
         )
@@ -530,11 +601,19 @@ async def test_parked_cloud_parks_inflight_dispatched_job(
 
     settings.shizzle_pipeline = "cloud"
     settings.runpod_worker_stall_seconds = 300.0
+    claimed = await job_repo.claim_next(worker_id="parked", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="parked",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="parked",
     )
     async with session_factory() as session, session.begin():
         job = await session.get(Job, upload_job.id)
@@ -565,11 +644,13 @@ async def test_cloud_pipeline_fails_inflight_splitting_job(settings, job_repo, u
     settings.shizzle_pipeline = "cloud"
     settings.runpod_api_key = "unit-test-key"
     settings.runpod_endpoint_id = "unit-test-endpoint"
+    claimed = await job_repo.claim_next(worker_id="profile-switch", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     for a, b in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.splitting),
     ]:
-        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b)
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b, worker_id="profile-switch")
 
     ctx = StageContext(
         job=await job_repo.get_job(upload_job.id),
@@ -720,17 +801,26 @@ async def test_cloud_dispatched_park_does_not_increment_attempt(
 
 
 async def test_queue_watchdog_age_survives_two_parks(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="queue-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="queue-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="queue-test",
     )
-    await job_repo.claim_next(worker_id="queue-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="queue-test", runpod_job_id="rp-queue"
     )
-    await job_repo.record_worker_progress(upload_job.id, phase="queued")
+    await job_repo.record_worker_progress(
+        upload_job.id, phase="queued", worker_id="queue-test"
+    )
 
     await job_repo.park(
         upload_job.id, worker_id="queue-test", recheck_in_seconds=0
@@ -740,7 +830,12 @@ async def test_queue_watchdog_age_survives_two_parks(job_repo, upload_job):
     await asyncio.sleep(0.02)
 
     await job_repo.claim_next(worker_id="queue-test", lease_seconds=60)
-    assert await job_repo.record_worker_progress(upload_job.id, phase="queued") is False
+    assert (
+        await job_repo.record_worker_progress(
+            upload_job.id, phase="queued", worker_id="queue-test"
+        )
+        is False
+    )
     await job_repo.park(
         upload_job.id, worker_id="queue-test", recheck_in_seconds=0
     )
@@ -755,13 +850,20 @@ async def test_queue_watchdog_age_survives_two_parks(job_repo, upload_job):
 async def test_transient_poll_failure_parks_without_consuming_attempt(
     settings, job_repo, upload_job
 ):
+    claimed = await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="poll-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="poll-test",
     )
-    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
     )
@@ -790,13 +892,20 @@ async def test_transient_poll_failure_parks_without_consuming_attempt(
 async def test_stale_poll_outage_cancels_and_marks_existing_job_failed(
     settings, job_repo, upload_job
 ):
+    claimed = await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="poll-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="poll-test",
     )
-    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="poll-test", runpod_job_id="rp-stale"
     )
@@ -830,13 +939,20 @@ async def test_stale_worker_cancel_failure_does_not_mask_transient_poll_error(
     outage must not replace the original retryable poll error. The worker is
     still marked failed, and the transient error (not the cancel error)
     propagates so the job retries."""
+    claimed = await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="poll-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="poll-test",
     )
-    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="poll-test", runpod_job_id="rp-stale"
     )
@@ -875,13 +991,20 @@ async def test_transient_poll_failure_dedupes_one_event_per_outage(
 ):
     """wave3 #3: a continuous outage records at most one runpod_poll_failed
     event, regardless of how many poll iterations it spans."""
+    claimed = await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="poll-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="poll-test",
     )
-    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
     )
@@ -918,17 +1041,26 @@ async def test_transient_poll_failure_dedupes_one_event_per_outage(
 async def test_successful_poll_resets_outage_even_when_phase_is_unchanged(
     settings, job_repo, upload_job
 ):
+    claimed = await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="poll-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="poll-test",
     )
-    await job_repo.claim_next(worker_id="poll-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="poll-test", runpod_job_id="rp-poll"
     )
-    await job_repo.record_worker_progress(upload_job.id, phase="working")
+    await job_repo.record_worker_progress(
+        upload_job.id, phase="working", worker_id="poll-test"
+    )
     settings.runpod_worker_stall_seconds = 10_000
     fake = FakeRunPodClient([
         StageError(ErrorCode.RUNPOD_TIMEOUT, "first outage", retryable=True),
@@ -1031,13 +1163,20 @@ async def test_superseded_completion_requires_handoff(
 async def test_worker_completed_wraps_non_object_output(
     settings, job_repo, upload_job
 ):
+    claimed = await job_repo.claim_next(worker_id="complete-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="complete-test",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="complete-test",
     )
-    await job_repo.claim_next(worker_id="complete-test", lease_seconds=60)
     await job_repo.record_dispatch(
         upload_job.id, worker_id="complete-test", runpod_job_id="rp-complete"
     )
@@ -1071,12 +1210,21 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
                 raise StageError(ErrorCode.RUNPOD_TIMEOUT, "lost response", retryable=True)
             return rid
 
+    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
+    assert job is not None and job.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="dispatch-timeout",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="dispatch-timeout",
     )
+
     async def package_not_ready(_ctx, *, idempotency_key):
         assert idempotency_key == f"{upload_job.id.hex}:0"
         return False
@@ -1087,7 +1235,6 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
 
     monkeypatch.setattr(cloud, "package_ready", package_not_ready)
     monkeypatch.setattr(cloud, "accepted_dispatch_id", dispatch_not_started)
-    job = await job_repo.claim_next(worker_id="dispatch-timeout", lease_seconds=60)
     fake = TimeoutOnce([{"status": "COMPLETED", "output": {}}])
     first = StageContext(
         job=job,
@@ -1171,16 +1318,23 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
 async def test_legacy_unconfirmed_package_uses_base_prefix(
     settings, job_repo, upload_job, monkeypatch
 ):
+    job = await job_repo.claim_next(worker_id="legacy-recovery", lease_seconds=60)
+    assert job is not None and job.id == upload_job.id
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="legacy-recovery",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="legacy-recovery",
     )
     await job_repo.append_event(
         upload_job.id, "dispatch_unconfirmed", {"attempt": 0}
     )
-    job = await job_repo.claim_next(worker_id="legacy-recovery", lease_seconds=60)
 
     async def no_receipt(_ctx, *, idempotency_key):
         assert idempotency_key is None
@@ -1210,13 +1364,20 @@ async def test_legacy_unconfirmed_package_uses_base_prefix(
 async def test_accepted_dispatch_survives_confirmation_failure(
     settings, job_repo, upload_job, monkeypatch
 ):
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     job = await job_repo.claim_next(worker_id="confirm-failure", lease_seconds=60)
+    assert job is not None and job.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="confirm-failure",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="confirm-failure",
+    )
     fake = FakeRunPodClient([{"status": "COMPLETED", "output": {}}])
     original_confirm = job_repo.confirm_dispatch
     confirmation_attempts = 0
@@ -1286,13 +1447,20 @@ async def test_accepted_dispatch_survives_confirmation_failure(
 async def test_accepted_dispatch_recovers_remote_id_from_worker_receipt(
     settings, job_repo, upload_job, monkeypatch
 ):
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     job = await job_repo.claim_next(worker_id="receipt-recovery", lease_seconds=60)
+    assert job is not None and job.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="receipt-recovery",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="receipt-recovery",
+    )
     dispatch_key = f"{upload_job.id.hex}:0"
     assert await job_repo.reserve_dispatch(
         upload_job.id,
@@ -1410,13 +1578,17 @@ async def test_cloud_verifying_rejects_source_object_mismatch(
 async def test_cloud_publish_cleans_job_dir_and_persists_verification(
     settings, job_repo, track_repo, upload_job, monkeypatch
 ):
+    claimed = await job_repo.claim_next(worker_id="publish-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     for before, after in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.dispatched),
         (JobStage.dispatched, JobStage.verifying),
         (JobStage.verifying, JobStage.publishing),
     ]:
-        job = await job_repo.advance(upload_job.id, from_stage=before, to_stage=after)
+        job = await job_repo.advance(
+            upload_job.id, from_stage=before, to_stage=after, worker_id="publish-test"
+        )
 
     class Verification:
         def to_integrity(self):
@@ -1486,13 +1658,17 @@ async def test_cloud_publish_plumbs_job_artist_to_manifest_and_track(
         title="Spoonman",
         artist="Soundgarden",
     )
+    claimed = await job_repo.claim_next(worker_id="publish-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == job.id
     for before, after in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.dispatched),
         (JobStage.dispatched, JobStage.verifying),
         (JobStage.verifying, JobStage.publishing),
     ]:
-        job = await job_repo.advance(job.id, from_stage=before, to_stage=after)
+        job = await job_repo.advance(
+            job.id, from_stage=before, to_stage=after, worker_id="publish-test"
+        )
 
     class Verification:
         def to_integrity(self):
@@ -1543,13 +1719,17 @@ async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(
 ):
     from shizzle_server.publish.lossless_intake import IntakeError
 
+    claimed = await job_repo.claim_next(worker_id="publish-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     for before, after in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.dispatched),
         (JobStage.dispatched, JobStage.verifying),
         (JobStage.verifying, JobStage.publishing),
     ]:
-        job = await job_repo.advance(upload_job.id, from_stage=before, to_stage=after)
+        job = await job_repo.advance(
+            upload_job.id, from_stage=before, to_stage=after, worker_id="publish-test"
+        )
     monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
     monkeypatch.setattr(
         cloud, "load_and_verify_package", lambda _path: SimpleNamespace()

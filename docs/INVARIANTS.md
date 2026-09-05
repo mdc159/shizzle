@@ -157,9 +157,14 @@ expired foreign lease is reclaimed with a `lease_reclaimed` event.
 **Invariant:** Lease ownership MUST be checked INSIDE the locked transaction:
 reserve/record dispatch reject unless `status == dispatched` AND
 `lease_owner == worker_id` AND the lease is unexpired; renew/release/park are
-scoped the same way.
+scoped the same way. Stage-outcome writes are fenced identically (issue #19):
+`advance`, `fail_job`, `schedule_retry`, and `publish_track` require
+`lease_owner == worker_id` with an unexpired lease (raising
+`InvalidTransition` otherwise), and `record_worker_progress` is a silent no-op
+for a caller that no longer owns the lease. `confirm_dispatch` stays
+lease-independent by design (B4).
 - Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`
+- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
   pair without re-reading owner and expiry under lock.
 

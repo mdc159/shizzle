@@ -393,12 +393,32 @@ def test_new_generation_publishes_alongside_the_old(s3):
 # --- DB seam ------------------------------------------------------------------
 
 
-async def _advance_to_publishing(job_repo, job):
-    await job_repo.advance(job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading)
-    await job_repo.advance(job.id, from_stage=JobStage.downloading, to_stage=JobStage.splitting)
-    await job_repo.advance(job.id, from_stage=JobStage.splitting, to_stage=JobStage.verifying)
+async def _advance_to_publishing(job_repo, job, worker_id="publisher-test"):
+    claimed = await job_repo.claim_next(worker_id=worker_id, lease_seconds=120)
+    assert claimed is not None and claimed.id == job.id
+    await job_repo.advance(
+        job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id=worker_id,
+    )
+    await job_repo.advance(
+        job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.splitting,
+        worker_id=worker_id,
+    )
+    await job_repo.advance(
+        job.id,
+        from_stage=JobStage.splitting,
+        to_stage=JobStage.verifying,
+        worker_id=worker_id,
+    )
     return await job_repo.advance(
-        job.id, from_stage=JobStage.verifying, to_stage=JobStage.publishing
+        job.id,
+        from_stage=JobStage.verifying,
+        to_stage=JobStage.publishing,
+        worker_id=worker_id,
     )
 
 
@@ -420,6 +440,7 @@ async def test_publish_job_writes_track_row_and_is_idempotent(s3, job_repo, uplo
         job=job,
         worker_result=worker_result,
         manifest=MANIFEST,
+        worker_id="publisher-test",
     )
     assert track.id == track_id
     assert track.title == "Test Track"
@@ -441,6 +462,7 @@ async def test_publish_job_writes_track_row_and_is_idempotent(s3, job_repo, uplo
         job=refreshed,
         worker_result=worker_result,
         manifest=MANIFEST,
+        worker_id="publisher-test",
     )
     assert track2.id == track.id
     assert result2.already_published is True
@@ -479,6 +501,7 @@ async def test_publish_job_falls_back_to_job_artist(s3, job_repo, settings):
         job=job,
         worker_result={"uploads": uploads},
         manifest=manifest,
+        worker_id="publisher-test",
     )
     assert track.artist == "Soundgarden"
     assert track.title == "Test Track"  # manifest title still wins
@@ -511,6 +534,7 @@ async def test_publish_job_falls_back_to_job_artist(s3, job_repo, settings):
         job=job2,
         worker_result={"uploads": uploads2},
         manifest={**MANIFEST, "artist": ""},
+        worker_id="publisher-test",
     )
     assert track2.artist == "Soundgarden"
 
@@ -539,6 +563,7 @@ async def test_publish_job_maps_checksum_mismatch_to_stage_error(s3, job_repo, u
             job=job,
             worker_result={"uploads": uploads},
             manifest=MANIFEST,
+            worker_id="publisher-test",
         )
     assert exc.value.code is ErrorCode.CHECKSUM_MISMATCH
     assert exc.value.retryable is False

@@ -174,6 +174,7 @@ class Orchestrator:
                 try:
                     job = await self.jobs.advance(
                         job.id,
+                        worker_id=self.worker_id,
                         from_stage=from_stage,
                         to_stage=next_stage,
                         duration_s=duration_s,
@@ -213,36 +214,49 @@ class Orchestrator:
     async def _handle_stage_error(self, job: Job, stage: JobStage, err: StageError) -> None:
         attempts_next = job.attempt + 1
         max_attempts = self.settings.orchestrator_max_attempts
-        if not err.retryable:
-            logger.warning("job %s: non-retryable %s at %s", job.id, err.code, stage.value)
-            await self.jobs.fail_job(
-                job.id, error_code=err.code, error_detail=err.detail, worker_id=self.worker_id
+        try:
+            if not err.retryable:
+                logger.warning("job %s: non-retryable %s at %s", job.id, err.code, stage.value)
+                await self.jobs.fail_job(
+                    job.id,
+                    error_code=err.code,
+                    error_detail=err.detail,
+                    worker_id=self.worker_id,
+                )
+                return
+            if attempts_next >= max_attempts:
+                logger.warning(
+                    "job %s: %s at %s — attempt %d/%d exhausted",
+                    job.id, err.code, stage.value, attempts_next, max_attempts,
+                )
+                await self.jobs.fail_job(
+                    job.id,
+                    error_code=err.code,
+                    error_detail=f"{err.detail} (max attempts {max_attempts} exceeded)",
+                    worker_id=self.worker_id,
+                )
+                return
+            delay = min(
+                self.settings.orchestrator_retry_base_seconds * (2**job.attempt),
+                self.settings.orchestrator_retry_cap_seconds,
             )
-            return
-        if attempts_next >= max_attempts:
-            logger.warning(
-                "job %s: %s at %s — attempt %d/%d exhausted",
-                job.id, err.code, stage.value, attempts_next, max_attempts,
+            logger.info(
+                "job %s: %s at %s — retry %d/%d in %.1fs",
+                job.id, err.code, stage.value, attempts_next, max_attempts, delay,
             )
-            await self.jobs.fail_job(
+            await self.jobs.schedule_retry(
                 job.id,
-                error_code=err.code,
-                error_detail=f"{err.detail} (max attempts {max_attempts} exceeded)",
                 worker_id=self.worker_id,
+                error_code=err.code,
+                error_detail=err.detail,
+                retry_in_seconds=delay,
             )
-            return
-        delay = min(
-            self.settings.orchestrator_retry_base_seconds * (2**job.attempt),
-            self.settings.orchestrator_retry_cap_seconds,
-        )
-        logger.info(
-            "job %s: %s at %s — retry %d/%d in %.1fs",
-            job.id, err.code, stage.value, attempts_next, max_attempts, delay,
-        )
-        await self.jobs.schedule_retry(
-            job.id,
-            worker_id=self.worker_id,
-            error_code=err.code,
-            error_detail=err.detail,
-            retry_in_seconds=delay,
-        )
+        except InvalidTransition:
+            # The lease was lost (expired and reclaimed) before the failure
+            # or retry could be applied: the new owner owns the outcome now,
+            # so stop applying effects and yield (B2).
+            logger.warning(
+                "job %s: lease lost before %s could be recorded; yielding",
+                job.id,
+                err.code,
+            )

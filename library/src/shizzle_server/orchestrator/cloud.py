@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Any
 
 from ..api.media import s3_client
 from ..db.models import JobStage
-from ..db.repository import PublishRefusedError, track_id_for_job
+from ..db.repository import (
+    InvalidTransition,
+    PublishRefusedError,
+    track_id_for_job,
+)
 from ..errors import ErrorCode, StageError
 from ..publish.lossless_intake import (
     IntakeError,
@@ -320,6 +324,7 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
             integrity["publisher"] = result.verification.to_integrity()
         await ctx.jobs.publish_track(
             ctx.job.id,
+            worker_id=ctx.worker_id,
             title=manifest.get("title") or title,
             artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
@@ -329,6 +334,9 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
             integrity=integrity,
         )
     except StageError:
+        raise
+    except InvalidTransition:
+        # Lost lease: the loop's InvalidTransition handling yields the job.
         raise
     except IntakeError as exc:
         raise StageError(

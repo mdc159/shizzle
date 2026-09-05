@@ -215,17 +215,26 @@ async def test_job_events_and_worker_fields(client):
         json={"url": "https://example.com/song", "title": "Timeline"},
     )).json()["jobId"]
     parsed_id = uuid.UUID(job_id)
+    claimed = await app.state.job_repo.claim_next(worker_id="api-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == parsed_id
     await app.state.job_repo.advance(
-        parsed_id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        parsed_id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="api-test",
     )
     await app.state.job_repo.advance(
-        parsed_id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        parsed_id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="api-test",
     )
-    await app.state.job_repo.claim_next(worker_id="api-test", lease_seconds=60)
     await app.state.job_repo.record_dispatch(
         parsed_id, worker_id="api-test", runpod_job_id="runpod-1"
     )
-    await app.state.job_repo.record_worker_progress(parsed_id, phase="separating")
+    await app.state.job_repo.record_worker_progress(
+        parsed_id, phase="separating", worker_id="api-test"
+    )
 
     status = (await c.get(f"/api/jobs/{job_id}")).json()
     assert status["title"] == "Timeline"

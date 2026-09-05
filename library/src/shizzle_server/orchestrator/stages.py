@@ -200,7 +200,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 await _cancel_best_effort(
                     ctx, job.runpod_job_id, reason="stale worker heartbeat"
                 )
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise
             # wave3 #3: dedup runpod_poll_failed to one row per outage, like the
             # bounded history in record_worker_progress. The most recent event
@@ -249,7 +251,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             return JobStage.verifying
 
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
-            await ctx.jobs.record_worker_progress(job.id, phase="failed")
+            await ctx.jobs.record_worker_progress(
+                job.id, phase="failed", worker_id=ctx.worker_id
+            )
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,
                 f"RunPod job {job.runpod_job_id} {status}: {_runpod_error(status_payload)}",
@@ -260,14 +264,18 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="queue timeout")
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,
                     f"RunPod queued {queued_for:.0f}s > "
                     f"{ctx.settings.runpod_queue_timeout_seconds:.0f}s",
                     retryable=True,
                 )
-            await ctx.jobs.record_worker_progress(job.id, phase="queued")
+            await ctx.jobs.record_worker_progress(
+                job.id, phase="queued", worker_id=ctx.worker_id
+            )
             return None
 
         if status == "IN_PROGRESS":
@@ -276,7 +284,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="worker stall")
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,
                     f"RunPod worker stalled (heartbeat age > "
@@ -284,7 +294,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     retryable=True,
                 )
             if phase:
-                await ctx.jobs.record_worker_progress(job.id, phase=phase)
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase=phase, worker_id=ctx.worker_id
+                )
             return None
 
         return None  # unknown status — park and re-poll next interval
@@ -483,6 +495,7 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
     try:
         await ctx.jobs.publish_track(
             ctx.job.id,
+            worker_id=ctx.worker_id,
             title=manifest.get("title") or ctx.job.title or ctx.job.id.hex,
             artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0)),
@@ -492,6 +505,9 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
             integrity=manifest.get("integrity"),
         )
     except StageError:
+        raise
+    except InvalidTransition:
+        # Lost lease: the loop's InvalidTransition handling yields the job.
         raise
     except PublishRefusedError as e:
         # Deterministic: re-running cannot change the refused location.
