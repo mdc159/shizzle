@@ -12,7 +12,7 @@ tracks at https://shizzle.systems. Current state and next actions:
 
 ## Ground rules
 
-1. **Invariants are law.** [docs/INVARIANTS.md](docs/INVARIANTS.md) holds 47
+1. **Invariants are law.** [docs/INVARIANTS.md](docs/INVARIANTS.md) holds 48
    numbered contracts (A1–F6). A PR that changes an invariant must update
    that file and its guarding test in the same PR. The AI reviewers cite
    these IDs; so should you.

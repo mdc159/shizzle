@@ -17,7 +17,6 @@ reviews:
     - "!**/uv.lock"
     - "!player/package-lock.json"
     - "!player/dist/**"
-    - "!deploy/aws/*.rendered.json"
     - "!**/__pycache__/**"
   path_instructions:
     - path: "stemsplit/**"

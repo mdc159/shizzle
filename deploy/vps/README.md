@@ -21,7 +21,9 @@ CloudFront rather than relayed through the VPS.
 ## Deployment and health
 
 Production deploys run from the environment-gated
-[deploy-vps workflow](../../.github/workflows/deploy-vps.yml). It publishes a
+[deploy-vps workflow](../../.github/workflows/deploy-vps.yml), called after a
+deployable master push passes CI. Documentation-only merges skip deployment.
+It publishes a
 digest-pinned API image, ships the player, updates `SHIZZLE_API_IMAGE` in the box's
 `.env`, and checks the public application before succeeding. The host deploy
 path transfers release assets with `scp` and extracts them with `tar`.
@@ -30,8 +32,8 @@ Use the production compose project name explicitly:
 
 ```text
 cd /opt/shizzle/prod
-docker compose -p shizzle ps
-docker compose -p shizzle logs --tail 200 api orchestrator
+docker compose -p shizzle -f compose.prod.yml ps
+docker compose -p shizzle -f compose.prod.yml logs --tail 200 api orchestrator
 ```
 
 For a manual local-source build, copy `compose.build.yml` from this directory
@@ -85,16 +87,65 @@ containers to report the same non-empty image reference, so the first automated
 deployment can roll back to precisely the release that was active before it.
 Done once per installation; every later deploy maintains the value itself.
 
-## Current work
+## New-host setup
 
-Playback delivery is complete. The active infrastructure work is connecting the
-orchestrator to dependable cloud source acquisition and cloud GPU separation.
+Use a Linux Docker host with Compose v2 supporting `env_file.required`, DNS
+for both `shizzle.systems` and `www.shizzle.systems` pointing to the host, and
+TCP ports 80/443 open. UDP 443 is optional for HTTP/3. The deployment workflow
+currently connects as `root`; changing the SSH account requires matching
+workflow and filesystem permissions.
+
+Prepare `/opt/shizzle/prod` with `compose.prod.yml`, `Caddyfile` copied from
+`Caddyfile.prod`, the built `player/dist` contents in `player/`, a private `.env`,
+and `secrets/cloudfront_private_key.pem`. Use the repository `.env.example` as
+a list to reconcile against current `Settings`; configure the passcode, token
+signing secret, public origin, Postgres values, S3 bucket/credentials, and
+CloudFront domain/key-pair identity. Both application containers require the
+same `SHIZZLE_API_IMAGE`. Use a retained, published tag-plus-digest reference.
+Production's Postgres and appdata are persistent named volumes.
+
+The current Compose file requires the external volume
+`shizzle-probe_caddy_data`. Preserve it on an existing host. On a genuinely new
+host create that named volume before starting Caddy; its name is a compatibility
+dependency and does not require running the old probe stack.
+
+On the new Linux host, after configuration and image selection:
+
+```sh
+cd /opt/shizzle/prod
+docker volume create shizzle-probe_caddy_data
+docker compose -p shizzle -f compose.prod.yml config -q
+docker compose -p shizzle -f compose.prod.yml pull
+# --wait blocks until postgres is healthy; `run --no-deps` below skips depends_on.
+docker compose -p shizzle -f compose.prod.yml up -d --wait postgres
+docker compose -p shizzle -f compose.prod.yml run --rm --no-deps api alembic upgrade head
+docker compose -p shizzle -f compose.prod.yml up -d
+```
+
+Set `SHIZZLE_PIPELINE=cloud`. Without RunPod credentials, existing media can
+remain playable and the orchestrator heartbeat can be healthy, but new cloud
+jobs cannot complete. Configure the [RunPod endpoint](../runpod/README.md)
+for ingestion. `setup.sh` installs host packages and host security defaults;
+it does not create this application release or configure S3/CloudFront.
+
+## Health and media acceptance
+
+The automated gate checks the public root, `/api/health` (`status=ok`,
+`db=true`, `orchestratorAlive=true`), and unauthenticated `/cdn/tracks/x=403`.
+It does not assert actual track playback or GPU readiness.
+
+After bootstrap or a delivery change, authenticate through the browser, open
+an existing track, verify a fresh manifest returns file-scoped media URLs,
+and verify actual byte ranges return 206 with appropriate CORS/content types.
+Play to natural end, scrub repeatedly in both directions, and inspect recovery
+and telemetry using [the playback runbook](../../docs/playback-troubleshooting.md).
+Avoid saving signed query credentials in test evidence.
 
 ## Bootstrap files
 
-`setup.sh` and `probe/` record the original host bootstrap and minimal service
-probe. They are retained for recovery and troubleshooting; they are not the
-current application stack.
+`setup.sh` is the host installer. `probe/` is a separate minimal service harness;
+`compose.yml` is the development/reference stack, and `vm-test/` is the isolated
+browser/relay test harness. Only `compose.prod.yml` is the production stack.
 
 ## Operational cautions
 

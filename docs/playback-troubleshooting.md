@@ -1,8 +1,9 @@
 # Playback troubleshooting
 
-Use this document only when an actual playback issue is observed. The 27-track
-library and the delivery pipeline are finished; these procedures are not a
-standing acceptance campaign.
+Use this document to investigate an observed playback issue. For current test
+commands, continuous-play/scrubbing procedures, and retained stem-codec
+experiments, see [TESTING.md](TESTING.md). Recorded 27-track acceptance results
+are evidence of that run, not a live inventory or a fresh deployment check.
 
 ## Start here
 
@@ -88,10 +89,13 @@ Use when the picture advances but no audio is heard.
 
 1. Read every post-gain stem PCM level.
 2. Read post-limiter master PCM.
-3. If all stem inputs are silent, treat the interval as source silence.
-4. If a stem has real PCM but the master remains silent, treat it as a broken
-   render graph and invoke recovery.
-5. Verify mute, solo, stem gain, and master gain state before rebuilding nodes.
+3. Check mute, solo, stem gain, and master gain first. These stem sensors are
+   post-gain; silent readings can reflect intentional mixer settings as well as
+   source silence. Master volume zero intentionally silences the output bus.
+4. With an audible mix requested, if a stem has real PCM but the master remains
+   silent, investigate the render graph and recovery state.
+5. With the relevant stems unmuted and at unity, compare against the source
+   passage before classifying a silent interval as a decoder or graph failure.
 
 This distinction came from the silent intro in Mother Love Bone — Stardog
 Champion. Evidence:
@@ -121,8 +125,11 @@ Use when audio, controls, or memory leak between songs.
 2. Confirm the previous video Blob is revoked.
 3. Confirm previous media elements, Web Audio nodes, timers, watchdog state, and
    recovery work are disposed.
-4. Confirm the new track begins with its own default mixer state and no previous
-   audio remains audible.
+4. Confirm no previous audio remains audible. The current store preserves stem
+   gains, mutes, solos, and master volume across track selection and reload.
+   Verify that deliberate preference persistence is consistent across local and
+   remote controls. Use Reset mixer to restore unity/unmuted/unsoloed stems;
+   restore master volume separately.
 
 The original one-session 27-track stress run exercised this path; repeat only
 the smallest sequence that reproduces the issue.

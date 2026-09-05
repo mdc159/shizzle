@@ -2,49 +2,61 @@
 
 The review-and-deploy automation package: CI gates, image publishing, gated
 VPS deploys, and how the three AI reviewers stay aligned on
-[INVARIANTS.md](INVARIANTS.md). This document describes the target automation
-state; workflow files live under `.github/workflows/`.
+[INVARIANTS.md](INVARIANTS.md). This document describes the checked-in workflows under `.github/workflows/`.
+GitHub branch rules, environment reviewers, secrets, and live endpoint settings
+are configured outside these files and must be verified when bootstrapping.
 
 ## 1. System overview
 
 ```mermaid
-flowchart LR
-    FB[feature branch] --> PR[PR to master]
-    PR --> CI["ci.yml checks:<br/>library / stemsplit / player / postgres-contract"]
-    PR --> AI["advisory AI reviewers:<br/>CodeRabbit / Greptile / cubic<br/>(INVARIANTS-derived rules)"]
-    CI --> HM[human merge]
-    AI --> HM
-    HM --> M[master]
-    M --> WI["worker-image.yml:<br/>ghcr.io/mdc159/shizzle/worker:sha-SHA"]
-    M --> CI2["ci.yml push checks"]
-    CI2 --> DV["deploy-vps.yml<br/>reusable call after all jobs pass"]
-    DV --> BI["build-image job<br/>(reusable api-image.yml)<br/>ghcr.io/mdc159/shizzle/api:sha-SHA"]
-    BI --> GATE{"production Environment<br/>approval: mdc159"}
-    GATE --> DEP["deploy transaction:<br/>tag@sha256 digest + migration<br/>health or DB+file rollback"]
-    M -. "manual dispatch" .-> RR["runpod-repoint.yml:<br/>clone dedicated template,<br/>bind endpoint once"]
+flowchart TB
+    PR["PR to master"] --> CHECKS["ci.yml: library, stemsplit,<br/>player, postgres-contract"]
+    PR --> REVIEW["Advisory review intake +<br/>PR convergence workflow"]
+    CHECKS --> MERGE["Human merge"]
+    REVIEW --> MERGE
+    MERGE --> MASTER["Push to master"]
+    MASTER --> PUSHCI["Same four CI checks"]
+    MASTER --> CLASSIFY{"deploy-gate:<br/>any non-documentation path?"}
+    CLASSIFY -->|"No"| SKIP["Skip API build and VPS deploy"]
+    CLASSIFY -->|"Yes, or unknown diff"| DEPLOY["deploy-production<br/>waits for four checks + gate"]
+    PUSHCI --> DEPLOY
+    DEPLOY --> ADMIT["deploy-vps: verify current master SHA"]
+    ADMIT --> IMAGE["api-image: build and push tag + digest"]
+    IMAGE --> APPROVAL["production environment gate<br/>configured in GitHub"]
+    APPROVAL --> RECHECK["Recheck master; build player; ship assets"]
+    RECHECK --> TX["Snapshot files + DB revision;<br/>pull, validate, migrate, start"]
+    TX --> HEALTH{"Public root + health +<br/>unauthorized /cdn = 403"}
+    HEALTH -->|"Pass"| FINAL["Finalize transaction; retain images"]
+    HEALTH -->|"Fail"| ROLLBACK["Restore prior schema + files;<br/>verify restored health"]
+    TX -->|"Transaction failure"| ROLLBACK
+    MASTER --> FILTER{"Worker paths changed?"}
+    FILTER -->|"Yes"| WORKER["worker-image: publish SHA-tagged worker<br/>independent of application CI"]
+    MANUALBUILD["Manual worker-image dispatch"] --> WORKER
+    WORKER -. "operator selects published tag" .-> REPOINT["Manual runpod-repoint:<br/>resolve digest, clone template,<br/>update endpoint + worker limit"]
 ```
 
-Every PR must pass the four `ci.yml` jobs (`library`, `stemsplit`, `player`,
-`postgres-contract`) before merge; the AI reviewers are advisory and never
-block. On merge to master, `worker-image.yml` publishes the GPU worker image
-and the successful master CI workflow calls `deploy-vps.yml`. The reusable
-`api-image.yml` publishes `ghcr.io/mdc159/shizzle/api:sha-<sha>` and passes its
-registry digest to the environment-gated deploy. `runpod-repoint.yml` is
-manual-only: it clones the endpoint's current template with the new image and
-sets the new template plus `workers_max` in one endpoint update. The prior
-template remains available for explicit rollback. Once an endpoint update has
-been attempted, a failed or stale reconciliation preserves the new template;
-automatic deletion is unsafe because the update may have committed despite a
-lost response.
+The required check names are `library`, `stemsplit`, `player`, and
+`postgres-contract`. AI review output is advisory to branch protection; the
+repository's [convergence workflow](../.agents/skills/drive-pr-review-convergence/SKILL.md)
+separately determines review readiness and stops before merge.
+
+Only a deployable master push passing all four checks calls `deploy-vps.yml`.
+Documentation-only changes still run checks. `worker-image.yml` has its own
+path filter (`stemsplit/**` or its workflow file) and manual trigger; it neither
+waits for those checks nor updates an endpoint. `runpod-repoint.yml` is
+manual-only, uses a registry digest, clones the endpoint's current template,
+and sets the new template plus `workers_max` in one endpoint update. The prior
+template remains available for explicit rollback. After an ambiguous endpoint
+update, the new template is preserved pending reconciliation.
 
 ## 2. Secrets inventory
 
 | Name | Scope | Grants | Rotation |
 |------|-------|--------|----------|
-| `VPS_SSH_KEY` | Environment `production` | SSH private key for the deploy user on the VPS host; deploy-vps uses it to run compose on the box | Generate new keypair, install in `~/.ssh/authorized_keys`, update the secret, remove old pubkey |
+| `VPS_SSH_KEY` | Environment `production` | SSH private key for root on the VPS host; the workflow runs SSH and Compose as root | Generate new keypair, install in `~/.ssh/authorized_keys`, update the secret, remove old pubkey |
 | `VPS_HOST` | Environment `production` | Hostname/IP the deploy targets | Update when the box moves |
 | `VPS_SSH_HOST_KEY` | Environment `production` | Pinned ed25519 host key so deploy-vps verifies the box (no `StrictHostKeyChecking=no`) | Regenerate with `ssh-keyscan -t ed25519 <host>`; update after any host key change |
-| `RUNPOD_API_KEY` | Repo | RunPod API access for `worker-image.yml` and `runpod-repoint.yml` (publish templates, repoint endpoints, scale workers) | Rotate in the RunPod console, update the repo secret |
+| `RUNPOD_API_KEY` | Repo | RunPod API access for `runpod-repoint.yml` (create templates and update endpoints); image publishing uses `GITHUB_TOKEN` | Rotate in the RunPod console, update the repo secret |
 
 Runtime secrets (passcode, `POSTGRES_*`, `AWS_*`, CloudFront private key) are
 NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
@@ -66,7 +78,7 @@ variables in the production `.env` when the RunPod path is connected.
    parent. If every changed file is documentation (`docs/`, `evidence/`,
    `goals/`, `.agents/`, or any `*.md`), the deploy chain is skipped —
    nothing a docs-only merge ships would differ, so building an image and
-   queuing an approval for it is pure waste (Mike, 2026-08-17). The gate
+   queuing a production approval is skipped. The gate
    fails open: a missing parent or empty diff deploys.
 1. After all four jobs pass on a `master` push, `ci.yml` calls
    `deploy-vps.yml`; pull-request and non-master runs cannot call it. The called
@@ -101,8 +113,9 @@ behavior) are NOT asserted by the workflow.
   failed application stop likewise restores the files, skips downgrade and
   restart, and returns the stop failure because schema mutation is unsafe while
   the new application may still be running.
-- Break-glass: edit `SHIZZLE_API_IMAGE` in `/opt/shizzle/prod/.env` to a known
-  tag-plus-digest reference and run Compose on the box. Automated deployment
+- Break-glass: follow the schema-aware recovery procedure in
+  [the VPS runbook](../deploy/vps/README.md). An older image cannot safely start
+  until the database revision is compatible with that image. Automated deployment
   refuses an installation with no prior API identity; bootstrap the first
   release explicitly.
 
@@ -263,96 +276,50 @@ unhandled errors) and clear WCAG violations (missing labels, keyboard traps,
 contrast only when egregious).
 ```
 
-## 6. Deferred hardening
+## 6. Verification and remaining coverage limits
 
-Not in CI today, by choice:
+The `library` CI job runs both shell failure-path suites with stubbed Docker,
+registry, and RunPod calls. The required `postgres-contract` job uses a real
+Postgres service, applies Alembic migrations, exercises concurrency/crash
+contracts, and downgrades the head migration by one revision before upgrading
+again. The `player` job builds, lints, and runs only the mocked
+`e2e/library-scroll.spec.ts` browser test. These checks do not replace the
+[real playback tests](playback-troubleshooting.md) or prove live deployment
+rollback against a real Docker stack.
 
-- **knip** (`player/knip.json` exists) does not run in `ci.yml`. Adding it
-  is a follow-up, not a gap in this package.
-- **The mocked Playwright spec is an approved required-check
-  responsibility.** The `player` job builds and lints, then installs
-  headless Chromium (`npx playwright install --with-deps chromium`) and runs
-  `player/e2e/library-scroll.spec.ts` — the fully mocked library-drawer
-  browser spec (no backend, no credentials) — on every execution. This
-  makes the required `player` check depend on the Playwright browser CDN:
-  a CDN outage blocks merges until it recovers. That coupling was accepted
-  deliberately in PR #12 so the browser coverage actually counts; caching
-  `~/.cache/ms-playwright` keyed on the Playwright version is the
-  follow-up that softens it.
-- **library mypy is informational** — `continue-on-error: true` on a 23-error
-  strict-mode baseline (recorded in PR #1). Fixing the debt and turning the
-  gate hard is the typing-debt follow-up.
-- **Unguarded invariants want tests**: E2 (`source_ref` never exposed in API
-  responses) and A7 (uploaded handoff has `_`-prefixed private keys stripped)
-  have no asserting test — see INVARIANTS.md for the wanted-test notes.
-- **The live restore path has never executed against real Docker.** The
-  transaction tests fault-inject `deploy-release.sh`/`restore-release.sh`
-  thoroughly, but with a stubbed `docker`; the first real execution of a
-  rollback (compose downgrade against live Postgres) would happen during a
-  genuine failed deploy. A deploy-rehearsal lane (disposable sandbox running
-  the real scripts against a throwaway compose stack) is the follow-up that
-  retires this risk; until then it is an accepted residual.
-- **`runpod-repoint.yml` has never been dispatched.** Its input validation,
-  manifest check, and template-exclusivity preflight are code-reviewed but
-  unexecuted; the first dispatch (safe with `workers_max=0` — the pool stays
-  parked) doubles as its live validation.
+Current checked-in limits:
 
-## 7. Lift to a new repo (template checklist)
+- `mypy src` in the library job is informational (`continue-on-error: true`).
+- Player `knip` is configured but not run in CI.
+- The player check installs Chromium from the Playwright browser CDN on each
+  run; that dependency can block CI during an outage.
+- CPU worker tests mock separation; the image's offline weights check proves
+  model availability, not successful GPU separation or runtime egress policy.
+- RunPod repoint tests mock the API, so live template/endpoint API behavior
+  requires a separate authorized validation.
+- The worker-image workflow lacks a concurrency group and uses version-tagged
+  Actions, unlike the SHA-pinned application image/deploy workflows.
+- See [INVARIANTS.md](INVARIANTS.md) for explicitly unguarded contracts.
 
-Files to copy: `.coderabbit.yaml`, the `docs/INVARIANTS.md` skeleton (keep the
-ID scheme and format; replace content), `docs/AUTOMATION.md`, and the four
-workflow patterns (`ci.yml` multi-job checks, reusable `api-image.yml`,
-gated `deploy-vps.yml`, `worker-image.yml`, plus `runpod-repoint.yml` if the
-new repo has a serverless GPU fleet).
+## 7. Installation prerequisites
 
-Names to substitute everywhere they appear (workflows, AUTOMATION.md,
-.coderabbit.yaml):
+Set up these external dependencies before the first automated deployment:
 
-- Image paths: `ghcr.io/<owner>/<repo>/api` and `.../worker`
-- VPS host + production directory + domain
-- RunPod endpoint id (was `tevdw8022hs8hn`) and template id (was
-  `vh76gbm3uy`)
-- Compose image-selection var (was `SHIZZLE_API_IMAGE`)
-
-Settings sequence (order matters):
-
-1. **Create the GitHub Environment `production` with its required reviewer
-   BEFORE the first master merge.** The environment auto-creation trap: the
-   first workflow run that references an environment creates it with no
-   protection rules, so an ungated deploy slips through if you rely on
-   auto-creation.
-2. Add secrets to the environment (`VPS_SSH_KEY`, `VPS_HOST`,
-   `VPS_SSH_HOST_KEY` — pinned via `ssh-keyscan -t ed25519 <host>`) and to the
-   repo (`RUNPOD_API_KEY`). Install the reviewer apps and paste their rules
-   (AUTOMATION.md §5) BEFORE the first PR so advisory review exists from PR #1.
-3. Enable branch protection on master after the first CI run has produced the
-   check names — require PRs and the actual job ids (`library`, `stemsplit`,
-   `player`, `postgres-contract`); AI reviewers stay advisory, never required.
-4. **After the first image push, confirm the GHCR package is public.** The
-   private-package trap: a first container package under a personal account
-   defaults to private, and linking it to a public repository inherits access
-   permissions but not package visibility. The VPS `docker compose pull` fails
-   auth until visibility is changed (or a pull token is wired into the box).
-   Actions linkage can grant workflow access without enabling anonymous pulls,
-   so verify package visibility explicitly.
-5. **Pass `secrets: inherit` wherever a caller invokes the reusable deploy
-   workflow.** A called workflow's `secrets` context contains only what the
-   caller passes — even when the called job declares
-   `environment: production`. The protection rules (approval gate) still
-   apply without it, which makes the failure deceptive: the gate fires, the
-   job runs, and every secret resolves empty. The deploy job's preflight step
-   now fails fast with the cause, but the caller wiring is where the fix
-   belongs.
-6. **Bootstrap the first release identity on the box before the first
-   automated deploy.** `deploy-release.sh` fails closed ("Refusing automated
-   first deployment") when the production `.env` records no
-   `SHIZZLE_API_IMAGE`/`SHIZZLE_API_TAG`, because it cannot promise a rollback
-   target it cannot identify. Record the active image once per installation
-   (see `deploy/vps/README.md`); every later deploy maintains it.
-
-Bootstrap order: environment + reviewer setup → secrets → first-release
-identity bootstrap → first merge (exercises build + gated deploy + package
-creation) → package visibility → branch protection. This order means the
-approval gate exists before any deploy can run, rollback identity exists before
-the first gated deploy, the pull works before anyone depends on it, and branch
-protection references real check names.
+1. Create and configure the GitHub `production` environment and its required
+   reviewer before allowing deployment runs. Referencing an environment in
+   YAML does not itself configure an approval requirement.
+2. Add the three VPS environment secrets from §2, plus the repository RunPod
+   secret when endpoint updates are needed. The CI caller currently passes
+   `secrets: inherit` to the deploy workflow.
+3. Make the GHCR API/worker packages readable by their target hosts: public
+   packages or explicit read credentials. A successful Actions push does not
+   prove that an anonymous VPS or RunPod pull succeeds.
+4. Bootstrap the VPS files, mounted secrets, external Caddy volume, database
+   revision, and first active image as described in
+   [deploy/vps/README.md](../deploy/vps/README.md). Automated deployment requires
+   a real prior release to restore.
+5. Configure branch protection around the actual four CI check names and the
+   repository's PR policy. Configure the advisory reviewers using §4–5.
+6. Configure and independently verify the RunPod endpoint using
+   [deploy/runpod/README.md](../deploy/runpod/README.md). Image publication and
+   endpoint activation are separate operations.

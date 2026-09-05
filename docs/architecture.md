@@ -1,206 +1,225 @@
-# Shizzle — Cloud Karaoke Stem Mixer: Current Design
+# Architecture
 
-Status: browser delivery and playback complete; cloud ingestion and fresh stem
-separation are the active work.
+This describes the implemented cloud path. Operational readiness still depends
+on the deployed configuration and provider availability; see [Setup](SETUP.md).
+Known deviations and bugs are tracked in [Review](REVIEW.md).
 
-## 1. Purpose
+## Components and ownership
 
-Shizzle accepts a song source, separates it into six stems, publishes a
-browser-ready immutable track generation, and lets a standards-compliant browser
-play and remix those stems in real time.
+| Component | Implementation | Responsibility |
+|---|---|---|
+| API | `library/src/shizzle_server/api/` | Uploads, passcode/token authentication, jobs, library, manifests with signed media URLs, telemetry, WebSocket relay |
+| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats |
+| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, submits/polls RunPod, reconciles dispatch receipts, verifies and publishes |
+| GPU worker | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source, extracts audio, separates with htdemucs_6s, writes lossless package and progress |
+| Delivery policy | `library/src/shizzle_server/publish/` | Verifies lossless bytes, derives AAC/video, measures common attenuation, audits, stages and promotes |
+| Media storage | Private S3 | Sources, per-dispatch packages, staged and published generations |
+| Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
+| Browser | `player/src/` | Video-clock playback, six-stem mixing, health sensing, remote and dashboard pages |
 
-The runtime is 100% cloud-hosted and exposes one standards-based browser media
-path.
+The [README system diagram](../README.md#system-diagram) maps these boundaries.
+`ingest/` is documentation, not a deployed process. The app origin is Caddy on
+the VPS; CloudFront is the media origin. Same-origin `/cdn` proxy delivery is a
+retained fallback, not the normal seven-object media path.
 
-## 2. The whole workflow and defined interface
-
-```mermaid
-flowchart LR
-    S["URL or upload"] --> A["Cloud acquisition"]
-    A --> G["RunPod GPU separation"]
-    G --> L["Six stereo 44.1 kHz<br/>float32 WAV stems"]
-    L --> H{{"lossless-stem-v1<br/>DEFINED INTERFACE"}}
-    H --> P["Finished VPS delivery transformation"]
-    P --> O["Immutable generation"]
-    O --> C["CloudFront"]
-    C --> B["Browser player"]
-```
-
-`lossless-stem-v1` is both the required RunPod output and the VPS input. It is
-exactly six aligned float32 WAV stems plus `handoff.json`. RunPod stops there.
-The VPS starts there and applies the already-finished delivery transformation
-without a song-specific alternate path.
-
-The exact file layout and manifest are defined in
-[`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md).
-
-## 3. System architecture
+## Upload to publication
 
 ```mermaid
-flowchart TB
-    V["VPS orchestration"] --> R["RunPod separation job"]
-    R --> H{{"lossless-stem-v1"}}
-    H --> V
-    V --> S["Private S3 immutable generation"]
-    S --> C["CloudFront signed delivery"]
-    C --> B["Conforming browser player"]
-    V <--> D["Postgres job and library state"]
+sequenceDiagram
+    participant B as Browser
+    participant A as VPS API
+    participant D as Postgres
+    participant O as VPS orchestrator
+    participant S as Private S3
+    participant R as RunPod API
+    participant W as GPU worker
+    B->>A: POST /api/upload (video, title, artist)
+    Note over A,O: API writes shared DATA_DIR/job-id/source.mp4
+    A->>D: Create pending job and source checksum
+    A-->>B: jobId and resolved metadata
+    O->>D: Claim lease, pending to downloading
+    O->>S: Upload sources/track-id/source.mp4
+    O->>D: Advance to dispatched, reserve attempt before request
+    O->>R: POST run with source key and attempt identity
+    R-->>O: Assigned RunPod job id
+    O->>D: Confirm remote id
+    par Provider execution
+        R->>W: Deliver job
+        W->>S: Write dispatch.json receipt
+        W->>S: Download source
+        Note over W: Extract audio and separate six stems
+        W-->>R: Phase and progress updates
+        W->>S: Upload six aligned float32 WAV files
+        W->>S: Write handoff.json last
+        W-->>R: Return completed package result
+    and Orchestrator reconciliation
+        loop While remote work is pending
+            O->>R: Poll status and progress
+            R-->>O: Queue / progress / completion / failure
+            O->>D: Record progress, park between pending polls
+        end
+    end
+    Note over O,S: Lost submit response: reconcile dispatch receipt or handoff marker
+    O->>D: dispatched to verifying with selected package prefix
+    O->>S: Download selected package
+    Note over O: Validate handoff fields, source identity, hashes, sizes, sample format and alignment
+    O->>D: verifying to publishing
+    Note over O: Measure lossless mix gain, derive AAC/video, audit media
+    O->>S: Upload staging set, verify bytes and gates
+    O->>S: Copy media into tracks/track-id/1/
+    O->>S: Publish manifest.json last
+    O->>D: Create track and mark job ready in one transaction
+    Note over O: Remove successful job's local working directory
 ```
 
-- **VPS:** FastAPI control plane, authentication, Postgres, job orchestration,
-  publication, and telemetry.
-- **Cloud GPU:** source audio extraction and six-stem separation. RunPod is the
-  current provider, but the job contract is provider-independent.
-- **S3:** private staging and immutable published generations.
-- **CloudFront:** direct signed media delivery with CORS and byte ranges.
-- **Browser:** video master clock, six streamed stem decoders, Web Audio mixing,
-  direct health instrumentation, and telemetry.
+Sources: `api/routes.py`, `orchestrator/stages.py`, `orchestrator/cloud.py`,
+`orchestrator/runpod_client.py`, `stemsplit/lossless_handler.py`,
+`stemsplit/lossless_worker.py`, `publish/lossless_intake.py`,
+`publish/publisher.py`, and `db/repository.py`.
 
-The VPS controls work but does not relay seven continuous media streams. Heavy
-media work stays in cloud compute near object storage. Browsers consume the
-published contract; they do not host or process server-side media.
+The parallel lanes show polling during provider execution. Worker execution can
+also start before submission confirmation reaches Postgres. Completion is detected by polling and
+S3 reconciliation, not an inbound callback. The receipt can recover an accepted
+job whose submission response or database confirmation was lost.
 
-## 4. Upstream ingestion — active work
+## Job state and recovery
 
-Both supported entry paths converge on one cloud object:
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> downloading
+    downloading --> dispatched: cloud upload saved to S3
+    dispatched --> dispatched: park while queued or running
+    dispatched --> verifying: complete package selected
+    downloading --> splitting: local or test mode only
+    splitting --> verifying: reference pipeline result
+    verifying --> publishing: verification passed
+    publishing --> ready: cloud publication transaction
+    ready --> [*]
+    downloading --> failed: URL stub or terminal source error
+    dispatched --> failed: terminal error or retry budget exhausted
+    splitting --> failed: terminal error or retry budget exhausted
+    verifying --> failed: invalid package or retry budget exhausted
+    publishing --> failed: refused publication or retry budget exhausted
+    failed --> [*]
+```
 
-1. A URL is acquired by a cloud-hosted downloader, or a user uploads a source.
-2. The source is validated for size, duration, container, video, and audio.
-3. The orchestrator submits an idempotent separation job to the cloud GPU.
-4. The worker extracts audio and produces `lossless-stem-v1`: vocals, drums,
-   bass, guitar, piano, and other as aligned 44.1 kHz stereo float32 WAV.
-5. The worker uploads those six files and writes `handoff.json` last.
-6. The VPS receives that exact package and runs the fixed delivery pipeline.
+The diagram shows successful and terminal transitions. Retryable errors schedule
+another attempt at the same stage; pending-stage errors can also fail.
+Parking releases a lease without charging an attempt. A failed remote worker can
+be dispatched under a fresh reservation and package prefix. Unresolved dispatch
+identity fails closed rather than silently creating duplicate GPU work.
 
-This is the next deliverable. The current RunPod endpoint must be made reliably
-available, then proven with a small golden source that reaches `COMPLETED` and
-produces verified cloud outputs. That work does not reopen browser delivery.
+Local and test modes retain reference/fault-injection behavior; their
+`local/` output is refused by the canonical publication guard (C7). They are
+not alternate supported production publication paths.
 
-## 5. Finished delivery pipeline
+Postgres claims use `FOR UPDATE SKIP LOCKED`. Lease renewal runs during a stage.
+Do not infer that every state-writing method is fully fenced by that fact:
+the [review findings](REVIEW.md) cover stale-owner and liveness defects.
 
-Given `lossless-stem-v1` and the cloud source video, the fixed pipeline:
+## Object layout and publication
 
-1. Encodes the six browser stems to the versioned `shizzle-browser-v1` profile.
-2. Copies an already-compatible audio-less video or derives the bounded H.264
-   delivery video.
-3. Measures duration alignment, timestamps, decode completeness, checksums,
-   sample safety, true peak, keyframe spacing, and required object roles.
-4. Uploads and verifies media under a new immutable generation.
-5. Writes `manifest.json` last.
-6. Activates the generation with one database pointer change.
-7. Exposes signed, file-scoped CloudFront URLs through the authenticated API.
+```text
+sources/<track-id>/source.mp4
+tracks/<track-id>/1/separation/attempts/<sha256-idempotency-key>/
+  dispatch.json
+  handoff.json
+  stems/{vocals,drums,bass,guitar,piano,shizzle}.wav
+tracks/<track-id>/<generation>/
+  manifest.json
+  video.mp4
+  stems/{vocals,drums,bass,guitar,piano,shizzle}.m4a
+```
 
-The exact format, bitrate, FFmpeg commands, tolerances, and audit checks are in
-[`../interfaces/shizzle-browser-v1/spec.md`](../interfaces/shizzle-browser-v1/spec.md).
+New ingestion uses generation 1 and a deterministic track UUID derived from the
+job. Attempt packages are separate keys below the separation prefix and are
+never referenced by the browser manifest. Staging prefixes hold inputs to
+promotion; successful cloud publication removes local working files but retains
+the S3 source, package, and staging objects. The manifest is the
+published-generation completion marker.
 
-## 6. Finished playback architecture
+Subsequent generation migration tools audit a candidate and use an atomic
+compare-and-swap activation with an event ledger. Generation rollback changes
+the active pointer; it does not overwrite accepted media. Application-release
+rollback additionally restores the schema, image/configuration and UI through
+[the deployment transaction](AUTOMATION.md).
 
-- Six independent stereo AAC-LC/M4A stem elements stream directly from
-  CloudFront with byte-range support.
-- The bounded audio-less H.264 video is fetched after stem readiness and played
-  from one revocable Blob, making it a deterministic master clock.
-- All stems feed one `AudioContext` through per-stem gains and a protected master
-  bus.
-- Play, pause, seek, end, replay, mute, solo, and fader changes are coordinated
-  against the authoritative video timeline.
-- A direct watchdog observes media clocks, buffers, errors, Web Audio state,
-  every stem's rendered PCM, post-limiter PCM, limiter state, and recovery.
-- First-party telemetry records actionable playback incidents without storing
-  signed media credentials.
+## Playback and media grant
 
-There is one browser contract. Support is capability-based, not tied to a
-device, display, or browser-vendor-specific path.
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as VPS API
+    participant D as Postgres
+    participant S as Private S3
+    participant C as CloudFront
+    B->>A: Authenticated GET /api/tracks/{id}/manifest
+    A->>D: Resolve active track generation
+    A->>S: Read manifest
+    A-->>B: Manifest with file-scoped signed URLs
+    B->>C: Load six AAC elements with Range requests
+    C->>S: Fetch private origin objects on cache miss
+    Note over B: Wait for stem readiness
+    B->>C: Fetch audio-less video with 128 MiB size cap
+    C->>S: Fetch video on cache miss
+    Note over B: Create revocable video Blob
+    B->>B: User Play starts video and six stem elements
+    Note over B: Measure each stem against video clock, correct drift and recover stalls
+    B->>A: Credential-free playback telemetry
+```
 
-Two companion surfaces ride the same build and the same passcode gate,
-selected by path (`/remote`, `/dashboard`) with no router; production Caddy
-serves them through its SPA fallback:
+Six independent decoders feed per-stem gains, a master gain with fixed -3 dB
+headroom, a DynamicsCompressor, and post-compressor measurement. Sharing one
+AudioContext does not make their clocks identical. The engine measures each
+stem separately. The video is the master timeline; AAC remains streamed, while
+only one video Blob is retained and revoked on track change.
 
-- **Remote control surface (`/remote`).** A touch-sized full mixer — six
-  stem faders, per-stem solo/mute, master volume, current-track readout —
-  with no video element and no audio graph. It exchanges small JSON frames
-  with the playing browser through the API's stateless `/api/remote/ws`
-  relay (device-token cookie auth; the relay repeats each frame to every
-  other client and interprets nothing). The playing browser is
-  authoritative: it applies inbound commands through the same store path as
-  local mixer moves and publishes throttled state snapshots. A remote is
-  receive-only until it has the connection's first authoritative snapshot —
-  commands queued while disconnected are dropped, never replayed — so a
-  late-joining or reconnecting remote cannot overwrite the live mix.
-- **Pipeline dashboard (`/dashboard`).** The pipeline board as a standalone
-  read-only page; the identical panel renders inside the player as a drawer.
+`window.__shizzlePlaybackHealth.getMetrics()` exposes read-only health,
+per-stem skew/PCM, output PCM, limiter reduction and bounded incidents. The
+mutating `window.__shizzle` engine/store hook exists only in development builds.
+Mixer preferences persist; use Reset when a known mix is needed for comparison.
+See [Testing](TESTING.md) for natural playback, repeated seeking, fault recovery,
+end/replay and listening acceptance.
 
-## 7. Finished media profile
+## Remote-control swim lanes
 
-- RunPod handoff: exactly six stereo 44.1 kHz IEEE float32 WAV stems with one
-  start sample and one sample count.
-- New browser stems: stereo M4A/AAC-LC, one common sample rate per track,
-  using a 44.1 kHz, 256 kb/s encoder target for every new lossless-derived
-  encode. Actual AAC average bitrate varies with the audio.
-- Complete browser generation: no more than 2.5 Mb/s average. The accepted
-  27-track range is 1.473–2.331 Mb/s.
-- Preserve already-passing aligned AAC rather than performing lossy
-  up-transcoding.
-- Apply only one common measured gain across all stems; never independently
-  normalize them.
-- Delivery video: audio-less MP4/H.264 Main 3.1, yuv420p, no more than
-  1280×720/30 fps, zero-based timestamps, two-second closed GOP, and fast-start.
-- Published layout: `tracks/<track-id>/<generation>/manifest.json`, `video.mp4`,
-  and `stems/{vocals,drums,bass,guitar,piano,shizzle}.m4a`.
+```mermaid
+sequenceDiagram
+    participant R as Remote page
+    participant W as API WebSocket relay
+    participant P as Playing browser
+    R->>W: Authenticated /api/remote/ws connection
+    R->>W: sync-request
+    W->>P: Forward frame
+    P->>W: state snapshot
+    W->>R: Forward snapshot
+    Note over R: Publish commands only after authoritative snapshot
+    R->>W: mix / mute / solo / master command
+    W->>P: Forward frame
+    Note over P: Validate command, update store, apply to engine
+    P->>W: Updated state snapshot
+    W->>R: Forward snapshot
+    Note over R,P: Disconnected commands are dropped, reconnect requests a new snapshot
+```
 
-## 8. Publication and failure behavior
+Sources: `api/remote.py` and `player/src/hooks/useRemoteSync.ts`.
+The relay is in-process fan-out with no stored mix or room routing. Every
+connected client shares it; the diagram shows one player and one remote.
+The playing browser owns state. The remote page has no playback audio graph.
+The deployment is single-user by design: one shared passcode, device tokens
+that carry no user identity, and one deployment-wide relay room. Any
+authenticated client can observe and control the playing browser, so the relay
+must not serve more than one trusted user without adding session routing.
 
-- Generations are immutable.
-- Media is verified before the manifest exists.
-- The manifest is the completion marker and is written last.
-- The database points only to a completely verified generation.
-- A failed candidate remains outside the library.
-- Retrying the same job is idempotent and cannot create partial accepted state.
-- Rejected or questionable material leaves no production-library row or
-  processing reservation. A documentation-only historical note may exist
-  outside the runtime.
+## Dashboard and operational checks
 
-## 9. Current proven state
+The shared `PipelinePanel` polls jobs and `/api/health` every five seconds while
+active, shows stage columns and recent outcomes, and loads the selected job's
+event timeline. Its duration baseline is currently a 40-second placeholder.
+It does not measure RunPod pool capacity or source-duration-specific baselines.
 
-- Production contains exactly 27 accepted tracks.
-- All 27 active generations pass `shizzle-browser-v1` artifact audits.
-- All 27 passed the final production Chromium stress and bounded-fault suites.
-- The Pot passed repeated natural playback, randomized seeking, live mixing,
-  recovery, natural end, and replay.
-- Direct browser sensing and first-party telemetry identify a stopped or failed
-  media path without relying on screenshots or external sensors.
-- Media, services, publication, and playback are cloud-hosted.
-
-This downstream portion is complete. Prior diagnostic runs remain useful as
-targeted troubleshooting procedures but are not open requirements.
-
-## 10. Next implementation sequence
-
-1. Change the worker to emit `lossless-stem-v1` and stop at that interface.
-2. Bake the `htdemucs_6s` model weights into the worker image.
-3. Re-enable a bounded RunPod worker pool and verify a golden job reaches
-   `COMPLETED` with the exact package in S3.
-4. Connect the production orchestrator to submit, poll, reconcile, and receive
-   completion callbacks.
-5. Make URL acquisition cloud-reliable; retain direct upload as a first-class
-   source path.
-6. Pass the resulting package into the finished VPS delivery pipeline.
-
-The remote control surface and standalone dashboard (§6) were built on this
-principle: they ride the existing store, relay, and delivery paths and do not
-alter or gate ingestion, delivery, or playback architecture.
-
-## 11. Authoritative records
-
-- [`README.md`](../README.md): simple current workflow and project status.
-- [`HANDOFF.md`](HANDOFF.md): live operational state and immediate
-  upstream work.
-- [`../interfaces/lossless-stem-v1/spec.md`](../interfaces/lossless-stem-v1/spec.md): exact
-  RunPod output and VPS input interface.
-- [`../interfaces/shizzle-browser-v1/spec.md`](../interfaces/shizzle-browser-v1/spec.md):
-  finished delivery contract.
-- [`../evidence/cloud-continuous-playback/evidence.md`](../evidence/cloud-continuous-playback/evidence.md): retained
-  measurements and failure-driven decisions.
-- [`provenance.md`](provenance.md): source-code provenance.
-- [`playback-troubleshooting.md`](playback-troubleshooting.md):
-  symptom-driven diagnostics and experiment index.
-- `evidence/spikes/`: troubleshooting experiments; informative, not current requirements.
+Production uses separate API/orchestrator services, Postgres and Caddy.
+Only the explicit release transaction migrates the production schema.
+[Invariants](INVARIANTS.md) documents the contracts; [Review](REVIEW.md)
+distinguishes their intended guarantees from reproduced implementation defects.

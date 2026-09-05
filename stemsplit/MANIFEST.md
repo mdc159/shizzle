@@ -1,6 +1,7 @@
 # RunPod lossless-stem handoff manifest
 
-Status: defined target output for the next RunPod implementation.
+Implemented by `lossless_worker.py` and `lossless_handler.py`, packaged by
+`Dockerfile.lossless`, and built by `.github/workflows/worker-image.yml`.
 
 The RunPod worker ends by handing the VPS `lossless-stem-v1`. It produces
 exactly six lossless float32 WAV stems and `handoff.json`. It does not produce
@@ -17,7 +18,8 @@ A complete example is
 ## Output layout
 
 ```text
-tracks/<track-id>/<generation>/separation/
+tracks/<track-id>/<generation>/separation/attempts/<sha256(idempotency_key)>/
+  dispatch.json
   handoff.json
   stems/
     vocals.wav
@@ -61,10 +63,30 @@ The worker uploads all six WAV objects first and writes `handoff.json` last.
 The manifest marks a complete RunPod output package, not a published library
 generation.
 
-## Current implementation gap
+`dispatch.json` is a receipt written before acquisition. It records the RunPod
+job ID, idempotency key, track, generation, and package prefix so the orchestrator
+can reconcile an ambiguous dispatch. It is not a completion marker. The base
+prefix can be supplied as `output_prefix`; the handler always appends the
+attempt hash. Local mode writes `handoff.json` and `stems/` directly to its
+chosen output directory and does not create a dispatch receipt.
 
-The present worker code continues past separation into AAC encoding, video
-derivation, and a delivery-shaped manifest. The next RunPod work changes that
-implementation to stop at `lossless-stem-v1`. The VPS then consumes the
-lossless package and runs the existing `shizzle-browser-v1` process with no
-song-specific alternate path.
+## Worker entry points and tests
+
+The production image copies only `lossless_worker.py`, `lossless_handler.py`,
+and their shared `s3_ops.py` helper. The older `handler.py`, `audio_processing.py`,
+`manifest.py`, `Dockerfile`, and `Dockerfile.reference` describe a separate
+combined separation/delivery worker and are not the production image entry
+point. Their existing tests still run; do not infer the deployed interface
+from those files.
+
+From the repository root, the CPU-safe tests and lint are:
+
+```powershell
+uv run --directory stemsplit pytest -q
+uv run --directory stemsplit ruff check .
+```
+
+These tests mock separation and storage. They do not prove a CUDA model run,
+RunPod allocation, or an end-to-end cloud publication. For the explicit local
+GPU proving procedure and cloud configuration, see
+[the RunPod runbook](../deploy/runpod/README.md).
