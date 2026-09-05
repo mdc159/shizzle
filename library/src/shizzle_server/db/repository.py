@@ -7,6 +7,7 @@ factory, so callers cannot half-commit orchestration state.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,8 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
 _DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
 _DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
 _LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+
+logger = logging.getLogger(__name__)
 
 
 def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
@@ -268,9 +271,32 @@ class JobRepository:
             return list(res.scalars().all())
 
     async def append_event(
-        self, job_id: uuid.UUID, event: str, detail: dict[str, Any] | None = None
+        self,
+        job_id: uuid.UUID,
+        event: str,
+        detail: dict[str, Any] | None = None,
+        *,
+        worker_id: str | None = None,
     ) -> None:
+        """Append an operational event to a job's history.
+
+        B2: when ``worker_id`` is given (worker-context callers), the append
+        is fenced — the job row is loaded under lock and nothing is recorded
+        unless that worker owns an unexpired lease, so an evicted worker
+        cannot leave misleading operational history. API and other
+        non-worker callers pass no ``worker_id`` and append unconditionally.
+        """
         async with self._sf() as session, session.begin():
+            if worker_id is not None:
+                job = await session.get(Job, job_id, with_for_update=True)
+                if job is None or not _lease_is_owned(job, worker_id, utcnow()):
+                    logger.debug(
+                        "job %s: skipped %s event from worker %s without a live lease",
+                        job_id,
+                        event,
+                        worker_id,
+                    )
+                    return
             session.add(JobEvent(job_id=job_id, event=event, detail=detail))
 
     # --- lease loop ----------------------------------------------------------

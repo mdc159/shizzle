@@ -215,6 +215,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     job.id,
                     "runpod_poll_failed",
                     {"error_code": exc.code.value, "detail": exc.detail[:500]},
+                    worker_id=ctx.worker_id,
                 )
             logger.warning("job %s: transient RunPod poll failure: %s", job.id, exc)
             return None
@@ -222,7 +223,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
 
         events = await ctx.jobs.list_events(job.id)
         if events and events[-1].event == "runpod_poll_failed":
-            await ctx.jobs.append_event(job.id, "runpod_poll_recovered")
+            await ctx.jobs.append_event(
+                job.id, "runpod_poll_recovered", worker_id=ctx.worker_id
+            )
 
         if status == "COMPLETED":
             output = status_payload.get("output")
@@ -243,7 +246,12 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     retryable=True,
                 )
             if not any(event.event == "worker_completed" for event in events):
-                await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
+                await ctx.jobs.append_event(
+                    job.id,
+                    "worker_completed",
+                    detail=detail,
+                    worker_id=ctx.worker_id,
+                )
             if dispatch_key is not None:
                 ctx.detail["package_prefix"] = cloud.attempt_prefix(
                     track_id, dispatch_key
@@ -338,6 +346,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 job.id,
                 "runpod_dispatch_recovered",
                 recovery_detail,
+                worker_id=ctx.worker_id,
             )
             ctx.park_seconds = ctx.settings.runpod_poll_seconds
             return None
@@ -353,6 +362,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     job.id,
                     "runpod_dispatch_recovered",
                     {"idempotency_key": dispatch_key, "source": "handoff.json"},
+                    worker_id=ctx.worker_id,
                 )
             ctx.detail["package_prefix"] = (
                 cloud.attempt_prefix(track_id, dispatch_key)
@@ -376,6 +386,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 job.id,
                 "runpod_dispatch_reconciliation_failed",
                 failure_detail,
+                worker_id=ctx.worker_id,
             )
             logger.error(
                 "job %s: RunPod dispatch identity unresolved after %.0fs; "

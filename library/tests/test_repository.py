@@ -450,6 +450,40 @@ async def test_expired_owner_cannot_record_worker_progress(job_repo, upload_job)
     assert [event.event for event in await job_repo.list_events(upload_job.id)] == ["created"]
 
 
+async def test_stale_worker_cannot_append_events_after_reclaim(job_repo, upload_job):
+    """B2 fence on worker-context event appends (PR 42 review): after B
+    reclaims, A's fenced append_event records nothing while B's lands;
+    unfenced (API/ops) callers append regardless of the lease."""
+    t0 = utcnow()
+    claimed_a = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+    assert claimed_a is not None and claimed_a.id == upload_job.id
+    reclaimed = await job_repo.claim_next(
+        worker_id="B", lease_seconds=300.0, now=t0 + timedelta(seconds=60)
+    )
+    assert reclaimed is not None and reclaimed.lease_owner == "B"
+    baseline = ["created", "lease_reclaimed"]  # B's reclaim is on the record
+
+    await job_repo.append_event(
+        upload_job.id, "worker_completed", {"by": "A"}, worker_id="A"
+    )
+    assert [e.event for e in await job_repo.list_events(upload_job.id)] == baseline
+
+    await job_repo.append_event(
+        upload_job.id, "worker_completed", {"by": "B"}, worker_id="B"
+    )
+    events = await job_repo.list_events(upload_job.id)
+    assert [e.event for e in events] == [*baseline, "worker_completed"]
+    assert events[-1].detail == {"by": "B"}
+
+    # Non-worker callers pass no worker_id: unchanged, unconditional append.
+    await job_repo.append_event(upload_job.id, "operator_note")
+    assert [e.event for e in await job_repo.list_events(upload_job.id)] == [
+        *baseline,
+        "worker_completed",
+        "operator_note",
+    ]
+
+
 async def test_stale_worker_cannot_fail_retry_or_advance_after_reclaim(job_repo, upload_job):
     """B2 fence on stage-outcome writes (issue #19 probe): after B reclaims
     A's expired lease, every A-attempted write is rejected and B's ownership

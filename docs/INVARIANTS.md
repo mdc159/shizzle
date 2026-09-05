@@ -162,10 +162,12 @@ scoped the same way. Stage-outcome writes are fenced identically (issue #19):
 `lease_owner == worker_id` with an unexpired lease (raising
 `InvalidTransition` otherwise), and `record_worker_progress` is a silent no-op
 for any caller without an unexpired lease it owns (owner plus expiry, the
-same rule). `confirm_dispatch` stays
+same rule). `append_event` is fenced the same way whenever a worker-context
+caller passes `worker_id` (skipped silently without a live lease); API and
+non-worker callers append unfenced. `confirm_dispatch` stays
 lease-independent by design (B4).
 - Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
+- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
   pair without re-reading owner and expiry under lock.
 
