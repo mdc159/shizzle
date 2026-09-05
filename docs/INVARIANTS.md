@@ -334,7 +334,7 @@ the hard identical-timeline invariant between stems.
 **Invariant:** There MUST be at most ONE common attenuation across stems —
 never per-stem, never a boost — with a true-peak ceiling of -1.0 dBTP.
 - Where: `library/src/shizzle_server/publish/lossless_intake.py`, `docs/architecture.md`
-- Guarded by: `library/tests/test_lossless_intake.py::test_common_gain_never_rounds_toward_zero`
+- Guarded by: `library/tests/test_lossless_intake.py::test_common_gain_never_rounds_toward_zero`, `player/e2e/manifest-trim.spec.ts` (player keeps the manifest trim under user fader changes and Reset mixer)
 - Violation smell: per-stem gain, or a gain above 1.0.
 
 ### D4 — browser generation ≤ 2.5 Mb/s average

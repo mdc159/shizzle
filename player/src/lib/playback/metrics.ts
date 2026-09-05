@@ -19,8 +19,12 @@ export interface StemMetrics {
   playbackRate: number;
   /** Hard-seek corrections applied to this stem since load. */
   hardSeeks: number;
-  /** Current linear gain of the stem's GainNode (0 = silenced by mute/solo). */
+  /** User fader gain in linear terms; 0 when silenced by mute/solo. Excludes
+   * the manifest trim — the rendered GainNode holds dbToLinear(trimDb) * this. */
   gainLinear: number;
+  /** Manifest `default_gain_db` captured at load (issue #25); the renderer
+   * combines it with the user fader as trimDb + gainDb in dB. */
+  trimDb: number;
   /** Direct PCM RMS after this stem's gain, before the shared master bus. */
   signalRmsDbfs: number | null;
   paused: boolean;
