@@ -83,6 +83,15 @@ async function renderedStemGains(page: Page): Promise<number[]> {
   return page.evaluate(() => (window.__e2eGainNodes ?? []).slice(1, 7).map((g) => g.gain.value));
 }
 
+/** The createGain hook must have captured exactly the master bus plus the six
+ *  stem gains; otherwise the every() polls below would pass vacuously on an
+ *  empty array and a broken hook would silently green the test. */
+async function expectCapturedGainNodes(page: Page): Promise<void> {
+  await expect
+    .poll(async () => page.evaluate(() => (window.__e2eGainNodes ?? []).length))
+    .toBe(7);
+}
+
 test('manifest trim survives store sync, fader moves, and Reset mixer', async ({ page }) => {
   test.setTimeout(120_000);
 
@@ -186,6 +195,7 @@ test('manifest trim survives store sync, fader moves, and Reset mixer', async ({
   // store sync — exactly the value the pre-fix code stomped to unity. The mute
   // check below also proves the isReady-guarded forwarding effect is live, so
   // the polls above really did observe the post-sync state.
+  await expectCapturedGainNodes(page);
   await expect
     .poll(async () => (await renderedStemGains(page)).every((v) => within(v, TRIM_LINEAR)))
     .toBe(true);
@@ -209,6 +219,7 @@ test('manifest trim survives store sync, fader moves, and Reset mixer', async ({
   expect((await metrics(page)).stems.vocals.trimDb).toBe(TRIM_DB);
   // Rendered: trim -12 dB + fader +12 dB = dbToLinear(0) for vocals, while the
   // untouched stems keep rendering the trim alone.
+  await expectCapturedGainNodes(page);
   await expect
     .poll(async () => {
       const rendered = await renderedStemGains(page);
@@ -229,6 +240,7 @@ test('manifest trim survives store sync, fader moves, and Reset mixer', async ({
   await expect
     .poll(async () => everyStem(page, (stem) => stem.trimDb === TRIM_DB))
     .toBe(true);
+  await expectCapturedGainNodes(page);
   await expect
     .poll(async () => (await renderedStemGains(page)).every((v) => within(v, TRIM_LINEAR)))
     .toBe(true);
