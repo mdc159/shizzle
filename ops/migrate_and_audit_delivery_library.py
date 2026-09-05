@@ -46,13 +46,14 @@ async def active_generation(database_url: str, track_id: str) -> int | None:
         await engine.dispose()
 
 
-def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+def run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         capture_output=True,
         text=True,
         timeout=7200,
         check=False,
+        env=env,
     )
 
 
@@ -80,6 +81,11 @@ def main() -> int:
     if not args.database_url:
         print("DATABASE_URL or --database-url is required", file=sys.stderr)
         return 2
+    # Children resolve their database from DATABASE_URL in their environment;
+    # propagating the resolved URL there keeps parent preflight/postflight and
+    # every child on one database without exposing the DSN in child argv
+    # (world-visible via process listings).
+    child_env = {**os.environ, "DATABASE_URL": args.database_url}
     snapshot = load_json(args.snapshot)
     selected = {str(uuid.UUID(value)) for value in args.track_id}
     tracks = [
@@ -148,7 +154,8 @@ def main() -> int:
                     "--track-id",
                     track_id,
                     "--publish",
-                ]
+                ],
+                child_env,
             )
             outcome["publish_stdout"] = publish.stdout[-2000:]
             if publish.returncode != 0:
@@ -174,7 +181,8 @@ def main() -> int:
                     str(snapshot_output),
                     "--report-output",
                     str(audit_output),
-                ]
+                ],
+                child_env,
             )
             outcome["audit_stdout"] = audit.stdout[-2000:]
             if audit.returncode != 0:
@@ -207,7 +215,8 @@ def main() -> int:
                         track_id,
                         "--publish",
                         "--activate",
-                    ]
+                    ],
+                    child_env,
                 )
                 outcome["activation_stdout"] = activation.stdout[-2000:]
                 if activation.returncode != 0:
