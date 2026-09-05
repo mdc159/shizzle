@@ -160,6 +160,31 @@ class TrackGenerationConflict(Exception):
         self.actual = actual
 
 
+class ImportConflict(Exception):
+    """An import would reset a migrated generation or resurrect a deleted track.
+
+    Only `activate_generation` (the C5 compare-and-swap path) may move the
+    active-generation pointer; restores of deleted tracks are explicit ops.
+    """
+
+    def __init__(self, track_id: uuid.UUID, generation: int, actual_generation: int,
+                 deleted: bool) -> None:
+        reasons = []
+        if actual_generation != generation:
+            reasons.append(f"active generation {actual_generation} != import generation "
+                           f"{generation}")
+        if deleted:
+            reasons.append("track is soft-deleted")
+        super().__init__(
+            f"track {track_id}: refusing import: {'; '.join(reasons)}. Use "
+            "activate_generation for generation changes or an explicit restore."
+        )
+        self.track_id = track_id
+        self.generation = generation
+        self.actual_generation = actual_generation
+        self.deleted = deleted
+
+
 class JobRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -800,9 +825,13 @@ class TrackRepository:
         through `JobRepository.publish_track` instead — that one also owns the
         publishing -> ready transition, which does not apply here.
 
-        Returns `(track, created)`. Idempotent: re-running the import with the
-        same deterministic `track_id` updates the existing row in place and
-        clears any soft delete, so the library converges rather than doubling.
+        Returns `(track, created)`. Idempotent for a live row at the same
+        generation: re-running the import with the same deterministic
+        `track_id` updates the existing row in place, so the library converges
+        rather than doubling. An existing row whose generation differs from
+        `generation`, or that is soft-deleted, is refused with
+        :class:`ImportConflict` — generation moves belong to
+        `activate_generation` (invariant C5) and restores are explicit.
         """
         async with self._sf() as session, session.begin():
             track = await session.get(Track, track_id, with_for_update=True)
@@ -810,6 +839,10 @@ class TrackRepository:
             if track is None:
                 track = Track(id=track_id, title=title, s3_prefix=s3_prefix, manifest_key="")
                 session.add(track)
+            elif track.generation != generation or track.deleted_at is not None:
+                raise ImportConflict(
+                    track_id, generation, track.generation, track.deleted_at is not None
+                )
             track.title = title
             track.artist = artist
             track.duration_seconds = duration_seconds

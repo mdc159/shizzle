@@ -58,7 +58,11 @@ sys.path.insert(0, str(REPO_ROOT / "library" / "src"))
 import boto3  # noqa: E402
 
 from shizzle_server.db import create_engine, create_session_factory  # noqa: E402
-from shizzle_server.db.repository import TrackRepository, track_id_for_import  # noqa: E402
+from shizzle_server.db.repository import (  # noqa: E402
+    ImportConflict,
+    TrackRepository,
+    track_id_for_import,
+)
 from shizzle_server.publish import (  # noqa: E402
     MANIFEST_NAME,
     Publisher,
@@ -251,7 +255,7 @@ class ImportOutcome:
     folder: str
     track_id: uuid.UUID
     title: str
-    status: str  # imported | already-published | skipped-degraded | failed
+    status: str  # imported | already-published | manifest-rewritten | skipped-degraded | skipped-invalid-stems | skipped-existing-advanced | skipped-deleted | dry-run | failed
     objects_copied: int = 0
     bytes_copied: int = 0
     elapsed_s: float = 0.0
@@ -405,8 +409,32 @@ async def import_folder(
         return outcome
 
     started = time.monotonic()
-    already = publisher.is_published(track_id, GENERATION)
     try:
+        # Issue #33, first line of defense: check the row BEFORE any S3 read or
+        # write, so a skipped rerun can neither mutate generation-1 storage
+        # (manifest rewrite, object copy) nor waste S3 traffic on it. The
+        # repository's ImportConflict guard at the upsert is the second line
+        # (race protection). Inside the try so a transient DB error fails only
+        # this folder, not the whole run.
+        if session_factory is not None:
+            repo = TrackRepository(session_factory)
+            existing = await repo.get(track_id)
+            if existing is not None and existing.deleted_at is not None:
+                outcome.status = "skipped-deleted"
+                outcome.reason = "row is soft-deleted; import would resurrect it"
+                outcome.elapsed_s = round(time.monotonic() - started, 2)
+                logger.warning("%s SKIPPED: %s", label, outcome.reason)
+                return outcome
+            if existing is not None and existing.generation != GENERATION:
+                outcome.status = "skipped-existing-advanced"
+                outcome.reason = (
+                    f"row at generation {existing.generation}, importer pins {GENERATION}"
+                )
+                outcome.elapsed_s = round(time.monotonic() - started, 2)
+                logger.warning("%s SKIPPED: %s", label, outcome.reason)
+                return outcome
+
+        already = publisher.is_published(track_id, GENERATION)
         if already and args.rewrite_manifests:
             # Deliberate, opt-in exception to generation immutability: correct
             # the manifest of a generation that nothing has served yet. Safe
@@ -440,16 +468,25 @@ async def import_folder(
             return outcome
 
         repo = TrackRepository(session_factory)
-        _, created = await repo.upsert_imported(
-            track_id,
-            title=title,
-            artist=str(manifest["artist"]),
-            duration_seconds=float(manifest["duration"]),
-            s3_prefix=generation_prefix(track_id, GENERATION).rstrip("/"),
-            manifest_key=manifest_key(track_id, GENERATION),
-            generation=GENERATION,
-            integrity={**LEGACY_INTEGRITY, "legacy_folder": folder.name},
-        )
+        try:
+            _, created = await repo.upsert_imported(
+                track_id,
+                title=title,
+                artist=str(manifest["artist"]),
+                duration_seconds=float(manifest["duration"]),
+                s3_prefix=generation_prefix(track_id, GENERATION).rstrip("/"),
+                manifest_key=manifest_key(track_id, GENERATION),
+                generation=GENERATION,
+                integrity={**LEGACY_INTEGRITY, "legacy_folder": folder.name},
+            )
+        except ImportConflict as exc:
+            # e.g. a soft-deleted duplicate: the decision stands, do not
+            # resurrect it and do not fail the whole run (issue #33).
+            outcome.status = "skipped-deleted" if exc.deleted else "skipped-existing-advanced"
+            outcome.reason = f"ImportConflict: {exc}"
+            outcome.elapsed_s = round(time.monotonic() - started, 2)
+            logger.warning("%s SKIPPED: %s", label, outcome.reason)
+            return outcome
         outcome.row_created = created
         outcome.elapsed_s = round(time.monotonic() - started, 2)
         logger.info(
