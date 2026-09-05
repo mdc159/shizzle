@@ -33,7 +33,7 @@ jobs:
       - run: uv run --directory library pytest -q -m "not postgres"
       # ops/tests is outside library's configured testpaths; run the ops
       # normalization tests explicitly in the library environment.
-      - run: uv run --directory library pytest ../ops/tests/test_normalize_track_metadata.py -q
+      - run: uv run --directory library pytest ../ops/tests/test_normalize_track_metadata.py ../ops/tests/test_migrate_and_audit_delivery_library.py -q
       - run: uv run --directory library ruff check .
       # Pre-existing strict-mode typing debt, tracked after PR #1.
       # Informational until the debt follow-up lands; then remove this flag.
