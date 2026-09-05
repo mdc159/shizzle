@@ -197,10 +197,20 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 stalled_for is not None
                 and stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — a stale worker must not cancel the new
+                    # owner's RunPod job or fail its job; yield (the loop's
+                    # park/release no-op on the owner guard).
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(
                     ctx, job.runpod_job_id, reason="stale worker heartbeat"
                 )
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise
             # wave3 #3: dedup runpod_poll_failed to one row per outage, like the
             # bounded history in record_worker_progress. The most recent event
@@ -213,6 +223,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     job.id,
                     "runpod_poll_failed",
                     {"error_code": exc.code.value, "detail": exc.detail[:500]},
+                    worker_id=ctx.worker_id,
                 )
             logger.warning("job %s: transient RunPod poll failure: %s", job.id, exc)
             return None
@@ -220,7 +231,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
 
         events = await ctx.jobs.list_events(job.id)
         if events and events[-1].event == "runpod_poll_failed":
-            await ctx.jobs.append_event(job.id, "runpod_poll_recovered")
+            await ctx.jobs.append_event(
+                job.id, "runpod_poll_recovered", worker_id=ctx.worker_id
+            )
 
         if status == "COMPLETED":
             output = status_payload.get("output")
@@ -234,14 +247,21 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if detail.get("status") == "SUPERSEDED" and not await cloud.package_ready(
                 ctx, idempotency_key=dispatch_key
             ):
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_DISPATCH_FAILED,
                     f"RunPod job {job.runpod_job_id} SUPERSEDED without handoff.json",
                     retryable=True,
                 )
             if not any(event.event == "worker_completed" for event in events):
-                await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
+                await ctx.jobs.append_event(
+                    job.id,
+                    "worker_completed",
+                    detail=detail,
+                    worker_id=ctx.worker_id,
+                )
             if dispatch_key is not None:
                 ctx.detail["package_prefix"] = cloud.attempt_prefix(
                     track_id, dispatch_key
@@ -249,7 +269,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             return JobStage.verifying
 
         if status in ("FAILED", "CANCELLED", "TIMED_OUT"):
-            await ctx.jobs.record_worker_progress(job.id, phase="failed")
+            await ctx.jobs.record_worker_progress(
+                job.id, phase="failed", worker_id=ctx.worker_id
+            )
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,
                 f"RunPod job {job.runpod_job_id} {status}: {_runpod_error(status_payload)}",
@@ -259,15 +281,25 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         if status == "IN_QUEUE":
             queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — never cancel the new owner's RunPod job.
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="queue timeout")
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,
                     f"RunPod queued {queued_for:.0f}s > "
                     f"{ctx.settings.runpod_queue_timeout_seconds:.0f}s",
                     retryable=True,
                 )
-            await ctx.jobs.record_worker_progress(job.id, phase="queued")
+            await ctx.jobs.record_worker_progress(
+                job.id, phase="queued", worker_id=ctx.worker_id
+            )
             return None
 
         if status == "IN_PROGRESS":
@@ -275,8 +307,16 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if stalled_for is not None and (
                 stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — never cancel the new owner's RunPod job.
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="worker stall")
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_TIMEOUT,
                     f"RunPod worker stalled (heartbeat age > "
@@ -284,7 +324,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     retryable=True,
                 )
             if phase:
-                await ctx.jobs.record_worker_progress(job.id, phase=phase)
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase=phase, worker_id=ctx.worker_id
+                )
             return None
 
         return None  # unknown status — park and re-poll next interval
@@ -326,6 +368,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 job.id,
                 "runpod_dispatch_recovered",
                 recovery_detail,
+                worker_id=ctx.worker_id,
             )
             ctx.park_seconds = ctx.settings.runpod_poll_seconds
             return None
@@ -341,6 +384,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                     job.id,
                     "runpod_dispatch_recovered",
                     {"idempotency_key": dispatch_key, "source": "handoff.json"},
+                    worker_id=ctx.worker_id,
                 )
             ctx.detail["package_prefix"] = (
                 cloud.attempt_prefix(track_id, dispatch_key)
@@ -364,6 +408,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 job.id,
                 "runpod_dispatch_reconciliation_failed",
                 failure_detail,
+                worker_id=ctx.worker_id,
             )
             logger.error(
                 "job %s: RunPod dispatch identity unresolved after %.0fs; "
@@ -483,6 +528,7 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
     try:
         await ctx.jobs.publish_track(
             ctx.job.id,
+            worker_id=ctx.worker_id,
             title=manifest.get("title") or ctx.job.title or ctx.job.id.hex,
             artist=manifest.get("artist") or ctx.job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0)),
@@ -492,6 +538,9 @@ async def handle_publishing(ctx: StageContext) -> JobStage:
             integrity=manifest.get("integrity"),
         )
     except StageError:
+        raise
+    except InvalidTransition:
+        # Lost lease: the loop's InvalidTransition handling yields the job.
         raise
     except PublishRefusedError as e:
         # Deterministic: re-running cannot change the refused location.

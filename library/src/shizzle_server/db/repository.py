@@ -7,6 +7,7 @@ factory, so callers cannot half-commit orchestration state.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -55,6 +56,8 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
 _DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
 _DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
 _LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+
+logger = logging.getLogger(__name__)
 
 
 def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
@@ -148,6 +151,24 @@ class InvalidTransition(Exception):
         super().__init__(f"job {job_id}: illegal transition {current} -> {target}")
         self.current = current
         self.target = target
+
+
+def _lease_is_owned(job: Job, worker_id: str, now: datetime) -> bool:
+    """B2 ownership test: the caller must be the recorded owner of an
+    unexpired lease (None or past expiry fails, mirroring record_dispatch)."""
+    lease_expires_at = _aware(job.lease_expires_at)
+    return (
+        job.lease_owner == worker_id
+        and lease_expires_at is not None
+        and lease_expires_at > now
+    )
+
+
+def _require_lease(job: Job, worker_id: str, target: JobStage, now: datetime) -> None:
+    """B2 fence for stage-outcome writes: inside the locked transaction, the
+    caller must still own an unexpired lease, exactly like record_dispatch."""
+    if not _lease_is_owned(job, worker_id, now):
+        raise InvalidTransition(job.id, job.status, target)
 
 
 class TrackGenerationConflict(Exception):
@@ -250,9 +271,32 @@ class JobRepository:
             return list(res.scalars().all())
 
     async def append_event(
-        self, job_id: uuid.UUID, event: str, detail: dict[str, Any] | None = None
+        self,
+        job_id: uuid.UUID,
+        event: str,
+        detail: dict[str, Any] | None = None,
+        *,
+        worker_id: str | None = None,
     ) -> None:
+        """Append an operational event to a job's history.
+
+        B2: when ``worker_id`` is given (worker-context callers), the append
+        is fenced — the job row is loaded under lock and nothing is recorded
+        unless that worker owns an unexpired lease, so an evicted worker
+        cannot leave misleading operational history. API and other
+        non-worker callers pass no ``worker_id`` and append unconditionally.
+        """
         async with self._sf() as session, session.begin():
+            if worker_id is not None:
+                job = await session.get(Job, job_id, with_for_update=True)
+                if job is None or not _lease_is_owned(job, worker_id, utcnow()):
+                    logger.debug(
+                        "job %s: skipped %s event from worker %s without a live lease",
+                        job_id,
+                        event,
+                        worker_id,
+                    )
+                    return
             session.add(JobEvent(job_id=job_id, event=event, detail=detail))
 
     # --- lease loop ----------------------------------------------------------
@@ -477,12 +521,23 @@ class JobRepository:
                 )
             )
 
-    async def record_worker_progress(self, job_id: uuid.UUID, *, phase: str) -> bool:
-        """Record only worker phase changes, keeping heartbeat history bounded."""
+    async def record_worker_progress(
+        self, job_id: uuid.UUID, *, phase: str, worker_id: str
+    ) -> bool:
+        """Record only worker phase changes, keeping heartbeat history bounded.
+
+        B2 sibling: only the owner of an unexpired lease may write — an
+        expired-but-unreclaimed lease must not pass dead work off as live.
+        A caller without a live lease is a stale poller; its write is a
+        silent no-op rather than an error, so polling survives a reclaim
+        without corrupting the new owner's heartbeat trail.
+        """
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
                 raise LookupError(f"job {job_id} does not exist")
+            if not _lease_is_owned(job, worker_id, utcnow()):
+                return False
             if job.worker_phase == phase:
                 # A stable work phase still proves liveness. Queue age is the
                 # exception: its first heartbeat is the durable entry time used
@@ -499,12 +554,24 @@ class JobRepository:
             session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
             return True
 
+    async def owns_lease(self, job_id: uuid.UUID, worker_id: str) -> bool:
+        """B2 predicate: does this worker own the job's unexpired lease now?
+
+        For callers that gate remote effects (e.g. cancelling the RunPod job)
+        rather than writes: unlike ``record_worker_progress`` it cannot
+        conflate "not owner" with "phase unchanged".
+        """
+        async with self._sf() as session:
+            job = await session.get(Job, job_id)
+            return job is not None and _lease_is_owned(job, worker_id, utcnow())
+
     # --- state machine -------------------------------------------------------
 
     async def advance(
         self,
         job_id: uuid.UUID,
         *,
+        worker_id: str,
         from_stage: JobStage,
         to_stage: JobStage,
         duration_s: float | None = None,
@@ -515,13 +582,15 @@ class JobRepository:
         """Move a job one legal step forward; records timing and an event.
 
         Raises InvalidTransition when the row is not in `from_stage` anymore
-        (e.g. a duplicate completion from a stale worker) — callers treat that
-        as a no-op signal, and no state is modified.
+        (e.g. a duplicate completion from a stale worker) or when the caller
+        does not own an unexpired lease (B2) — callers treat both as a no-op
+        signal, and no state is modified.
         """
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
                 raise InvalidTransition(job_id, JobStage.failed, to_stage)
+            _require_lease(job, worker_id, to_stage, utcnow())
             if job.status != from_stage or to_stage not in ALLOWED_TRANSITIONS[job.status]:
                 raise InvalidTransition(job_id, job.status, to_stage)
             job.status = to_stage
@@ -562,12 +631,19 @@ class JobRepository:
         error_detail: str,
         retry_in_seconds: float,
     ) -> Job:
-        """Record a retryable failure: attempt += 1, next_retry_at set, lease freed."""
-        now = utcnow()
+        """Record a retryable failure: attempt += 1, next_retry_at set, lease freed.
+
+        B2: requires an unexpired lease owned by `worker_id`; a stale worker
+        cannot burn an attempt or erase the new owner's lease.
+        """
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None or job.status in TERMINAL_STAGES:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            # B2: the expiry comparison uses a timestamp taken after the row
+            # lock is held, so a lock wait cannot make an expired lease pass.
+            now = utcnow()
+            _require_lease(job, worker_id, JobStage.failed, now)
             job.attempt += 1
             job.next_retry_at = now + timedelta(seconds=retry_in_seconds)
             job.error_code = error_code.value
@@ -597,15 +673,21 @@ class JobRepository:
         *,
         error_code: ErrorCode,
         error_detail: str,
-        worker_id: str | None = None,
+        worker_id: str,
     ) -> Job:
-        """Terminal failure from any non-terminal stage; idempotent on re-call."""
+        """Terminal failure from any non-terminal stage; idempotent on re-call.
+
+        B2: `worker_id` is an ownership credential — the failure only lands if
+        that worker still holds an unexpired lease. A duplicate report for an
+        already-failed job remains a no-op regardless of the lease.
+        """
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
             if job.status == JobStage.failed:
                 return job  # duplicate failure report — no-op
+            _require_lease(job, worker_id, JobStage.failed, utcnow())
             if job.status == JobStage.ready:
                 raise InvalidTransition(job_id, job.status, JobStage.failed)
             from_stage = job.status
@@ -636,6 +718,7 @@ class JobRepository:
         self,
         job_id: uuid.UUID,
         *,
+        worker_id: str,
         title: str,
         artist: str = "",
         duration_seconds: float,
@@ -649,12 +732,19 @@ class JobRepository:
 
         Idempotent: the track id is derived deterministically from the job id,
         so a crashed-and-rerun publishing stage (or a duplicate completion
-        event) converges on the same row and does not double-publish.
+        event) converges on the same row and does not double-publish. A
+        duplicate completion (job already ready, track row present) is a full
+        no-write no-op: a ready job holds no lease, so its only possible
+        caller is a stale writer, and B2 forbids stale event writes.
 
         Invariant C7: a location outside ``tracks/`` or without a
         ``/manifest.json`` key is refused — a ``publish_refused`` job event
         is recorded and :class:`PublishRefusedError` raised instead of
         publishing a phantom row.
+
+        B2: ``worker_id`` must own an unexpired lease on every path that
+        writes; a stale worker cannot record a refusal, clear the new
+        owner's lease, or flip the job to ready.
         """
         problem = track_location_problem(s3_prefix, manifest_key)
         if problem is not None:
@@ -666,8 +756,13 @@ class JobRepository:
                 # crash after this commit but before the stage fails the job
                 # re-runs publish_track; the refusal is deterministic, so
                 # record it once rather than appending a duplicate
-                # publish_refused event per retry.
-                await session.get(Job, job_id, with_for_update=True)
+                # publish_refused event per retry. B2: the event is a write,
+                # so the lease fence runs under the same lock first — a
+                # stale worker must not touch the new owner's history.
+                job = await session.get(Job, job_id, with_for_update=True)
+                if job is None:
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.ready)
+                _require_lease(job, worker_id, JobStage.ready, utcnow())
                 already = await session.execute(
                     select(JobEvent).where(
                         JobEvent.job_id == job_id, JobEvent.event == "publish_refused"
@@ -691,6 +786,7 @@ class JobRepository:
             return await self._publish_track_once(
                 job_id,
                 tid,
+                worker_id=worker_id,
                 title=title,
                 artist=artist,
                 duration_seconds=duration_seconds,
@@ -713,6 +809,7 @@ class JobRepository:
         job_id: uuid.UUID,
         tid: uuid.UUID,
         *,
+        worker_id: str,
         title: str,
         artist: str,
         duration_seconds: float,
@@ -729,16 +826,14 @@ class JobRepository:
 
             existing = await session.get(Track, tid)
             if existing is not None and job.status == JobStage.ready:
-                # Duplicate completion — full no-op.
-                session.add(
-                    JobEvent(
-                        job_id=job_id,
-                        event="duplicate_completion_ignored",
-                        detail={"track_id": str(tid)},
-                    )
-                )
+                # Duplicate completion — full no-op, and deliberately no
+                # event: a ready job holds no lease (publish_track cleared
+                # it), so any completion arriving now is from a stale writer
+                # and B2 forbids stale writes. The idempotent return still
+                # converges crash-reruns on the committed row.
                 return existing
 
+            _require_lease(job, worker_id, JobStage.ready, utcnow())
             if job.status != JobStage.publishing:
                 raise InvalidTransition(job_id, job.status, JobStage.ready)
 

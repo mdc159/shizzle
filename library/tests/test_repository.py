@@ -16,6 +16,7 @@ from shizzle_server.db.repository import (
     pending_runpod_dispatch,
     track_id_for_job,
 )
+from shizzle_server.errors import ErrorCode
 
 
 async def test_create_and_get_job(job_repo):
@@ -93,21 +94,19 @@ async def test_events_append_only_ordering(job_repo, upload_job):
 
 
 async def test_track_soft_delete_and_library_filter(job_repo, track_repo, upload_job):
-    # Drive the job to publishing so publish_track is legal.
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.splitting
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.splitting, to_stage=JobStage.verifying
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.verifying, to_stage=JobStage.publishing
-    )
+    # Claim the lease, then drive the job to publishing so publish_track is legal.
+    claimed = await job_repo.claim_next(worker_id="owner", lease_seconds=120)
+    assert claimed is not None and claimed.id == upload_job.id
+    for a, b in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.splitting),
+        (JobStage.splitting, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b, worker_id="owner")
     track = await job_repo.publish_track(
         upload_job.id,
+        worker_id="owner",
         title="Test Track",
         duration_seconds=12.5,
         s3_prefix=f"tracks/{track_id_for_job(upload_job.id)}/1",
@@ -226,13 +225,19 @@ async def test_park_frees_lease_without_consuming_attempt_or_adding_event(job_re
 
 
 async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job):
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="worker-a",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="worker-a",
+    )
     await job_repo.record_dispatch(
         upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
     )
@@ -243,8 +248,12 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
     first_heartbeat = dispatched.worker_heartbeat_at
     assert first_heartbeat is not None
 
-    assert await job_repo.record_worker_progress(upload_job.id, phase="dispatched") is False
-    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is True
+    assert await job_repo.record_worker_progress(
+        upload_job.id, phase="dispatched", worker_id="worker-a"
+    ) is False
+    assert await job_repo.record_worker_progress(
+        upload_job.id, phase="separate", worker_id="worker-a"
+    ) is True
     changed = await job_repo.get_job(upload_job.id)
     assert changed is not None
     assert changed.worker_phase == "separate"
@@ -253,7 +262,9 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
 
     changed_heartbeat = changed.worker_heartbeat_at
     await asyncio.sleep(0.001)
-    assert await job_repo.record_worker_progress(upload_job.id, phase="separate") is False
+    assert await job_repo.record_worker_progress(
+        upload_job.id, phase="separate", worker_id="worker-a"
+    ) is False
     refreshed = await job_repo.get_job(upload_job.id)
     assert refreshed is not None and refreshed.worker_heartbeat_at > changed_heartbeat
     events = await job_repo.list_events(upload_job.id)
@@ -273,13 +284,19 @@ async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_rep
             upload_job.id, worker_id="worker-a", runpod_job_id="runpod-1"
         )
 
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="worker-a",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="worker-a",
+    )
     with pytest.raises(InvalidTransition):
         await job_repo.record_dispatch(
             upload_job.id, worker_id="worker-b", runpod_job_id="runpod-1"
@@ -287,13 +304,19 @@ async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_rep
 
 
 async def test_record_dispatch_rejects_expired_or_missing_lease(job_repo, upload_job):
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="worker-a",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="worker-a",
+    )
 
     for expiry in (utcnow() - timedelta(seconds=1), None):
         async with job_repo._sf() as session, session.begin():
@@ -308,13 +331,19 @@ async def test_record_dispatch_rejects_expired_or_missing_lease(job_repo, upload
 async def test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover(
     job_repo, upload_job
 ):
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="worker-a",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="worker-a",
+    )
     dispatch_key = f"{upload_job.id.hex}:0"
 
     assert await job_repo.reserve_dispatch(
@@ -362,11 +391,18 @@ async def test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover
 async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
     job_repo, upload_job
 ):
+    await job_repo.claim_next(worker_id="worker-after-upgrade", lease_seconds=60)
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="worker-after-upgrade",
     )
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="worker-after-upgrade",
     )
     await job_repo.append_event(
         upload_job.id,
@@ -390,6 +426,174 @@ async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
     assert pending_runpod_dispatch(
         await job_repo.list_events(upload_job.id)
     ) is None
+
+
+async def test_expired_owner_cannot_record_worker_progress(job_repo, upload_job):
+    """B2 sibling (PR 42 review): a worker whose lease has expired but has
+    not yet been reclaimed is still the recorded owner — its progress write
+    must be ignored so dead work cannot look live."""
+    t0 = utcnow() - timedelta(seconds=120)
+    claimed = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+    assert claimed is not None and claimed.id == upload_job.id
+    # A is still lease_owner, but the lease expired ~115 s ago.
+    assert claimed.lease_owner == "A"
+
+    assert (
+        await job_repo.record_worker_progress(
+            upload_job.id, phase="separating", worker_id="A"
+        )
+        is False
+    )
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase is None
+    assert job.worker_heartbeat_at is None
+    assert [event.event for event in await job_repo.list_events(upload_job.id)] == ["created"]
+
+
+async def test_stale_worker_cannot_append_events_after_reclaim(job_repo, upload_job):
+    """B2 fence on worker-context event appends (PR 42 review): after B
+    reclaims, A's fenced append_event records nothing while B's lands;
+    unfenced (API/ops) callers append regardless of the lease."""
+    t0 = utcnow()
+    claimed_a = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+    assert claimed_a is not None and claimed_a.id == upload_job.id
+    reclaimed = await job_repo.claim_next(
+        worker_id="B", lease_seconds=300.0, now=t0 + timedelta(seconds=60)
+    )
+    assert reclaimed is not None and reclaimed.lease_owner == "B"
+    baseline = ["created", "lease_reclaimed"]  # B's reclaim is on the record
+
+    await job_repo.append_event(
+        upload_job.id, "worker_completed", {"by": "A"}, worker_id="A"
+    )
+    assert [e.event for e in await job_repo.list_events(upload_job.id)] == baseline
+
+    await job_repo.append_event(
+        upload_job.id, "worker_completed", {"by": "B"}, worker_id="B"
+    )
+    events = await job_repo.list_events(upload_job.id)
+    assert [e.event for e in events] == [*baseline, "worker_completed"]
+    assert events[-1].detail == {"by": "B"}
+
+    # Non-worker callers pass no worker_id: unchanged, unconditional append.
+    await job_repo.append_event(upload_job.id, "operator_note")
+    assert [e.event for e in await job_repo.list_events(upload_job.id)] == [
+        *baseline,
+        "worker_completed",
+        "operator_note",
+    ]
+
+
+async def test_stale_worker_cannot_fail_retry_or_advance_after_reclaim(job_repo, upload_job):
+    """B2 fence on stage-outcome writes (issue #19 probe): after B reclaims
+    A's expired lease, every A-attempted write is rejected and B's ownership
+    plus the job state survive untouched."""
+    t0 = utcnow()
+    claimed_a = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+    assert claimed_a is not None and claimed_a.id == upload_job.id
+    reclaimed = await job_repo.claim_next(
+        worker_id="B", lease_seconds=300.0, now=t0 + timedelta(seconds=60)
+    )
+    assert reclaimed is not None and reclaimed.lease_owner == "B"
+
+    with pytest.raises(InvalidTransition):
+        await job_repo.fail_job(
+            upload_job.id,
+            error_code=ErrorCode.INTERNAL,
+            error_detail="stale worker failure",
+            worker_id="A",
+        )
+    survived = await job_repo.get_job(upload_job.id)
+    assert survived.status is JobStage.pending
+    assert survived.lease_owner == "B"
+    assert survived.attempt == 0
+
+    with pytest.raises(InvalidTransition):
+        await job_repo.schedule_retry(
+            upload_job.id,
+            worker_id="A",
+            error_code=ErrorCode.DEMUCS_FAILED,
+            error_detail="stale worker retry",
+            retry_in_seconds=30,
+        )
+    survived = await job_repo.get_job(upload_job.id)
+    assert survived.status is JobStage.pending
+    assert survived.lease_owner == "B"
+    assert survived.attempt == 0
+    assert survived.next_retry_at is None
+
+    with pytest.raises(InvalidTransition):
+        await job_repo.advance(
+            upload_job.id,
+            from_stage=JobStage.pending,
+            to_stage=JobStage.downloading,
+            worker_id="A",
+        )
+    survived = await job_repo.get_job(upload_job.id)
+    assert survived.status is JobStage.pending
+    assert survived.lease_owner == "B"
+
+    # Walk B to publishing so the ownership fence — not the stage guard —
+    # is what rejects A's publish.
+    for a, b in [
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.splitting),
+        (JobStage.splitting, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ]:
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b, worker_id="B")
+    tid = track_id_for_job(upload_job.id)
+    with pytest.raises(InvalidTransition):
+        await job_repo.publish_track(
+            upload_job.id,
+            worker_id="A",
+            title="Stale Publish",
+            duration_seconds=1.0,
+            s3_prefix=f"tracks/{tid}/1",
+            manifest_key=f"tracks/{tid}/1/manifest.json",
+        )
+    survived = await job_repo.get_job(upload_job.id)
+    assert survived.status is JobStage.publishing
+    assert survived.lease_owner == "B"
+    assert survived.track_id is None
+
+    # The C7 refusal path writes an event, so it is fenced the same way: A's
+    # invalid-location publish raises instead of recording publish_refused.
+    with pytest.raises(InvalidTransition):
+        await job_repo.publish_track(
+            upload_job.id,
+            worker_id="A",
+            title="Stale Phantom",
+            duration_seconds=1.0,
+            s3_prefix=f"local/{upload_job.id.hex}",
+            manifest_key=f"local/{upload_job.id.hex}/stems.json",
+        )
+    assert not any(
+        event.event == "publish_refused"
+        for event in await job_repo.list_events(upload_job.id)
+    )
+    survived = await job_repo.get_job(upload_job.id)
+    assert survived.status is JobStage.publishing
+    assert survived.lease_owner == "B"
+
+    # Lower-severity sibling: A's progress poll is a silent no-op.
+    assert (
+        await job_repo.record_worker_progress(
+            upload_job.id, phase="separating", worker_id="B"
+        )
+        is True
+    )
+    b_view = await job_repo.get_job(upload_job.id)
+    assert b_view.worker_phase == "separating"
+    assert (
+        await job_repo.record_worker_progress(
+            upload_job.id, phase="downloading", worker_id="A"
+        )
+        is False
+    )
+    after = await job_repo.get_job(upload_job.id)
+    assert after.worker_phase == "separating"
+    assert after.worker_heartbeat_at == b_view.worker_heartbeat_at
 
 
 async def test_keyed_confirmation_does_not_clear_legacy_pending_dispatch(

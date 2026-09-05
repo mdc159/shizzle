@@ -27,8 +27,11 @@ def test_transition_map_covers_all_stages():
 
 
 async def test_advance_happy_path_records_timings(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="advance-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     job = await job_repo.advance(
         upload_job.id,
+        worker_id="advance-test",
         from_stage=JobStage.pending,
         to_stage=JobStage.downloading,
         duration_s=0.5,
@@ -38,6 +41,7 @@ async def test_advance_happy_path_records_timings(job_repo, upload_job):
 
     job = await job_repo.advance(
         upload_job.id,
+        worker_id="advance-test",
         from_stage=JobStage.downloading,
         to_stage=JobStage.splitting,
         duration_s=1.25,
@@ -52,17 +56,28 @@ async def test_advance_happy_path_records_timings(job_repo, upload_job):
 
 
 async def test_illegal_transition_rejected(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="advance-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     with pytest.raises(InvalidTransition):
         await job_repo.advance(
-            upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.ready
+            upload_job.id,
+            worker_id="advance-test",
+            from_stage=JobStage.pending,
+            to_stage=JobStage.ready,
         )
     # Stale from_stage (double-advance) is also rejected
     await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+        upload_job.id,
+        worker_id="advance-test",
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
     )
     with pytest.raises(InvalidTransition):
         await job_repo.advance(
-            upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+            upload_job.id,
+            worker_id="advance-test",
+            from_stage=JobStage.pending,
+            to_stage=JobStage.downloading,
         )
     # And the state was not corrupted
     job = await job_repo.get_job(upload_job.id)
@@ -70,6 +85,8 @@ async def test_illegal_transition_rejected(job_repo, upload_job):
 
 
 async def test_schedule_retry_increments_attempt_and_sets_backoff(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="w1", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     job = await job_repo.schedule_retry(
         upload_job.id,
         worker_id="w1",
@@ -90,14 +107,22 @@ async def test_schedule_retry_increments_attempt_and_sets_backoff(job_repo, uplo
 
 
 async def test_fail_job_terminal_and_idempotent(job_repo, upload_job):
+    claimed = await job_repo.claim_next(worker_id="w1", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
     job = await job_repo.fail_job(
-        upload_job.id, error_code=ErrorCode.YTDLP_BLOCKED, error_detail="stub"
+        upload_job.id,
+        error_code=ErrorCode.YTDLP_BLOCKED,
+        error_detail="stub",
+        worker_id="w1",
     )
     assert job.status == JobStage.failed
     assert job.error_code == "YTDLP_BLOCKED"
     # Duplicate failure report: no-op, still exactly one failed event
     await job_repo.fail_job(
-        upload_job.id, error_code=ErrorCode.YTDLP_BLOCKED, error_detail="stub again"
+        upload_job.id,
+        error_code=ErrorCode.YTDLP_BLOCKED,
+        error_detail="stub again",
+        worker_id="w1",
     )
     events = await job_repo.list_events(upload_job.id)
     assert [e.event for e in events].count("failed") == 1

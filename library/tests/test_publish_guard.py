@@ -59,14 +59,19 @@ def test_allow_test_pipeline_defaults_off():
 # --- layer 2: publish_track refuses phantom locations -------------------------
 
 
-async def _publishing_job(job_repo, upload_job):
+GUARD_WORKER = "guard-test"
+
+
+async def _publishing_job(job_repo, upload_job, worker_id=GUARD_WORKER):
+    claimed = await job_repo.claim_next(worker_id=worker_id, lease_seconds=120)
+    assert claimed is not None and claimed.id == upload_job.id
     for a, b in [
         (JobStage.pending, JobStage.downloading),
         (JobStage.downloading, JobStage.splitting),
         (JobStage.splitting, JobStage.verifying),
         (JobStage.verifying, JobStage.publishing),
     ]:
-        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b)
+        await job_repo.advance(upload_job.id, from_stage=a, to_stage=b, worker_id=worker_id)
     return upload_job
 
 
@@ -79,6 +84,7 @@ async def test_publish_track_refuses_local_prefix_and_records_event(
     with pytest.raises(PublishRefusedError, match="not under tracks/"):
         await job_repo.publish_track(
             upload_job.id,
+            worker_id=GUARD_WORKER,
             title="Phantom",
             duration_seconds=1.0,
             s3_prefix=f"local/{upload_job.id.hex}",
@@ -106,6 +112,7 @@ async def test_publish_track_refuses_non_manifest_key(job_repo, track_repo, uplo
     with pytest.raises(PublishRefusedError, match="manifest.json"):
         await job_repo.publish_track(
             upload_job.id,
+            worker_id=GUARD_WORKER,
             title="Phantom",
             duration_seconds=1.0,
             s3_prefix=f"tracks/{track_id_for_job(upload_job.id)}/1",
@@ -119,6 +126,7 @@ async def test_publish_track_accepts_real_published_location(job_repo, track_rep
     tid = track_id_for_job(upload_job.id)
     track = await job_repo.publish_track(
         upload_job.id,
+        worker_id=GUARD_WORKER,
         title="Real",
         duration_seconds=12.5,
         s3_prefix=f"tracks/{tid}/1",
@@ -134,6 +142,7 @@ async def test_publish_track_refuses_bare_tracks_prefix(job_repo, track_repo, up
     with pytest.raises(PublishRefusedError, match="not under tracks/"):
         await job_repo.publish_track(
             upload_job.id,
+            worker_id=GUARD_WORKER,
             title="Phantom",
             duration_seconds=1.0,
             s3_prefix="tracks/",
@@ -152,6 +161,7 @@ async def test_publish_track_refuses_manifest_outside_prefix(
     with pytest.raises(PublishRefusedError, match="manifest.json"):
         await job_repo.publish_track(
             upload_job.id,
+            worker_id=GUARD_WORKER,
             title="Phantom",
             duration_seconds=1.0,
             s3_prefix=f"tracks/{tid}/1",
@@ -169,6 +179,7 @@ async def test_publish_track_refusal_is_recorded_once(job_repo, track_repo, uplo
         "duration_seconds": 1.0,
         "s3_prefix": f"local/{upload_job.id.hex}",
         "manifest_key": f"local/{upload_job.id.hex}/stems.json",
+        "worker_id": GUARD_WORKER,
     }
     with pytest.raises(PublishRefusedError):
         await job_repo.publish_track(upload_job.id, **kwargs)
@@ -215,6 +226,7 @@ async def test_publish_track_refusal_locks_job_row_before_event_check(
         "duration_seconds": 1.0,
         "s3_prefix": f"local/{upload_job.id.hex}",
         "manifest_key": f"local/{upload_job.id.hex}/stems.json",
+        "worker_id": GUARD_WORKER,
     }
     with pytest.raises(PublishRefusedError):
         await job_repo.publish_track(upload_job.id, **kwargs)

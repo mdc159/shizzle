@@ -649,6 +649,7 @@ async def publish_job(
     worker_result: dict[str, Any],
     manifest: dict[str, Any],
     generation: int = 1,
+    worker_id: str,
 ) -> tuple[Track, PublishResult]:
     """Publish a finished job: promote objects, then write the tracks row.
 
@@ -675,6 +676,7 @@ async def publish_job(
     try:
         track = await jobs.publish_track(
             job.id,
+            worker_id=worker_id,
             title=manifest.get("title") or job.title or job.id.hex,
             artist=manifest.get("artist") or job.artist or "",
             duration_seconds=float(manifest.get("duration", 0.0) or 0.0),
