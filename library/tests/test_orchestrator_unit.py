@@ -646,15 +646,23 @@ async def test_cloud_dispatched_stable_phase_remains_live(
     assert job.error_code is None
 
 
+@pytest.mark.parametrize("superseded", [False, True])
 async def test_cloud_dispatched_runpod_failed_redispatches_fresh(
-    settings, job_repo, upload_job, monkeypatch
+    settings, job_repo, upload_job, monkeypatch, superseded
 ):
     """A terminal RunPod failure marks the runpod id dead; the retry dispatches
     a fresh job under a new idempotency key and still reaches ready."""
     _stub_cloud_intake(monkeypatch)
     settings.runpod_poll_seconds = 0.02
+
+    async def package_not_ready(_ctx, *, idempotency_key):
+        assert idempotency_key == f"{upload_job.id.hex}:0"
+        return False
+
+    monkeypatch.setattr(cloud, "package_ready", package_not_ready)
     fake = FakeRunPodClient([
-        {"status": "FAILED", "output": {"error": "boom"}},
+        {"status": "COMPLETED", "output": {"status": "SUPERSEDED"}}
+        if superseded else {"status": "FAILED", "output": {"error": "boom"}},
         {"status": "IN_PROGRESS", "output": {"phase": "ok"}},
         {"status": "COMPLETED", "output": {}},
     ])
@@ -672,6 +680,18 @@ async def test_cloud_dispatched_runpod_failed_redispatches_fresh(
     assert fake.dispatched[1][1] == f"{upload_job.id.hex}:1"
     job = await job_repo.get_job(upload_job.id)
     assert job.runpod_job_id == rp2  # moved off the dead id
+    events = await job_repo.list_events(upload_job.id)
+    completed = [event for event in events if event.event == "worker_completed"]
+    assert len(completed) == 1
+    assert completed[0].detail == {}
+    verification = [
+        event for event in events
+        if event.event == "stage_completed" and event.detail.get("to") == "verifying"
+    ]
+    assert len(verification) == 1
+    assert verification[0].detail["package_prefix"] == cloud.attempt_prefix(
+        track_id_for_job(upload_job.id), fake.dispatched[1][1]
+    )
 
 
 async def test_cloud_dispatched_park_does_not_increment_attempt(
@@ -930,6 +950,82 @@ async def test_successful_poll_resets_outage_even_when_phase_is_unchanged(
     events = [event.event for event in await job_repo.list_events(upload_job.id)]
     assert events.count("runpod_poll_failed") == 2
     assert events.count("runpod_poll_recovered") == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("handoff", ["present", "missing", "read_error"])
+async def test_superseded_completion_requires_handoff(
+    settings, job_repo, upload_job, monkeypatch, legacy, handoff
+):
+    from botocore.exceptions import ClientError
+
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    await job_repo.claim_next(worker_id="superseded-test", lease_seconds=60)
+    dispatch_key = f"{upload_job.id.hex}:0"
+    if legacy:
+        await job_repo.record_dispatch(
+            upload_job.id, worker_id="superseded-test", runpod_job_id="rp-complete"
+        )
+    else:
+        await job_repo.reserve_dispatch(
+            upload_job.id, worker_id="superseded-test", idempotency_key=dispatch_key
+        )
+        await job_repo.confirm_dispatch(
+            upload_job.id, idempotency_key=dispatch_key, runpod_job_id="rp-complete"
+        )
+    track_id = track_id_for_job(upload_job.id)
+    prefix = (
+        cloud.separation_prefix(track_id) if legacy
+        else cloud.attempt_prefix(track_id, dispatch_key)
+    )
+    inspected = []
+
+    def head_object(*, Bucket, Key):
+        inspected.append((Bucket, Key))
+        if handoff == "present":
+            return {"ContentLength": 1}
+        raise ClientError(
+            {"Error": {"Code": "NoSuchKey" if handoff == "missing" else "AccessDenied"},
+             "ResponseMetadata": {"HTTPStatusCode": 404 if handoff == "missing" else 403}},
+            "HeadObject",
+        )
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: SimpleNamespace(
+        head_object=head_object
+    ))
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id), settings=settings,
+        pipeline=None, jobs=job_repo, worker_id="superseded-test",
+        runpod=FakeRunPodClient([{
+            "status": "COMPLETED",
+            "output": {"status": "SUPERSEDED", "package_prefix": "wrong/attempt"},
+        }]),
+    )
+    if handoff == "present":
+        assert await handle_dispatched(ctx) == JobStage.verifying
+        if not legacy:
+            assert ctx.detail["package_prefix"] == prefix
+    else:
+        with pytest.raises(StageError) as excinfo:
+            await handle_dispatched(ctx)
+        assert excinfo.value.retryable is True
+        expected_code = (
+            ErrorCode.RUNPOD_DISPATCH_FAILED if handoff == "missing"
+            else ErrorCode.S3_UPLOAD_FAILED
+        )
+        assert excinfo.value.code == expected_code
+        assert "package_prefix" not in ctx.detail
+    assert inspected == [(settings.s3_media_bucket, f"{prefix}/handoff.json")]
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == ("failed" if handoff == "missing" else "dispatched")
+    events = await job_repo.list_events(upload_job.id)
+    completed = [event for event in events if event.event == "worker_completed"]
+    assert len(completed) == (1 if handoff == "present" else 0)
 
 
 async def test_worker_completed_wraps_non_object_output(

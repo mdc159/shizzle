@@ -34,6 +34,25 @@ On the VPS, set `SHIZZLE_PIPELINE=cloud`, `RUNPOD_API_KEY`, and
 separate setting: a zero worker maximum prevents cloud progress even when
 credentials are valid. The orchestrator also has queue/stall watchdogs.
 
+## Conditional receipt writes
+
+The worker claims an attempt prefix with `dispatch.json` PUT `If-None-Match: *`
+(S3 conditional writes). Stores without that support must set
+`SHIZZLE_CONDITIONAL_DISPATCH=0` in the worker environment: the receipt PUT
+then goes unconditional (a warning is logged) and the replay guard degrades
+to the completion check alone.
+
+The receipt carries `claimed_at` and `heartbeat_at` (UTC ISO-8601) and a
+per-invocation `execution_id`. A non-owner never reports completion — the
+handler raises `AttemptClaimedError`, the RunPod job fails, and the
+orchestrator retries the track under a fresh idempotency key (invariant
+B12). Ownership is proven by a conditional receipt heartbeat (`If-Match`
+refresh of `heartbeat_at`) before every package write — per stem upload and
+before the handoff — and a claim is reclaimable only once `heartbeat_at` is
+older than `SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s). After the
+handoff the handler re-verifies the package (stem ETags, handoff sha256)
+and fails the job if anything changed under it.
+
 ## Repoint an endpoint
 
 Use the manual `runpod-repoint.yml` workflow with `image_tag`, `workers_max`,

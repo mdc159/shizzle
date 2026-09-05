@@ -90,7 +90,7 @@ def verify_download(local_path: Path) -> None:
     print(f"Verified S3 download: {local_path.name} ({file_size_mb:.1f} MB)", flush=True)
 
 
-def verify_upload(s3: Any, bucket: str, s3_key: str, local_path: Path) -> None:
+def verify_upload(s3: Any, bucket: str, s3_key: str, local_path: Path) -> str:
     """
     Verify S3 upload completed successfully by comparing file sizes.
 
@@ -99,6 +99,9 @@ def verify_upload(s3: Any, bucket: str, s3_key: str, local_path: Path) -> None:
         bucket: S3 bucket name
         s3_key: S3 object key
         local_path: Path to local file that was uploaded
+
+    Returns:
+        The uploaded object's ETag (the caller's post-write verification proof).
 
     Raises:
         RuntimeError: If upload verification fails
@@ -116,6 +119,7 @@ def verify_upload(s3: Any, bucket: str, s3_key: str, local_path: Path) -> None:
             )
 
         print(f"Verified S3 upload: {s3_key} ({remote_size / (1024 ** 2):.1f} MB)", flush=True)
+        return response["ETag"]
     except Exception as e:
         raise RuntimeError(f"Failed to verify S3 upload for {s3_key}: {str(e)}") from e
 
@@ -167,8 +171,9 @@ def upload_file(
         local_path: Path to local file
 
     Returns:
-        Dict with file, key, sha256, and size_bytes for the result payload
-        (publisher verifies server-side against these before promotion)
+        Dict with file, key, sha256, size_bytes, and etag for the result
+        payload (publisher verifies server-side against these before
+        promotion; etag proves the object was not overwritten afterwards)
 
     Raises:
         RuntimeError: If upload or verification fails
@@ -184,12 +189,13 @@ def upload_file(
             heartbeat, f"upload: {local_path.name}", local_path.stat().st_size
         ),
     )
-    verify_upload(s3, bucket, s3_key, local_path)
+    etag = verify_upload(s3, bucket, s3_key, local_path)
     return {
         "file": local_path.name,
         "key": s3_key,
         "sha256": digest,
         "size_bytes": local_path.stat().st_size,
+        "etag": etag,
     }
 
 
