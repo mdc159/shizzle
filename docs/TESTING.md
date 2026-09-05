@@ -29,9 +29,14 @@ npm run lint:all
 npx playwright install chromium
 $env:SHIZZLE_E2E_HEADLESS = '1'
 $env:SHIZZLE_E2E_BASE_URL = $null  # an inherited base URL would bypass the local Vite server
-npx playwright test e2e/library-scroll.spec.ts e2e/remote-mixer.spec.ts e2e/source-title-parity.spec.ts e2e/upload-metadata.spec.ts --reporter=list
+npx playwright test e2e/library-scroll.spec.ts e2e/remote-mixer.spec.ts e2e/source-title-parity.spec.ts --reporter=list
 Pop-Location
 ```
+
+`e2e/upload-metadata.spec.ts` is excluded from that block until
+[issue #31](https://github.com/mdc159/shizzle/issues/31) is fixed: its dialog
+locator matches both the Library and Add Source dialogs, so both of its checks
+fail before reaching their upload assertions.
 
 The four listed browser specs use fixtures or mocked API/WebSocket responses;
 they do not submit a real separation job. Clear `SHIZZLE_E2E_BASE_URL` in this
