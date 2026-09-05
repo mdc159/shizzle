@@ -109,16 +109,20 @@ class MigrateAndAuditCoordinatorTests(unittest.TestCase):
             code = coordinator.main()
         return code, runner, checkpoints, parent_databases, stdout, stderr
 
+    def assert_argv_hides_database(self, runner: FakeRun, dsn: str) -> None:
+        for call in runner.calls:
+            for element in call["argv"]:
+                self.assertNotEqual(element, "--database-url")
+                self.assertFalse(element.startswith("--database-url="))
+                self.assertNotIn(dsn, element)
+
     def assert_children_got_explicit_database(self, runner: FakeRun) -> None:
         self.assertEqual(len(runner.calls), 3)  # publish, audit, activation
-        argv_sets = [set(call["argv"]) for call in runner.calls]
-        self.assertNotIn("--activate", argv_sets[0])
-        self.assertNotIn("--database-url", argv_sets[0])
-        self.assertNotIn("--database-url", argv_sets[1])
-        self.assertIn("--activate", argv_sets[2])
-        self.assertNotIn("--database-url", argv_sets[2])
+        self.assertNotIn("--activate", runner.calls[0]["argv"])
+        self.assertIn("--activate", runner.calls[2]["argv"])
         for call in runner.calls:
             self.assertEqual(call["env"].get("DATABASE_URL"), EXPLICIT)
+        self.assert_argv_hides_database(runner, EXPLICIT)
 
     def test_explicit_url_overrides_divergent_ambient(self) -> None:
         with mock.patch.dict(os.environ, {"DATABASE_URL": AMBIENT}):
@@ -146,6 +150,7 @@ class MigrateAndAuditCoordinatorTests(unittest.TestCase):
         for call in runner.calls:
             self.assertEqual(call["env"].get("DATABASE_URL"), secret_url)
             self.assertNotIn("secret", " ".join(call["argv"]))
+        self.assert_argv_hides_database(runner, secret_url)
         for payload in checkpoints:
             self.assertNotIn("secret", json.dumps(payload))
         self.assertNotIn("secret", stdout.getvalue())
