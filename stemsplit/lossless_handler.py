@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from botocore.exceptions import ClientError
@@ -40,6 +41,20 @@ _CONDITIONAL_DISPATCH = os.getenv("SHIZZLE_CONDITIONAL_DISPATCH", "1").strip().l
     "off",
 )
 
+# An attempt claim older than this is abandoned and may be reclaimed by a
+# redelivery of the same dispatch. Read once at worker start.
+_DISPATCH_STALE_SECONDS = float(os.getenv("SHIZZLE_DISPATCH_STALE_SECONDS", "900"))
+
+
+class AttemptClaimedError(RuntimeError):
+    """This invocation does not own the attempt prefix (someone else claimed,
+    reclaimed, or completed it). The RunPod job fails, and the orchestrator
+    retries the dispatch under a fresh idempotency key (invariant B12)."""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
 
 def _clean(handoff: dict) -> dict:
     """Strip private keys; the uploaded document is schema-strict."""
@@ -57,6 +72,97 @@ def _is_not_found(err: ClientError) -> bool:
     status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
     code = err.response.get("Error", {}).get("Code", "")
     return status == 404 or code in ("NoSuchKey", "404", "NotFound")
+
+
+def _is_precondition_failed(err: ClientError) -> bool:
+    """True only for a conditional-write loss: code PreconditionFailed, HTTP 412."""
+    response = err.response
+    return (
+        response.get("Error", {}).get("Code") == "PreconditionFailed"
+        and response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412
+    )
+
+
+def _current_owner(s3, bucket: str, receipt_key: str) -> str:  # noqa: ANN001
+    """Best-effort current owner of the attempt claim (for error messages)."""
+    with contextlib.suppress(Exception):
+        current = json.loads(s3.get_object(Bucket=bucket, Key=receipt_key)["Body"].read())
+        return str(current.get("execution_id") or "unknown")
+    return "unknown"
+
+
+def _claim_attempt(
+    s3,  # noqa: ANN001
+    bucket: str,
+    prefix: str,
+    receipt_key: str,
+    receipt: dict,
+    conditional: bool,
+    heartbeat,  # noqa: ANN001
+) -> None:
+    """Claim the attempt prefix; the receipt is the ownership record.
+
+    The first claimant wins the If-None-Match PUT. A 412 loser reclaims only
+    an abandoned claim (older than SHIZZLE_DISPATCH_STALE_SECONDS, via IfMatch
+    on the observed ETag); every other non-owner outcome raises
+    AttemptClaimedError so the RunPod job fails and the orchestrator retries
+    under a fresh idempotency key (B12).
+    """
+    claim_put: dict = {
+        "Bucket": bucket,
+        "Key": receipt_key,
+        "Body": json.dumps(receipt, separators=(",", ":")).encode("utf-8"),
+        "ContentType": "application/json",
+    }
+    if conditional:
+        claim_put["IfNoneMatch"] = "*"
+    else:
+        print(
+            "[warn] SHIZZLE_CONDITIONAL_DISPATCH=0: unconditional receipt write; "
+            "replay guard is the completion check only",
+            flush=True,
+        )
+    try:
+        s3.put_object(**claim_put)
+        return
+    except ClientError as err:
+        if not conditional or not _is_precondition_failed(err):
+            raise
+
+    # 412: the prefix is already claimed. Reclaim only if abandoned.
+    response = s3.get_object(Bucket=bucket, Key=receipt_key)
+    etag = response["ETag"]
+    existing = json.loads(response["Body"].read())
+    try:
+        age = _utcnow() - datetime.fromisoformat(existing["claimed_at"])
+    except (KeyError, TypeError, ValueError):
+        age = None
+    if age is None or age <= timedelta(seconds=_DISPATCH_STALE_SECONDS):
+        raise AttemptClaimedError(
+            f"attempt {prefix} is claimed by execution "
+            f"{existing.get('execution_id', '?')} "
+            f"(claimed_at {existing.get('claimed_at', '?')}); claim is not stale"
+        )
+    heartbeat("dispatch: reclaiming abandoned claim")
+    reclaim_put: dict = {
+        "Bucket": bucket,
+        "Key": receipt_key,
+        "Body": json.dumps(
+            {**receipt, "claimed_at": _utcnow().isoformat()}, separators=(",", ":")
+        ).encode("utf-8"),
+        "ContentType": "application/json",
+        "IfMatch": etag,
+    }
+    try:
+        s3.put_object(**reclaim_put)
+    except ClientError as err:
+        if not _is_precondition_failed(err):
+            raise
+        owner = _current_owner(s3, bucket, receipt_key)
+        raise AttemptClaimedError(
+            f"attempt {prefix} was reclaimed by another worker first "
+            f"(owner execution {owner})"
+        ) from err
 
 
 def handler(job: dict) -> dict:
@@ -84,12 +190,13 @@ def handler(job: dict) -> dict:
     s3 = create_s3_client()
     handoff_key = f"{prefix}/handoff.json"
     receipt_key = f"{prefix}/dispatch.json"
+    execution_id = str(uuid.uuid4())
 
     # Replay guard, completion check (#32): a visible handoff means this
-    # attempt already crossed the interface. A redelivery of the same
-    # dispatch returns the completed result and writes nothing (A1/A6).
+    # attempt already crossed the interface. A redelivery returns the stored
+    # completion metadata and writes nothing (A1/A6).
     try:
-        s3.head_object(Bucket=bucket, Key=handoff_key)
+        stored = json.loads(s3.get_object(Bucket=bucket, Key=handoff_key)["Body"].read())
     except ClientError as err:
         if not _is_not_found(err):
             raise
@@ -97,63 +204,31 @@ def handler(job: dict) -> dict:
         heartbeat("dispatch: attempt already complete")
         return {
             "status": "COMPLETED",
-            "interface": "lossless-stem-v1",
+            "interface": stored.get("interface", "lossless-stem-v1"),
             "track_id": track_id,
             "generation": generation,
             "package_prefix": prefix,
-            "sample_count": 0,
+            "sample_count": stored.get("separation", {}).get("sample_count", 0),
             "uploads": 0,
             "timings": {},
         }
 
-    # Replay guard, ownership claim (#32): the receipt PUT is conditional
-    # (If-None-Match: *), so exactly one concurrent execution of the same
-    # dispatch can own the attempt prefix; a loser sees 412 and exits with
-    # SUPERSEDED without writing anything.
+    # Replay guard, ownership claim (#32): the conditional receipt PUT admits
+    # exactly one owner per attempt prefix; any non-owner raises so the RunPod
+    # job fails and the orchestrator retries under a fresh idempotency key
+    # (B12). An abandoned claim is reclaimed, never reported as completion.
     receipt = {
         "runpod_job_id": runpod_job_id,
         "idempotency_key": idempotency_key,
         "track_id": str(track_id),
         "generation": generation,
         "package_prefix": prefix,
+        "claimed_at": _utcnow().isoformat(),
+        "execution_id": execution_id,
     }
     heartbeat(f"dispatch: recording {runpod_job_id}")
-    conditional = _CONDITIONAL_DISPATCH
-    if not conditional:
-        print(
-            "[warn] SHIZZLE_CONDITIONAL_DISPATCH=0: unconditional receipt write; "
-            "replay guard is the completion check only",
-            flush=True,
-        )
-    receipt_put: dict = {
-        "Bucket": bucket,
-        "Key": receipt_key,
-        "Body": json.dumps(receipt, separators=(",", ":")).encode("utf-8"),
-        "ContentType": "application/json",
-    }
-    if conditional:
-        receipt_put["IfNoneMatch"] = "*"
-    try:
-        s3.put_object(**receipt_put)
-    except ClientError as err:
-        response = err.response
-        if (
-            not conditional
-            or response.get("Error", {}).get("Code") != "PreconditionFailed"
-            or response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 412
-        ):
-            raise
-        heartbeat("dispatch: attempt claimed by another worker, superseded")
-        return {
-            "status": "SUPERSEDED",
-            "interface": "lossless-stem-v1",
-            "track_id": track_id,
-            "generation": generation,
-            "package_prefix": prefix,
-            "sample_count": 0,
-            "uploads": 0,
-            "timings": {},
-        }
+    _claim_attempt(s3, bucket, prefix, receipt_key, receipt, _CONDITIONAL_DISPATCH, heartbeat)
+
     # Every dispatch writes beneath its own immutable prefix. A completed
     # attempt is never rewritten (guards above), so an older worker can
     # neither replace a newer receipt nor mutate stems beneath a completed
@@ -187,8 +262,37 @@ def handler(job: dict) -> dict:
         # downstream will consume.
         handoff_path = tmp_path / "handoff.json"
         handoff_path.write_text(json.dumps(_clean(handoff), indent=2))
+
+        # Replay guard, ownership re-check (#32): a late predecessor that lost
+        # its claim (stale reclaim) must not publish a handoff over the
+        # reclaimer's stems.
+        if _CONDITIONAL_DISPATCH:
+            current = json.loads(s3.get_object(Bucket=bucket, Key=receipt_key)["Body"].read())
+            if current.get("execution_id") != execution_id:
+                raise AttemptClaimedError(
+                    f"attempt {prefix} is now owned by execution "
+                    f"{current.get('execution_id', '?')}; refusing to write handoff"
+                )
+
         heartbeat(f"handoff: writing {handoff_key} (package complete)")
-        upload_file(s3, bucket, handoff_key, handoff_path, heartbeat)
+        handoff_put: dict = {
+            "Bucket": bucket,
+            "Key": handoff_key,
+            "Body": handoff_path.read_bytes(),
+            "ContentType": "application/json",
+        }
+        if _CONDITIONAL_DISPATCH:
+            handoff_put["IfNoneMatch"] = "*"
+        try:
+            s3.put_object(**handoff_put)
+        except ClientError as err:
+            if _CONDITIONAL_DISPATCH and _is_precondition_failed(err):
+                owner = _current_owner(s3, bucket, receipt_key)
+                raise AttemptClaimedError(
+                    f"attempt {prefix} already has a handoff "
+                    f"(owner execution {owner})"
+                ) from err
+            raise
 
     return {
         "status": "COMPLETED",

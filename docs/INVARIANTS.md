@@ -66,16 +66,22 @@ normalization or lossy encode may be applied.
 ### A6 — each dispatch attempt under its own immutable prefix
 
 **Invariant:** Each dispatch attempt MUST write beneath its own immutable
-`attempts/<sha256(idempotency_key)>` prefix, and that prefix is claimed by a
-conditional receipt write (`dispatch.json` PUT with `IfNoneMatch: *`; on
-stores without conditional-write support, `SHIZZLE_CONDITIONAL_DISPATCH=0`
-falls back to an unconditional receipt PUT). Once `handoff.json` is visible
-the handler is a no-op for that attempt — a redelivery returns the completed
-result with no writes — and a concurrent replay that loses the conditional
-claim returns the distinct `SUPERSEDED` status without writing. An older
-worker can therefore never clobber a newer attempt's receipts or stems.
+`attempts/<sha256(idempotency_key)>` prefix. The prefix is claimed by a
+conditional receipt write (`dispatch.json` PUT with `IfNoneMatch: *`,
+carrying `claimed_at` and a per-invocation `execution_id`), and once
+`handoff.json` is visible the handler is a no-op for that attempt — a
+redelivery returns the stored completion metadata with no writes. Any
+invocation that does not own the claim (concurrent loser, non-stale
+predecessor, or a claim reclaimed by someone else first) raises
+`AttemptClaimedError` so the RunPod job fails and the orchestrator retries
+under a fresh idempotency key (B12); a claim abandoned longer than
+`SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s) is reclaimed via an
+`IfMatch` receipt PUT, and ownership is re-checked immediately before the
+final `handoff.json` write. On stores without conditional-write support,
+`SHIZZLE_CONDITIONAL_DISPATCH=0` falls back to an unconditional receipt PUT
+(guard degrades to the completion check).
 - Where: `stemsplit/lossless_handler.py`
-- Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_attempt_prefix_is_deterministic_and_isolates_retries`, `stemsplit/tests/test_wave3_hardening.py::test_handler_isolates_each_dispatch_attempt`, `stemsplit/tests/test_wave3_hardening.py::test_handler_replay_of_completed_attempt_writes_nothing`, `stemsplit/tests/test_wave3_hardening.py::test_concurrent_replays_only_one_claims`, `library/tests/test_orchestrator_unit.py::test_legacy_unconfirmed_package_uses_base_prefix`
+- Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_attempt_prefix_is_deterministic_and_isolates_retries`, `stemsplit/tests/test_wave3_hardening.py::test_handler_isolates_each_dispatch_attempt`, `stemsplit/tests/test_wave3_hardening.py::test_handler_replay_of_completed_attempt_writes_nothing`, `stemsplit/tests/test_wave3_hardening.py::test_concurrent_replays_only_one_claims`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_is_reclaimed_when_stale`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_raises_when_not_stale`, `stemsplit/tests/test_wave3_hardening.py::test_late_predecessor_cannot_write_handoff`, `library/tests/test_orchestrator_unit.py::test_legacy_unconfirmed_package_uses_base_prefix`
 - Violation smell: writing any package object outside the attempt prefix, or
   deriving the prefix from anything but the idempotency key hash.
 
