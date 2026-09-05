@@ -60,17 +60,21 @@ jobs:
       IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
     steps:
       - name: Reconfirm master after approval
+        id: reconfirm
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           current=$(gh api "repos/$GH_REPO/commits/master" --jq .sha)
-          [ "$current" = "$TARGET_SHA" ] || {
-            echo "::error::Master advanced to $current while deployment awaited approval"
-            exit 1
-          }
+          if [ "$current" = "$TARGET_SHA" ]; then
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::warning::Master advanced to $current while deployment awaited approval; skipping stale deployment for $TARGET_SHA"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
       - name: Preflight deployment secrets
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -86,18 +90,22 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         with:
           ref: ${{ needs.admit.outputs.target_sha }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: player/package-lock.json
       - name: Build player
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         working-directory: player
         run: npm ci && npm run build
       - name: Set up SSH
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         env:
           SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
@@ -107,6 +115,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
       - name: Ship release
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
@@ -116,6 +125,7 @@ jobs:
             deploy/vps/deploy-release.sh deploy/vps/restore-release.sh \
             root@"$VPS_HOST":/opt/shizzle/prod/incoming/
       - name: Deploy transaction
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         id: deploy
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -125,6 +135,7 @@ jobs:
           ssh root@"$VPS_HOST" bash /opt/shizzle/prod/incoming/deploy-release.sh \
             "$IMAGE_REF" "$TARGET_SHA"
       - name: Check production health
+        if: steps.reconfirm.outputs.should_deploy == 'true'
         id: health
         run: |
           set -o pipefail
@@ -140,7 +151,7 @@ jobs:
           done
           exit 1
       - name: Restore previous release on failure
-        if: failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        if: steps.reconfirm.outputs.should_deploy == 'true' && failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
@@ -177,7 +188,7 @@ jobs:
           echo "::error::Previous release was restored but failed production health verification"
           exit 1
       - name: Finalize successful transaction
-        if: success()
+        if: steps.reconfirm.outputs.should_deploy == 'true' && success()
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
@@ -192,7 +203,7 @@ jobs:
           echo "::error::Production is healthy, but transaction artifacts could not be removed; refusing a successful deployment result"
           exit 1
       - name: Retain three API images
-        if: success()
+        if: steps.reconfirm.outputs.should_deploy == 'true' && success()
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |

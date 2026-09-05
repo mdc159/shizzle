@@ -87,7 +87,8 @@ variables in the production `.env` when the RunPod path is connected.
    SHA tag and exposes its registry digest.
 2. Job `deploy` pauses at the GitHub Environment `production` gate until
    mdc159 approves. The workflow rechecks that `master` still names the same
-   reviewed SHA after approval.
+   reviewed SHA after approval; if `master` advanced while approval was pending,
+   the stale run exits cleanly without shipping.
 3. After approval, the deploy SSHes to the VPS (using the pinned host key),
    records the prior files and database revision, sets
    `SHIZZLE_API_IMAGE=<tag>@<digest>`, validates the staged Compose config,
