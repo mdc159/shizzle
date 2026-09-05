@@ -283,7 +283,7 @@ publish or duplicate completion converges instead of double-publishing.
 differs from the import's or that are soft-deleted (raising `ImportConflict`),
 so no path other than `activate_generation` can move the active-generation
 pointer or resurrect a deleted track.
-- Where: `library/src/shizzle_server/db/repository.py`
+- Where: `library/src/shizzle_server/db/repository.py` (`TrackRepository.activate_generation`, `TrackRepository.upsert_imported`)
 - Guarded by: `library/tests/test_repository.py::test_generation_activation_is_compare_and_swap_with_append_only_event`, `library/tests/test_repository.py::test_generation_rollback_uses_same_atomic_ledger`, `library/tests/test_publish.py::test_upsert_imported_same_generation_refresh_converges_and_refuses_deleted`, `library/tests/test_publish.py::test_upsert_imported_refuses_generation_reset_on_advanced_deleted_track`
 - Violation smell: flipping the active-generation pointer outside the CAS, or
   appending the ledger event in a second transaction.

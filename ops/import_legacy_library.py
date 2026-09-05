@@ -255,7 +255,7 @@ class ImportOutcome:
     folder: str
     track_id: uuid.UUID
     title: str
-    status: str  # imported | already-published | skipped-degraded | failed
+    status: str  # imported | already-published | manifest-rewritten | skipped-degraded | skipped-invalid-stems | skipped-existing-advanced | skipped-deleted | dry-run | failed
     objects_copied: int = 0
     bytes_copied: int = 0
     elapsed_s: float = 0.0
@@ -409,6 +409,21 @@ async def import_folder(
         return outcome
 
     started = time.monotonic()
+    # Issue #33, first line of defense: check the row BEFORE any S3 write, so
+    # a skipped rerun cannot mutate generation-1 storage (manifest rewrite or
+    # object copy). The repository guard below is the second line.
+    if session_factory is not None:
+        repo = TrackRepository(session_factory)
+        existing = await repo.get(track_id)
+        if existing is not None and existing.generation != GENERATION:
+            outcome.status = "skipped-existing-advanced"
+            outcome.reason = (
+                f"row at generation {existing.generation}, importer pins {GENERATION}"
+            )
+            outcome.elapsed_s = round(time.monotonic() - started, 2)
+            logger.warning("%s SKIPPED: %s", label, outcome.reason)
+            return outcome
+
     already = publisher.is_published(track_id, GENERATION)
     try:
         if already and args.rewrite_manifests:
@@ -444,18 +459,6 @@ async def import_folder(
             return outcome
 
         repo = TrackRepository(session_factory)
-        # Defense in depth (issue #33): never even attempt the write when the
-        # existing row has advanced past GENERATION — the repository would
-        # refuse it anyway.
-        existing = await repo.get(track_id)
-        if existing is not None and existing.generation != GENERATION:
-            outcome.status = "skipped-existing-advanced"
-            outcome.reason = (
-                f"row at generation {existing.generation}, importer pins {GENERATION}"
-            )
-            outcome.elapsed_s = round(time.monotonic() - started, 2)
-            logger.warning("%s SKIPPED: %s", label, outcome.reason)
-            return outcome
         try:
             _, created = await repo.upsert_imported(
                 track_id,
@@ -470,7 +473,7 @@ async def import_folder(
         except ImportConflict as exc:
             # e.g. a soft-deleted duplicate: the decision stands, do not
             # resurrect it and do not fail the whole run (issue #33).
-            outcome.status = "skipped-existing-advanced"
+            outcome.status = "skipped-deleted" if exc.deleted else "skipped-existing-advanced"
             outcome.reason = f"ImportConflict: {exc}"
             outcome.elapsed_s = round(time.monotonic() - started, 2)
             logger.warning("%s SKIPPED: %s", label, outcome.reason)
