@@ -247,7 +247,9 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if detail.get("status") == "SUPERSEDED" and not await cloud.package_ready(
                 ctx, idempotency_key=dispatch_key
             ):
-                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
                 raise StageError(
                     ErrorCode.RUNPOD_DISPATCH_FAILED,
                     f"RunPod job {job.runpod_job_id} SUPERSEDED without handoff.json",

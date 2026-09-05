@@ -1211,13 +1211,15 @@ async def test_superseded_completion_requires_handoff(
 ):
     from botocore.exceptions import ClientError
 
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    await job_repo.advance(
-        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched
-    )
     await job_repo.claim_next(worker_id="superseded-test", lease_seconds=60)
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.pending, to_stage=JobStage.downloading,
+        worker_id="superseded-test",
+    )
+    await job_repo.advance(
+        upload_job.id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched,
+        worker_id="superseded-test",
+    )
     dispatch_key = f"{upload_job.id.hex}:0"
     if legacy:
         await job_repo.record_dispatch(
