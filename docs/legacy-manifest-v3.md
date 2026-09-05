@@ -16,7 +16,7 @@ exists.
 | `default_gain` | Drop ambiguous linear field; use explicit `default_gain_db` |
 | `other` separator role | Public role is `shizzle`; existing filename may differ |
 | `channel_offset` | Old multi-track channel-pair index, not a browser gain or stem id |
-| Existing timeline metadata | Probe actual media; copied metadata alone does not prove sample rate/alignment |
+| Existing timeline metadata | Carried verbatim and untrusted; consumers must probe actual media for sample rate/alignment |
 | `merged_audio` / `multitrack` | Optional historical artifacts; not substitutes for six individually playable stems |
 | Missing referenced stem objects | Reject incomplete source set |
 | WAV stems | Reject browser publication; derive from a valid source through the supported delivery path |

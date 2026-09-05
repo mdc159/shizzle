@@ -116,9 +116,8 @@ cd /opt/shizzle/prod
 docker volume create shizzle-probe_caddy_data
 docker compose -p shizzle -f compose.prod.yml config -q
 docker compose -p shizzle -f compose.prod.yml pull
-docker compose -p shizzle -f compose.prod.yml up -d postgres
-# Wait for postgres to report healthy before the migration.
-docker compose -p shizzle -f compose.prod.yml ps
+# --wait blocks until postgres is healthy; `run --no-deps` below skips depends_on.
+docker compose -p shizzle -f compose.prod.yml up -d --wait postgres
 docker compose -p shizzle -f compose.prod.yml run --rm --no-deps api alembic upgrade head
 docker compose -p shizzle -f compose.prod.yml up -d
 ```

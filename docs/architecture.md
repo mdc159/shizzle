@@ -207,6 +207,10 @@ Sources: `api/remote.py` and `player/src/hooks/useRemoteSync.ts`.
 The relay is in-process fan-out with no stored mix or room routing. Every
 connected client shares it; the diagram shows one player and one remote.
 The playing browser owns state. The remote page has no playback audio graph.
+The deployment is single-user by design: one shared passcode, device tokens
+that carry no user identity, and one deployment-wide relay room. Any
+authenticated client can observe and control the playing browser, so the relay
+must not serve more than one trusted user without adding session routing.
 
 ## Dashboard and operational checks
 

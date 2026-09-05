@@ -37,7 +37,7 @@ Upload is supported; URL acquisition is still a stub.
 New cloud dispatches write an isolated attempt:
 
 ```text
-tracks/<track-id>/1/separation/attempts/<sha256(idempotency-key)>/
+tracks/<track-id>/<generation>/separation/attempts/<sha256(idempotency-key)>/
   dispatch.json
   handoff.json
   stems/
@@ -93,7 +93,7 @@ path containment, actual byte sizes and hashes, WAV format, and sample
 alignment. Cloud intake also checks the source object key and submitted source
 checksum. Missing handoff is retryable; invalid package content is rejected.
 See `library/src/shizzle_server/publish/lossless_intake.py` and
-`orchestrator/cloud.py`.
+`library/src/shizzle_server/orchestrator/cloud.py`.
 
 ## Downstream delivery
 

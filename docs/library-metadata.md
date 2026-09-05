@@ -17,8 +17,8 @@ ambiguous targets, and validates expected values before writing. Without
 tracks table, revalidates the plan and coverage, and applies updates/deletions
 in one transaction. Soft deletion retains media and generation history.
 
-The committed mapping and run JSON under `ops/data/` are completed-run fixtures
-used by tests. Prepare a new mapping from current data for new work; do not
+The committed mapping and run JSON under `ops/data/` are the completed
+production run's mapping and record, not test fixtures. Prepare a new mapping from current data for new work; do not
 reuse its old expected values as a current inventory.
 
 ## Local invocation

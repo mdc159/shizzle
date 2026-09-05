@@ -23,17 +23,22 @@ host; substitute exact file paths when transferring from Windows:
 # on the host
 docker build -f library/Dockerfile.api -t shizzle-api:vm-test library/
 docker save shizzle-api:vm-test -o shizzle-api-vm-test.tar
+docker pull postgres:16-alpine && docker pull caddy:2
+docker save postgres:16-alpine -o postgres-16-alpine.tar
+docker save caddy:2 -o caddy-2.tar
 npm --prefix player run build && tar -czf player-dist.tgz -C player/dist .
-scp shizzle-api-vm-test.tar player-dist.tgz deploy/vps/vm-test/compose.vm.yml deploy/vps/vm-test/Caddyfile .env mike@192.168.176.52:~/shizzle-test/
+scp shizzle-api-vm-test.tar postgres-16-alpine.tar caddy-2.tar player-dist.tgz deploy/vps/vm-test/compose.vm.yml deploy/vps/vm-test/Caddyfile .env mike@192.168.176.52:~/shizzle-test/
 
 # in the VM (~/shizzle-test)
 mkdir -p player
 tar -xzf player-dist.tgz -C player
 sudo docker load -i shizzle-api-vm-test.tar
+sudo docker load -i postgres-16-alpine.tar
+sudo docker load -i caddy-2.tar
 mkdir -p certs && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
   -keyout certs/key.pem -out certs/cert.pem -days 30 -nodes \
   -subj '/CN=192.168.176.52' -addext 'subjectAltName=IP:192.168.176.52'
-sudo docker compose -p shizzle -f compose.vm.yml up -d postgres
+sudo docker compose -p shizzle -f compose.vm.yml up -d --wait postgres
 sudo docker compose -p shizzle -f compose.vm.yml run --rm --no-deps api alembic upgrade head
 sudo docker compose -p shizzle -f compose.vm.yml up -d
 ```
