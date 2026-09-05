@@ -60,9 +60,17 @@ separator's native `other` role when writing the files. Existing in-flight jobs
 without an attempt identity have a compatibility lookup at the base separation
 prefix; it is not the new-dispatch layout.
 
-The [review](../../docs/REVIEW.md) tracks a same-attempt replay defect: the
-current writer can overwrite stems while an old handoff remains visible.
-Do not mistake the intended immutability contract for a guard against that bug.
+### Replay guard (worker-side, 2026-09)
+
+Each attempt prefix is single-owner. The worker claims it with a conditional
+receipt write (`dispatch.json` PUT with `If-None-Match: *`); a concurrent
+delivery of the same dispatch that loses that claim writes nothing and
+reports the distinct `SUPERSEDED` status, and once `handoff.json` is visible
+the worker treats the attempt as complete and performs no writes at all.
+A completed package therefore cannot be mutated or torn by a redelivered or
+racing worker. On stores without conditional-write support,
+`SHIZZLE_CONDITIONAL_DISPATCH=0` falls back to an unconditional receipt
+write and the guard degrades to the completion check alone.
 
 ## Required audio
 

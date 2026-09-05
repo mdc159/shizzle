@@ -34,6 +34,14 @@ On the VPS, set `SHIZZLE_PIPELINE=cloud`, `RUNPOD_API_KEY`, and
 separate setting: a zero worker maximum prevents cloud progress even when
 credentials are valid. The orchestrator also has queue/stall watchdogs.
 
+## Conditional receipt writes
+
+The worker claims an attempt prefix with `dispatch.json` PUT `If-None-Match: *`
+(S3 conditional writes). Stores without that support must set
+`SHIZZLE_CONDITIONAL_DISPATCH=0` in the worker environment: the receipt PUT
+then goes unconditional (a warning is logged) and the replay guard degrades
+to the completion check alone.
+
 ## Repoint an endpoint
 
 Use the manual `runpod-repoint.yml` workflow with `image_tag`, `workers_max`,
