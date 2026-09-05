@@ -22,16 +22,31 @@ private S3 bucket karaoke-pimpshizzle
   evidence.
 - Same-origin `/cdn` remains the tested fallback path.
 
-This media-delivery portion is complete for the accepted 27-track library.
+The active library size is runtime data; query the authenticated application
+instead of treating a past audit's track count as current inventory.
 
-## Scripts in this directory
+## Files in this directory
 
-The numbered scripts record the original distribution and DNS setup. They are
-useful for troubleshooting or rebuilding infrastructure, not a current phased
-implementation plan.
+`apex-change.json` is environment-specific DNS change data for the VPS A
+record and the `www` CNAME. Compare its target with the intended VPS before
+using it; it is not automatically applied. Current CloudFront configuration
+also appears in `.env.example` and `../vps/Caddyfile.prod`.
 
-All scripts load credentials from the gitignored repository `.env`, clear an
-ambient `AWS_ENDPOINT_URL`, and avoid printing secrets.
+The retired spike-bucket/CloudFront application-apex provisioning scripts are
+not part of the current tree. Infrastructure must satisfy the requirements
+below; this directory is not an automated installer.
+
+## Current infrastructure requirements
+
+Provision a private S3 media bucket and an OAC-backed CloudFront distribution
+whose media paths map to `tracks/`. Attach the trusted key group matching the
+API's `CLOUDFRONT_KEY_PAIR_ID` and mounted signing private key. The bucket policy
+must allow the distribution ARN. Configure Range GET/HEAD delivery and CORS
+for the application origin; preserve the required signed-URL gate. The API's
+`CLOUDFRONT_DOMAIN` and the same-origin fallback upstream in `Caddyfile.prod`
+must identify the intended distribution. Application DNS and TLS belong to
+the VPS/Caddy path. This repository currently has no replacement automated
+provisioner for that complete topology.
 
 ## Troubleshooting
 

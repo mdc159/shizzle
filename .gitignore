@@ -36,6 +36,8 @@ Thumbs.db
 
 # Spike scratch output (results docs ARE committed; raw dumps are not)
 evidence/spikes/**/out/
+evidence/spikes/**/work/
+*.th
 
 # Local agent/browser state and generated run output
 .claude/
