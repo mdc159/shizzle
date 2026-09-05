@@ -197,6 +197,14 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
                 stalled_for is not None
                 and stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — a stale worker must not cancel the new
+                    # owner's RunPod job or fail its job; yield (the loop's
+                    # park/release no-op on the owner guard).
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(
                     ctx, job.runpod_job_id, reason="stale worker heartbeat"
                 )
@@ -271,6 +279,12 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         if status == "IN_QUEUE":
             queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — never cancel the new owner's RunPod job.
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="queue timeout")
                 await ctx.jobs.record_worker_progress(
                     job.id, phase="failed", worker_id=ctx.worker_id
@@ -291,6 +305,12 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             if stalled_for is not None and (
                 stalled_for > ctx.settings.runpod_worker_stall_seconds
             ):
+                if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
+                    # B2: lease lost — never cancel the new owner's RunPod job.
+                    logger.info(
+                        "job %s: lease lost; skipping worker-failure handling", job.id
+                    )
+                    return None
                 await _cancel_best_effort(ctx, job.runpod_job_id, reason="worker stall")
                 await ctx.jobs.record_worker_progress(
                     job.id, phase="failed", worker_id=ctx.worker_id

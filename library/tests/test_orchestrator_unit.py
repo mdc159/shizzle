@@ -986,6 +986,126 @@ async def test_stale_worker_cancel_failure_does_not_mask_transient_poll_error(
     assert job.error_code != "RUNPOD_DISPATCH_FAILED"
 
 
+async def test_stale_worker_does_not_cancel_new_owners_runpod_job(
+    settings, job_repo, upload_job
+):
+    """B2 remote-effect fence (PR 42 review): after a reclaim, the evicted
+    worker hitting the queue-timeout branch must not cancel the new owner's
+    RunPod job and must not fail the job — it yields. The owner's path still
+    cancels."""
+    claimed = await job_repo.claim_next(worker_id="A", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="A",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="A",
+    )
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="A", runpod_job_id="rp-shared"
+    )
+    # Backdate the heartbeat so the queue timeout is already exceeded, then
+    # let B reclaim A's expired lease.
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=60)
+        row.lease_expires_at = utcnow() - timedelta(seconds=1)
+    reclaimed = await job_repo.claim_next(worker_id="B", lease_seconds=60)
+    assert reclaimed is not None and reclaimed.lease_owner == "B"
+
+    settings.runpod_queue_timeout_seconds = 10
+    stale_fake = FakeRunPodClient([{"status": "IN_QUEUE", "output": {}}])
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=stale_fake,
+        worker_id="A",
+    )
+    assert await handle_dispatched(ctx) is None  # yields: no cancel, no StageError
+    assert stale_fake.cancelled == []  # the new owner's RunPod job is untouched
+    job = await job_repo.get_job(upload_job.id)
+    assert job.status is JobStage.dispatched
+    assert job.lease_owner == "B"
+    assert job.worker_phase == "dispatched"  # A's failed-write was skipped too
+
+    # The owner path still cancels and raises.
+    owner_fake = FakeRunPodClient([{"status": "IN_QUEUE", "output": {}}])
+    ctx_b = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=owner_fake,
+        worker_id="B",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(ctx_b)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+    assert owner_fake.cancelled == ["rp-shared"]
+    assert (await job_repo.get_job(upload_job.id)).worker_phase == "failed"
+
+
+async def test_owner_with_failed_phase_still_cancels_on_timeout(
+    settings, job_repo, upload_job
+):
+    """Batch-3 correction: the cancel gate must be lease ownership, not the
+    record_worker_progress return (which is also False when the phase is
+    merely unchanged). An owner whose row's worker_phase was concurrently
+    set to 'failed' still cancels and raises RUNPOD_TIMEOUT."""
+    claimed = await job_repo.claim_next(worker_id="B", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+        worker_id="B",
+    )
+    await job_repo.advance(
+        upload_job.id,
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        worker_id="B",
+    )
+    await job_repo.record_dispatch(
+        upload_job.id, worker_id="B", runpod_job_id="rp-still-queued"
+    )
+    # Backdate the heartbeat past the queue timeout (visible in the handler's
+    # snapshot), then flip the row's phase to 'failed' after the snapshot is
+    # taken — the concurrent-write race where record_worker_progress would
+    # return False for the rightful owner.
+    settings.runpod_queue_timeout_seconds = 10
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=60)
+    snapshot = await job_repo.get_job(upload_job.id)
+    assert snapshot.worker_phase == "dispatched"
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_phase = "failed"
+
+    fake = FakeRunPodClient([{"status": "IN_QUEUE", "output": {}}])
+    ctx = StageContext(
+        job=snapshot,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="B",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(ctx)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+    assert fake.cancelled == ["rp-still-queued"]
+
+
 async def test_transient_poll_failure_dedupes_one_event_per_outage(
     settings, job_repo, upload_job
 ):

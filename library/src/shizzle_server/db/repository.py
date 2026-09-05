@@ -554,6 +554,17 @@ class JobRepository:
             session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
             return True
 
+    async def owns_lease(self, job_id: uuid.UUID, worker_id: str) -> bool:
+        """B2 predicate: does this worker own the job's unexpired lease now?
+
+        For callers that gate remote effects (e.g. cancelling the RunPod job)
+        rather than writes: unlike ``record_worker_progress`` it cannot
+        conflate "not owner" with "phase unchanged".
+        """
+        async with self._sf() as session:
+            job = await session.get(Job, job_id)
+            return job is not None and _lease_is_owned(job, worker_id, utcnow())
+
     # --- state machine -------------------------------------------------------
 
     async def advance(
