@@ -636,11 +636,13 @@ class JobRepository:
         B2: requires an unexpired lease owned by `worker_id`; a stale worker
         cannot burn an attempt or erase the new owner's lease.
         """
-        now = utcnow()
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None or job.status in TERMINAL_STAGES:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            # B2: the expiry comparison uses a timestamp taken after the row
+            # lock is held, so a lock wait cannot make an expired lease pass.
+            now = utcnow()
             _require_lease(job, worker_id, JobStage.failed, now)
             job.attempt += 1
             job.next_retry_at = now + timedelta(seconds=retry_in_seconds)
