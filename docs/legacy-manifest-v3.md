@@ -9,13 +9,14 @@ state before the rerun guard.
 The importer reads older `karaoke/pub/<job>/stems.json` records and normalizes
 their browser shape. Some inputs reference missing split stems or WAV media;
 they cannot be admitted as six-stem browser tracks merely because a manifest
-exists. Rerunning that importer is now guarded, not blocked outright: an
-existing track row whose generation has advanced past 1 is pre-skipped with
-status `skipped-existing-advanced` (before any S3 write), and a soft-deleted
-row makes `upsert_imported` raise `ImportConflict` (status `skipped-deleted`,
-issue #33), so a rerun can no longer reset generations or resurrect
-deletions — but a live row still at generation 1 keeps refreshing its
-metadata from the legacy manifests.
+exists. Rerunning that importer is now guarded, not blocked outright: the
+importer pre-checks the row before any S3 access — an existing track row
+whose generation has advanced past 1 is skipped with status
+`skipped-existing-advanced`, and a soft-deleted row with status
+`skipped-deleted` (issue #33), the repository's `ImportConflict` refusal
+acting as race protection — so a rerun can no longer reset generations or
+resurrect deletions, but a live row still at generation 1 keeps refreshing
+its metadata from the legacy manifests.
 
 | Input field/shape | Compatibility handling |
 |---|---|

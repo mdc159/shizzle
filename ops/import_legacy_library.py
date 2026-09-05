@@ -409,23 +409,32 @@ async def import_folder(
         return outcome
 
     started = time.monotonic()
-    # Issue #33, first line of defense: check the row BEFORE any S3 write, so
-    # a skipped rerun cannot mutate generation-1 storage (manifest rewrite or
-    # object copy). The repository guard below is the second line.
-    if session_factory is not None:
-        repo = TrackRepository(session_factory)
-        existing = await repo.get(track_id)
-        if existing is not None and existing.generation != GENERATION:
-            outcome.status = "skipped-existing-advanced"
-            outcome.reason = (
-                f"row at generation {existing.generation}, importer pins {GENERATION}"
-            )
-            outcome.elapsed_s = round(time.monotonic() - started, 2)
-            logger.warning("%s SKIPPED: %s", label, outcome.reason)
-            return outcome
-
-    already = publisher.is_published(track_id, GENERATION)
     try:
+        # Issue #33, first line of defense: check the row BEFORE any S3 read or
+        # write, so a skipped rerun can neither mutate generation-1 storage
+        # (manifest rewrite, object copy) nor waste S3 traffic on it. The
+        # repository's ImportConflict guard at the upsert is the second line
+        # (race protection). Inside the try so a transient DB error fails only
+        # this folder, not the whole run.
+        if session_factory is not None:
+            repo = TrackRepository(session_factory)
+            existing = await repo.get(track_id)
+            if existing is not None and existing.deleted_at is not None:
+                outcome.status = "skipped-deleted"
+                outcome.reason = "row is soft-deleted; import would resurrect it"
+                outcome.elapsed_s = round(time.monotonic() - started, 2)
+                logger.warning("%s SKIPPED: %s", label, outcome.reason)
+                return outcome
+            if existing is not None and existing.generation != GENERATION:
+                outcome.status = "skipped-existing-advanced"
+                outcome.reason = (
+                    f"row at generation {existing.generation}, importer pins {GENERATION}"
+                )
+                outcome.elapsed_s = round(time.monotonic() - started, 2)
+                logger.warning("%s SKIPPED: %s", label, outcome.reason)
+                return outcome
+
+        already = publisher.is_published(track_id, GENERATION)
         if already and args.rewrite_manifests:
             # Deliberate, opt-in exception to generation immutability: correct
             # the manifest of a generation that nothing has served yet. Safe
