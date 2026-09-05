@@ -226,9 +226,22 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             output = status_payload.get("output")
             detail = output if isinstance(output, dict) else {"output": output}
             events = await ctx.jobs.list_events(job.id)
+            dispatch_key = _confirmed_dispatch_key(events, job.runpod_job_id)
+            # Older workers return SUPERSEDED after losing a receipt claim,
+            # even if its owner died before publishing the package (A1/B12).
+            # Verify the marker at the durable dispatch's prefix, never at an
+            # output-supplied location, before recording completion.
+            if detail.get("status") == "SUPERSEDED" and not await cloud.package_ready(
+                ctx, idempotency_key=dispatch_key
+            ):
+                await ctx.jobs.record_worker_progress(job.id, phase="failed")
+                raise StageError(
+                    ErrorCode.RUNPOD_DISPATCH_FAILED,
+                    f"RunPod job {job.runpod_job_id} SUPERSEDED without handoff.json",
+                    retryable=True,
+                )
             if not any(event.event == "worker_completed" for event in events):
                 await ctx.jobs.append_event(job.id, "worker_completed", detail=detail)
-            dispatch_key = _confirmed_dispatch_key(events, job.runpod_job_id)
             if dispatch_key is not None:
                 ctx.detail["package_prefix"] = cloud.attempt_prefix(
                     track_id, dispatch_key

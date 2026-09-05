@@ -246,9 +246,15 @@ manifest guarded on disk; deterministic-id idempotent publish transaction).
 ### B12 — failed RunPod job dispatches fresh
 
 **Invariant:** A RunPod job already marked failed MUST be treated as absent —
-retry dispatches fresh under a NEW idempotency key.
+retry dispatches fresh under a NEW idempotency key. A legacy worker's
+`SUPERSEDED` output inside a RunPod `COMPLETED` result MUST NOT advance to
+verification or record `worker_completed` unless the corresponding dispatch's
+`handoff.json` exists. An absent handoff marks the worker failed and triggers
+a fresh dispatch; a failed S3 read remains retryable without marking the
+worker failed. The marker location comes from the confirmed dispatch key
+(legacy base prefix when no key was recorded), never the worker output.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`
-- Guarded by: `library/tests/test_orchestrator_unit.py::test_cloud_dispatched_runpod_failed_redispatches_fresh`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_cloud_dispatched_runpod_failed_redispatches_fresh`, `library/tests/test_orchestrator_unit.py::test_superseded_completion_requires_handoff`
 - Violation smell: reusing the old idempotency key after a RunPod-side
   failure.
 

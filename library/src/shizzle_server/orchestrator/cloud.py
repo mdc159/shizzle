@@ -133,7 +133,7 @@ async def accepted_dispatch_id(
 async def package_ready(
     ctx: StageContext, *, idempotency_key: str | None
 ) -> bool:
-    """Check the handoff-last marker for a dispatch whose RunPod id was lost."""
+    """Check the dispatch's handoff-last marker before accepting recovery."""
     track_id = track_id_for_job(ctx.job.id)
     prefix = (
         attempt_prefix(track_id, idempotency_key)
