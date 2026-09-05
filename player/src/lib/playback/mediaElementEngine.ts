@@ -4,8 +4,11 @@
  * One HTMLAudioElement per stem, each routed:
  *   source -> stem GainNode -> master GainNode -> limiter -> destination
  *
- * - Stem gains are dB end-to-end (manifest `default_gain_db`, store faders),
- *   converted once via dbToLinear().
+ * - Stem gains are dB end-to-end and split into two terms per channel: the
+ *   manifest `default_gain_db` trim (captured at load, issue #25) and the
+ *   user's store fader. The rendered gain is dbToLinear(trimDb + gainDb),
+ *   so store sync and "Reset mixer" can never overwrite the manifest trim.
+ *   Both are converted via dbToLinear().
  * - Master bus carries a fixed -3 dB headroom under the user volume because
  *   decoded AAC stems overshoot ~+1 dBFS at unity (spike 0.4); the
  *   DynamicsCompressorNode is configured as a conservative transparent
@@ -74,7 +77,10 @@ interface StemChannel {
   analyser: AnalyserNode;
   analyserData: Float32Array<ArrayBuffer>;
   rmsDbfs: number | null;
+  /** User fader in dB (store `stemGains`); starts at unity 0 on every load. */
   gainDb: number;
+  /** Manifest `default_gain_db` trim in dB, re-captured from each manifest. */
+  trimDb: number;
   muted: boolean;
   soloed: boolean;
   waitingEvents: number;
@@ -185,8 +191,10 @@ class MediaElementEngine implements PlaybackEngine {
       // Contract fix (Phase 1.3): manifest gain is dB and converted here.
       // The legacy code assigned the raw value as a linear gain, so the
       // written `0` (meaning 0 dB) silenced every stem.
-      const gainDb = stem.default_gain_db ?? 0;
-      gain.gain.value = dbToLinear(gainDb);
+      // Issue #25: the trim is a separate per-channel term from the user
+      // fader, which starts at unity and is forwarded by useAudioSync.
+      const trimDb = stem.default_gain_db ?? 0;
+      gain.gain.value = dbToLinear(trimDb);
 
       source.connect(gain);
       gain.connect(analyser);
@@ -200,7 +208,8 @@ class MediaElementEngine implements PlaybackEngine {
         analyser,
         analyserData,
         rmsDbfs: null,
-        gainDb,
+        gainDb: 0,
+        trimDb,
         muted: false,
         soloed: false,
         waitingEvents: 0,
@@ -422,7 +431,11 @@ class MediaElementEngine implements PlaybackEngine {
     this.sampleLimiter();
     const stems: Partial<Record<StemId, StemMetrics>> = {};
     const vt = this.video ? this.video.currentTime : null;
+    const anySoloed = Array.from(this.channels.values()).some((c) => c.soloed);
     for (const c of this.channels.values()) {
+      // gainLinear reports the user fader only (0 when silenced); the
+      // rendered node gain is dbToLinear(c.trimDb + c.gainDb) otherwise.
+      const silenced = c.muted || (anySoloed && !c.soloed);
       stems[c.id] = {
         skewMs: vt === null ? null : Math.round((c.el.currentTime - vt) * 1000),
         readyState: c.el.readyState,
@@ -430,7 +443,8 @@ class MediaElementEngine implements PlaybackEngine {
         stalledEvents: c.stalledEvents,
         playbackRate: c.el.playbackRate,
         hardSeeks: c.hardSeeks,
-        gainLinear: c.gain.gain.value,
+        gainLinear: silenced ? 0 : dbToLinear(c.gainDb),
+        trimDb: c.trimDb,
         signalRmsDbfs: c.rmsDbfs,
         paused: c.el.paused,
         networkState: c.el.networkState,
@@ -510,8 +524,10 @@ class MediaElementEngine implements PlaybackEngine {
     const now = this.ctx.currentTime;
     for (const c of this.channels.values()) {
       // Muted, or another stem is soloed and this one isn't -> silence.
+      // Issue #25: rendered gain combines the manifest trim with the user
+      // fader (dbToLinear(trimDb + gainDb)); neither term overwrites the other.
       const silenced = c.muted || (anySoloed && !c.soloed);
-      const target = silenced ? 0 : dbToLinear(c.gainDb);
+      const target = silenced ? 0 : dbToLinear(c.trimDb + c.gainDb);
       c.gain.gain.setTargetAtTime(target, now, GAIN_SMOOTHING_SEC);
     }
   }

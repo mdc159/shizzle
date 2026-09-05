@@ -31,8 +31,9 @@ policy/code mismatch for a reviewed fix.
 
 The lossless intake measures the lossless unity mix and records a common
 `default_gain_db` on every output stem. `encode_stem()` does not bake that gain
-into the AAC. The player must combine the manifest trim with user mixer gains;
-the current overwrite defect is also tracked in the review. The separate
+into the AAC. The player combines that manifest trim with the user mixer gain
+(rendered gain = trim + fader, in dB; issue #25), so store sync, Reset mixer,
+and remote mixer updates can never overwrite it. The separate
 decoded-delivery audio-quality audit measures the mix using supplied gains.
 Do not treat a passed artifact probe as a listening test or a proof of
 post-AAC mix safety.

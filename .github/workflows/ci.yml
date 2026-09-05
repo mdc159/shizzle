@@ -103,7 +103,7 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test e2e/library-scroll.spec.ts --reporter=list
+      - run: npx playwright test e2e/library-scroll.spec.ts e2e/manifest-trim.spec.ts --reporter=list
         env:
           SHIZZLE_E2E_HEADLESS: "1"
 
