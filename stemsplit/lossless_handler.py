@@ -99,14 +99,14 @@ def _claim_attempt(
     receipt: dict,
     conditional: bool,
     heartbeat,  # noqa: ANN001
-) -> None:
+) -> str:
     """Claim the attempt prefix; the receipt is the ownership record.
 
     The first claimant wins the If-None-Match PUT. A 412 loser reclaims only
-    an abandoned claim (older than SHIZZLE_DISPATCH_STALE_SECONDS, via IfMatch
-    on the observed ETag); every other non-owner outcome raises
+    an abandoned claim (heartbeat_at older than SHIZZLE_DISPATCH_STALE_SECONDS,
+    via IfMatch on the observed ETag); every other non-owner outcome raises
     AttemptClaimedError so the RunPod job fails and the orchestrator retries
-    under a fresh idempotency key (B12).
+    under a fresh idempotency key (B12). Returns the claim's current ETag.
     """
     claim_put: dict = {
         "Bucket": bucket,
@@ -123,38 +123,42 @@ def _claim_attempt(
             flush=True,
         )
     try:
-        s3.put_object(**claim_put)
-        return
+        response = s3.put_object(**claim_put)
+        return response["ETag"]
     except ClientError as err:
         if not conditional or not _is_precondition_failed(err):
             raise
 
-    # 412: the prefix is already claimed. Reclaim only if abandoned.
+    # 412: the prefix is already claimed. Reclaim only if abandoned
+    # (staleness is measured from the receipt's heartbeat_at).
     response = s3.get_object(Bucket=bucket, Key=receipt_key)
     etag = response["ETag"]
     existing = json.loads(response["Body"].read())
     try:
-        age = _utcnow() - datetime.fromisoformat(existing["claimed_at"])
+        age = _utcnow() - datetime.fromisoformat(existing["heartbeat_at"])
     except (KeyError, TypeError, ValueError):
         age = None
     if age is None or age <= timedelta(seconds=_DISPATCH_STALE_SECONDS):
         raise AttemptClaimedError(
             f"attempt {prefix} is claimed by execution "
             f"{existing.get('execution_id', '?')} "
-            f"(claimed_at {existing.get('claimed_at', '?')}); claim is not stale"
+            f"(heartbeat_at {existing.get('heartbeat_at', '?')}); claim is not stale"
         )
     heartbeat("dispatch: reclaiming abandoned claim")
+    now = _utcnow().isoformat()
     reclaim_put: dict = {
         "Bucket": bucket,
         "Key": receipt_key,
         "Body": json.dumps(
-            {**receipt, "claimed_at": _utcnow().isoformat()}, separators=(",", ":")
+            {**receipt, "claimed_at": now, "heartbeat_at": now},
+            separators=(",", ":"),
         ).encode("utf-8"),
         "ContentType": "application/json",
         "IfMatch": etag,
     }
     try:
-        s3.put_object(**reclaim_put)
+        response = s3.put_object(**reclaim_put)
+        return response["ETag"]
     except ClientError as err:
         if not _is_precondition_failed(err):
             raise
@@ -162,6 +166,35 @@ def _claim_attempt(
         raise AttemptClaimedError(
             f"attempt {prefix} was reclaimed by another worker first "
             f"(owner execution {owner})"
+        ) from err
+
+
+def _refresh_receipt(s3, bucket: str, receipt_key: str, receipt: dict, etag: str) -> str:  # noqa: ANN001
+    """Prove ownership of the attempt claim before each package write.
+
+    PUTs the receipt with IfMatch=<last known ETag> and a fresh heartbeat_at
+    and returns the new ETag for the next proof. A 412 means someone else
+    owns the prefix now: raise without writing anything further.
+    """
+    prefix = receipt["package_prefix"]
+    refreshed = {**receipt, "heartbeat_at": _utcnow().isoformat()}
+    refresh_put: dict = {
+        "Bucket": bucket,
+        "Key": receipt_key,
+        "Body": json.dumps(refreshed, separators=(",", ":")).encode("utf-8"),
+        "ContentType": "application/json",
+        "IfMatch": etag,
+    }
+    try:
+        response = s3.put_object(**refresh_put)
+        return response["ETag"]
+    except ClientError as err:
+        if not _is_precondition_failed(err):
+            raise
+        owner = _current_owner(s3, bucket, receipt_key)
+        raise AttemptClaimedError(
+            f"attempt {prefix} is owned by execution {owner}; "
+            f"this execution ({receipt['execution_id']}) was displaced"
         ) from err
 
 
@@ -217,17 +250,24 @@ def handler(job: dict) -> dict:
     # exactly one owner per attempt prefix; any non-owner raises so the RunPod
     # job fails and the orchestrator retries under a fresh idempotency key
     # (B12). An abandoned claim is reclaimed, never reported as completion.
+    # heartbeat_at is refreshed before every package write (the ownership
+    # proof); staleness is measured from it, so a live worker is never
+    # reclaimed under.
+    claimed_at = _utcnow().isoformat()
     receipt = {
         "runpod_job_id": runpod_job_id,
         "idempotency_key": idempotency_key,
         "track_id": str(track_id),
         "generation": generation,
         "package_prefix": prefix,
-        "claimed_at": _utcnow().isoformat(),
+        "claimed_at": claimed_at,
+        "heartbeat_at": claimed_at,
         "execution_id": execution_id,
     }
     heartbeat(f"dispatch: recording {runpod_job_id}")
-    _claim_attempt(s3, bucket, prefix, receipt_key, receipt, _CONDITIONAL_DISPATCH, heartbeat)
+    receipt_etag = _claim_attempt(
+        s3, bucket, prefix, receipt_key, receipt, _CONDITIONAL_DISPATCH, heartbeat
+    )
 
     # Every dispatch writes beneath its own immutable prefix. A completed
     # attempt is never rewritten (guards above), so an older worker can
@@ -239,6 +279,8 @@ def handler(job: dict) -> dict:
         source = tmp_path / Path(input_key).name
         heartbeat(f"acquire: downloading s3://{bucket}/{input_key}")
         download_source(s3, bucket, input_key, source, heartbeat)
+        if _CONDITIONAL_DISPATCH:
+            receipt_etag = _refresh_receipt(s3, bucket, receipt_key, receipt, receipt_etag)
 
         handoff = run(
             source, tmp_path,
@@ -246,16 +288,23 @@ def handler(job: dict) -> dict:
             source_key=input_key, worker_image=WORKER_IMAGE,
             heartbeat=heartbeat,
         )
+        if _CONDITIONAL_DISPATCH:
+            receipt_etag = _refresh_receipt(s3, bucket, receipt_key, receipt, receipt_etag)
 
         uploads = []
+        stem_etags: dict[str, str] = {}
         for i, role in enumerate(ROLES, 1):
             key = f"{prefix}/stems/{role}.wav"
+            # Ownership proof before each stem write: a displaced predecessor
+            # fails here and can never overwrite the reclaimer's stems (#32).
+            if _CONDITIONAL_DISPATCH:
+                receipt_etag = _refresh_receipt(s3, bucket, receipt_key, receipt, receipt_etag)
             heartbeat(f"upload: {role}.wav ({i}/6) -> {key}")
-            uploads.append(
-                upload_file(
-                    s3, bucket, key, tmp_path / "stems" / f"{role}.wav", heartbeat
-                )
+            record = upload_file(
+                s3, bucket, key, tmp_path / "stems" / f"{role}.wav", heartbeat
             )
+            uploads.append(record)
+            stem_etags[key] = record["etag"]
 
         # handoff.json is written LAST: its presence means the package crossed
         # the interface. A dead worker leaves no handoff and therefore nothing
@@ -263,16 +312,12 @@ def handler(job: dict) -> dict:
         handoff_path = tmp_path / "handoff.json"
         handoff_path.write_text(json.dumps(_clean(handoff), indent=2))
 
-        # Replay guard, ownership re-check (#32): a late predecessor that lost
-        # its claim (stale reclaim) must not publish a handoff over the
-        # reclaimer's stems.
+        # Replay guard, ownership proof before the final write (#32): the
+        # conditional receipt heartbeat IS the re-check — only the claim owner
+        # can pass it, so a displaced predecessor cannot publish a handoff
+        # over the reclaimer's stems.
         if _CONDITIONAL_DISPATCH:
-            current = json.loads(s3.get_object(Bucket=bucket, Key=receipt_key)["Body"].read())
-            if current.get("execution_id") != execution_id:
-                raise AttemptClaimedError(
-                    f"attempt {prefix} is now owned by execution "
-                    f"{current.get('execution_id', '?')}; refusing to write handoff"
-                )
+            receipt_etag = _refresh_receipt(s3, bucket, receipt_key, receipt, receipt_etag)
 
         heartbeat(f"handoff: writing {handoff_key} (package complete)")
         handoff_put: dict = {
@@ -293,6 +338,21 @@ def handler(job: dict) -> dict:
                     f"(owner execution {owner})"
                 ) from err
             raise
+
+        # Post-handoff verification (#32): prove the published package is the
+        # one this execution wrote. Any mismatch raises so the RunPod job
+        # fails and the orchestrator dispatches fresh (B12). Never delete.
+        handoff_sha = hashlib.sha256(handoff_path.read_bytes()).hexdigest()
+        stored_handoff = s3.get_object(Bucket=bucket, Key=handoff_key)["Body"].read()
+        if hashlib.sha256(stored_handoff).hexdigest() != handoff_sha:
+            raise AttemptClaimedError(
+                f"package changed under handoff: {handoff_key} bytes differ"
+            )
+        for key, etag in stem_etags.items():
+            if s3.head_object(Bucket=bucket, Key=key)["ETag"] != etag:
+                raise AttemptClaimedError(
+                    f"package changed under handoff: {key} etag differs"
+                )
 
     return {
         "status": "COMPLETED",

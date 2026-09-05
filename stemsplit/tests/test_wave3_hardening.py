@@ -72,14 +72,23 @@ class _FakeS3:
             raise _client_error("NoSuchKey", 404)
         return {"Body": io.BytesIO(self.objects[Key]), "ETag": self.etags[Key]}
 
+    def head_object(self, *, Bucket, Key) -> dict:  # noqa: ANN001, ARG002, N803
+        if Key not in self.objects:
+            raise _client_error("404", 404)
+        return {"ETag": self.etags[Key], "ContentLength": len(self.objects[Key])}
+
     def store(self, key: str, body: bytes) -> None:
         """Direct write (test hook) that refreshes the ETag like a real PUT."""
         with self._lock:
             self.objects[key] = body
             self.etags[key] = f'"{hashlib.sha1(body).hexdigest()}"'
 
-    def put_object(self, **kwargs) -> None:  # noqa: ANN003
-        if self.claim_barrier is not None and kwargs["Key"].endswith("/dispatch.json"):
+    def put_object(self, **kwargs) -> dict:  # noqa: ANN003
+        if (
+            self.claim_barrier is not None
+            and kwargs["Key"].endswith("/dispatch.json")
+            and kwargs.get("IfNoneMatch") == "*"
+        ):
             self.claim_barrier.wait(timeout=10)
         body = kwargs.get("Body", b"")
         body = body if isinstance(body, bytes) else body.read()
@@ -96,13 +105,15 @@ class _FakeS3:
             self.mutations.append(("put_object", key))
             self.objects[key] = body
             self.etags[key] = f'"{hashlib.sha1(body).hexdigest()}"'
+            return {"ETag": self.etags[key]}
 
-    def upload_file(self, path, _bucket, key, _Callback=None, **_kw) -> None:  # noqa: ANN001, ANN003
+    def upload_file(self, path, _bucket, key, _Callback=None, **_kw) -> dict:  # noqa: ANN001, ANN003
         body = Path(path).read_bytes()
         with self._lock:
             self.mutations.append(("upload_file", key))
             self.objects[key] = body
             self.etags[key] = f'"{hashlib.sha1(body).hexdigest()}"'
+            return {"ETag": self.etags[key]}
 
     def upload_fileobj(self, fileobj, _bucket, key, **_kw) -> None:  # noqa: ANN001, ANN003
         with self._lock:
@@ -127,53 +138,19 @@ def test_attempt_prefix_is_deterministic_and_isolates_retries():
 
 def test_handler_isolates_each_dispatch_attempt(monkeypatch):
     """A retry writes a distinct receipt/package and cannot mutate its peer."""
-    serverless = _FakeServerless()
-    runpod = ModuleType("runpod")
-    runpod.serverless = serverless  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "runpod", runpod)
-
     fake_s3 = _FakeS3()
-    monkeypatch.setattr("lossless_handler.create_s3_client", lambda: fake_s3)
-
-    def _download(_s3, _bucket, _key, path, _heartbeat=None):  # noqa: ANN001
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"src")
-
-    monkeypatch.setattr("lossless_handler.download_source", _download)
-
-    def _run(_source, _out, **_kwargs):  # noqa: ANN001
-        return {
-            "interface": "lossless-stem-v1",
-            "separation": {"sample_count": 10},
-            "_timings": {"ok": 1},
-        }
-
-    monkeypatch.setattr("lossless_handler.run", _run)
-
+    _patch_handler_env(monkeypatch, fake_s3)
     uploaded: list[str] = []
 
-    def _upload(_s3, _bucket, key, path, _heartbeat=None):  # noqa: ANN001
+    def _recording_upload(s3, bucket, key, path, heartbeat=None):  # noqa: ANN001
         uploaded.append(key)
-        return {"file": Path(path).name, "key": key, "sha256": "x", "size_bytes": 1}
+        return _fake_upload(s3, bucket, key, path, heartbeat)
 
-    monkeypatch.setattr("lossless_handler.upload_file", _upload)
+    monkeypatch.setattr("lossless_handler.upload_file", _recording_upload)
 
-    prefix = "tracks/T1/1/separation"
-    dispatch_key = "job-1:0"
-    result = handler({
-        "id": "rp-accepted",
-        "input": {
-            "track_id": "T1",
-            "generation": 1,
-            "idempotency_key": dispatch_key,
-            "bucket": "bkt",
-            "input_key": "sources/T1/source.mp4",
-            "output_prefix": prefix,
-        }
-    })
+    result = handler(_dispatch_job())
 
-    attempt_id = hashlib.sha256(dispatch_key.encode()).hexdigest()
-    attempt_prefix = f"{prefix}/attempts/{attempt_id}"
+    attempt_prefix = _attempt_prefix_for()
     handoff_key = f"{attempt_prefix}/handoff.json"
     # The shared marker is never deleted — a prior valid package survives a race.
     assert handoff_key not in fake_s3.deleted
@@ -181,21 +158,24 @@ def test_handler_isolates_each_dispatch_attempt(monkeypatch):
     # handoff.json is the atomic promotion: written LAST, after every stem.
     assert uploaded == [f"{attempt_prefix}/stems/{role}.wav" for role in ROLES]
     assert fake_s3.mutations[-1] == ("put_object", handoff_key)
-    assert len(fake_s3.puts) == 2
-    receipt = fake_s3.puts[0]
-    assert receipt["Key"] == f"{attempt_prefix}/dispatch.json"
+    # Every receipt PUT after the claim is an IfMatch ownership heartbeat.
+    dispatch_puts = [p for p in fake_s3.puts if p["Key"].endswith("/dispatch.json")]
+    handoff_puts = [p for p in fake_s3.puts if p["Key"] == handoff_key]
+    assert len(handoff_puts) == 1
+    assert dispatch_puts[0]["IfNoneMatch"] == "*"
+    assert all(p.get("IfMatch") for p in dispatch_puts[1:])
+    receipt = dispatch_puts[0]
     assert receipt["ContentType"] == "application/json"
-    assert receipt["IfNoneMatch"] == "*"
     receipt_doc = json.loads(receipt["Body"])
     assert receipt_doc["runpod_job_id"] == "rp-accepted"
     assert receipt_doc["idempotency_key"] == "job-1:0"
     assert receipt_doc["track_id"] == "T1"
     assert receipt_doc["generation"] == 1
     assert receipt_doc["package_prefix"] == attempt_prefix
+    assert receipt_doc["claimed_at"] == receipt_doc["heartbeat_at"]
     assert receipt_doc["claimed_at"]
     assert receipt_doc["execution_id"]
-    handoff_put = fake_s3.puts[1]
-    assert handoff_put["Key"] == handoff_key
+    handoff_put = handoff_puts[0]
     assert handoff_put["IfNoneMatch"] == "*"
     assert handoff_put["ContentType"] == "application/json"
     assert result["status"] == "COMPLETED"
@@ -226,12 +206,13 @@ def _fake_download(_s3, _bucket, _key, path, _heartbeat=None):  # noqa: ANN001
 
 
 def _fake_upload(s3, bucket, key, path, _heartbeat=None):  # noqa: ANN001
-    s3.upload_file(str(path), bucket, key)
+    response = s3.upload_file(str(path), bucket, key)
     return {
         "file": Path(path).name,
         "key": key,
         "sha256": "x",
         "size_bytes": Path(path).stat().st_size,
+        "etag": response["ETag"],
     }
 
 
@@ -344,13 +325,16 @@ def test_concurrent_replays_only_one_claims(monkeypatch):
     assert "claimed by execution" in str(errors[0])
 
     prefix = results[0]["package_prefix"]
-    # The complete mutation log is exactly ONE package: the winner's claim,
-    # six stem uploads, handoff last. The loser contributed nothing.
-    assert fake_s3.mutations == [
-        ("put_object", f"{prefix}/dispatch.json"),
-        *[("upload_file", f"{prefix}/stems/{role}.wav") for role in ROLES],
-        ("put_object", f"{prefix}/handoff.json"),
+    # Exactly ONE package was written: the winner's six stems in role order,
+    # handoff last, plus its claim and receipt heartbeats; the loser
+    # contributed nothing.
+    assert [k for op, k in fake_s3.mutations if op == "upload_file"] == [
+        f"{prefix}/stems/{role}.wav" for role in ROLES
     ]
+    assert fake_s3.mutations[-1] == ("put_object", f"{prefix}/handoff.json")
+    assert [k for op, k in fake_s3.mutations if op == "put_object"].count(
+        f"{prefix}/handoff.json"
+    ) == 1
     assert set(fake_s3.objects) == {
         f"{prefix}/dispatch.json",
         f"{prefix}/handoff.json",
@@ -474,7 +458,7 @@ def test_late_predecessor_cannot_write_handoff(monkeypatch):
 
     monkeypatch.setattr("lossless_handler.upload_file", _usurping_upload)
 
-    with pytest.raises(AttemptClaimedError, match="now owned"):
+    with pytest.raises(AttemptClaimedError, match="owned by execution"):
         handler(job)
 
     assert f"{prefix}/handoff.json" not in fake_s3.objects
@@ -482,6 +466,134 @@ def test_late_predecessor_cannot_write_handoff(monkeypatch):
     assert [k for op, k in fake_s3.mutations if op == "upload_file"] == [
         f"{prefix}/stems/{role}.wav" for role in ROLES
     ]
+
+
+def test_displaced_predecessor_cannot_overwrite_stems(monkeypatch):
+    """#32 batch2: a predecessor displaced mid-package by a stale reclaim
+    fails its next ownership proof before any PUT; the reclaimer's six stems
+    and handoff are the only objects under the prefix."""
+    fake_s3 = _FakeS3()
+    _patch_handler_env(monkeypatch, fake_s3)
+    job = _dispatch_job()
+    clock = _freeze_clock(monkeypatch)
+    prefix = _attempt_prefix_for()
+    receipt_key = f"{prefix}/dispatch.json"
+
+    execution = {"n": 0}
+
+    def _run_tagged(_source, out, **_kwargs):  # noqa: ANN001
+        execution["n"] += 1
+        stems = out / "stems"
+        stems.mkdir(parents=True, exist_ok=True)
+        for role in ROLES:
+            (stems / f"{role}.wav").write_bytes(f"wav{execution['n']}-{role}".encode())
+        return {
+            "interface": "lossless-stem-v1",
+            "separation": {"sample_count": 10},
+            "_timings": {"ok": 1},
+        }
+
+    monkeypatch.setattr("lossless_handler.run", _run_tagged)
+
+    reclaim_results: list[dict] = []
+    displaced_once = {"done": False}
+
+    def _upload_with_displacement(s3, bucket, key, path, heartbeat=None):  # noqa: ANN001
+        record = _fake_upload(s3, bucket, key, path, heartbeat)
+        if key.endswith("bass.wav") and not displaced_once["done"]:  # fire once
+            displaced_once["done"] = True
+            clock["now"] = T0 + timedelta(seconds=901)
+            reclaim_results.append(handler(job))  # second execution reclaims
+        return record
+
+    monkeypatch.setattr("lossless_handler.upload_file", _upload_with_displacement)
+
+    with pytest.raises(AttemptClaimedError) as ei:
+        handler(job)  # the predecessor continues and is displaced
+
+    assert reclaim_results and reclaim_results[0]["status"] == "COMPLETED"
+    assert execution["n"] == 2  # predecessor + reclaimer both separated
+    # The displacement names the reclaimer as the current owner.
+    owner = json.loads(fake_s3.objects[receipt_key])["execution_id"]
+    assert owner in str(ei.value)
+    # Only the reclaimer's six stems remain, byte-consistent with its handoff.
+    for role in ROLES:
+        assert fake_s3.objects[f"{prefix}/stems/{role}.wav"] == f"wav2-{role}".encode()
+    handoff = json.loads(fake_s3.objects[f"{prefix}/handoff.json"])
+    assert handoff["separation"]["sample_count"] == 10
+
+
+def test_live_worker_heartbeats_per_stem_and_is_never_stale(monkeypatch):
+    """#32 batch2: receipt heartbeats refresh per stem, so a slow live worker
+    is never reclaimed under; a concurrent redelivery inside the stale window
+    raises (not stale) and the original completes."""
+    fake_s3 = _FakeS3()
+    _patch_handler_env(monkeypatch, fake_s3)
+    job = _dispatch_job()
+    clock = _freeze_clock(monkeypatch)
+    prefix = _attempt_prefix_for()
+    receipt_key = f"{prefix}/dispatch.json"
+
+    displaced: list[AttemptClaimedError] = []
+
+    def _upload_with_aging(s3, bucket, key, path, heartbeat=None):  # noqa: ANN001
+        record = _fake_upload(s3, bucket, key, path, heartbeat)
+        clock["now"] += timedelta(seconds=400)  # slow GPU: > stale window overall
+        if key.endswith("bass.wav"):  # a redelivery races in here
+            try:
+                handler(job)
+            except AttemptClaimedError as exc:
+                displaced.append(exc)
+        return record
+
+    monkeypatch.setattr("lossless_handler.upload_file", _upload_with_aging)
+
+    result = handler(job)
+
+    assert result["status"] == "COMPLETED"
+    assert len(displaced) == 1
+    assert "claim is not stale" in str(displaced[0])
+    # The redelivery wrote nothing: exactly one package exists.
+    assert set(fake_s3.objects) == {
+        receipt_key,
+        f"{prefix}/handoff.json",
+        *(f"{prefix}/stems/{role}.wav" for role in ROLES),
+    }
+    # The receipt heartbeat kept advancing with the worker.
+    receipt_doc = json.loads(fake_s3.objects[receipt_key])
+    assert receipt_doc["heartbeat_at"] > receipt_doc["claimed_at"]
+
+
+def test_package_changed_under_handoff_raises(monkeypatch):
+    """#32 batch2: a stem write that lands after the ownership checks but
+    before the handoff is caught by post-handoff verification; the job fails,
+    nothing is reported complete, and nothing is deleted."""
+    fake_s3 = _FakeS3()
+    _patch_handler_env(monkeypatch, fake_s3)
+    job = _dispatch_job()
+    prefix = _attempt_prefix_for()
+    vocals_key = f"{prefix}/stems/vocals.wav"
+
+    def _tampering_upload(s3, bucket, key, path, heartbeat=None):  # noqa: ANN001
+        record = _fake_upload(s3, bucket, key, path, heartbeat)
+        if key.endswith("shizzle.wav"):  # last stem: arm the tamper hook
+            def _tamper():
+                # Fires under the fake's lock on the next IfMatch PUT
+                # (the pre-handoff ownership proof): a foreign write lands.
+                s3.objects[vocals_key] = b"tampered"
+                s3.etags[vocals_key] = '"tampered-etag"'
+
+            s3.on_ifmatch = _tamper
+        return record
+
+    monkeypatch.setattr("lossless_handler.upload_file", _tampering_upload)
+
+    with pytest.raises(AttemptClaimedError, match="package changed under handoff"):
+        handler(job)
+
+    assert fake_s3.objects[vocals_key] == b"tampered"
+    assert fake_s3.deleted == []  # never delete
+    assert f"{prefix}/handoff.json" in fake_s3.objects  # written, then verified
 
 
 def test_transfer_callback_is_thread_safe_and_monotonic():

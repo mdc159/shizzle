@@ -63,16 +63,22 @@ prefix; it is not the new-dispatch layout.
 ### Replay guard (worker-side, 2026-09)
 
 Each attempt prefix is single-owner. The worker claims it with a conditional
-receipt write (`dispatch.json` PUT with `If-None-Match: *`, carrying `claimed_at`
-and a per-invocation `execution_id`); once `handoff.json` is visible the worker
-treats the attempt as complete, returns the stored completion metadata, and
-performs no writes at all. An invocation that does not own the claim never
-reports completion — the handler raises and the RunPod job fails, so the
-orchestrator retries the dispatch under a fresh idempotency key (invariant
-B12). A claim abandoned longer than `SHIZZLE_DISPATCH_STALE_SECONDS`
-(default 900 s) is reclaimed by the next redelivery via an `If-Match` receipt
-PUT, and ownership is re-checked immediately before the final `handoff.json`
-write. On stores without conditional-write support,
+receipt write (`dispatch.json` PUT with `If-None-Match: *`, carrying
+`claimed_at`, `heartbeat_at`, and a per-invocation `execution_id`); once
+`handoff.json` is visible the worker treats the attempt as complete, returns
+the stored completion metadata, and performs no writes at all. Ownership is
+proven before every package write by a conditional receipt heartbeat
+(`If-Match` refresh of `heartbeat_at`: after download, after separation,
+before each stem upload, and before the handoff), and a claim is reclaimable
+only once its `heartbeat_at` is older than `SHIZZLE_DISPATCH_STALE_SECONDS`
+(default 900 s) — a live worker that heartbeats per stem is never reclaimed
+under, and a displaced predecessor fails its next proof before any PUT.
+An invocation that does not own the claim never reports completion — the
+handler raises and the RunPod job fails, so the orchestrator retries the
+dispatch under a fresh idempotency key (invariant B12). After the conditional
+`handoff.json` write the handler re-verifies the published package (stem
+ETags against recorded upload ETags, handoff bytes by sha256) and fails the
+job on any mismatch. On stores without conditional-write support,
 `SHIZZLE_CONDITIONAL_DISPATCH=0` falls back to an unconditional receipt
 write and the guard degrades to the completion check alone. A completed
 package therefore cannot be mutated or torn by a redelivered or racing

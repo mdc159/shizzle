@@ -42,13 +42,16 @@ The worker claims an attempt prefix with `dispatch.json` PUT `If-None-Match: *`
 then goes unconditional (a warning is logged) and the replay guard degrades
 to the completion check alone.
 
-The receipt carries `claimed_at` (UTC ISO-8601) and a per-invocation
-`execution_id`. A non-owner never reports completion — the handler raises
-`AttemptClaimedError`, the RunPod job fails, and the orchestrator retries the
-track under a fresh idempotency key (invariant B12). A claim abandoned longer
-than `SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s) is reclaimed by the
-next redelivery via an `If-Match` receipt PUT, and ownership is re-checked
-before the final `handoff.json` write.
+The receipt carries `claimed_at` and `heartbeat_at` (UTC ISO-8601) and a
+per-invocation `execution_id`. A non-owner never reports completion — the
+handler raises `AttemptClaimedError`, the RunPod job fails, and the
+orchestrator retries the track under a fresh idempotency key (invariant
+B12). Ownership is proven by a conditional receipt heartbeat (`If-Match`
+refresh of `heartbeat_at`) before every package write — per stem upload and
+before the handoff — and a claim is reclaimable only once `heartbeat_at` is
+older than `SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s). After the
+handoff the handler re-verifies the package (stem ETags, handoff sha256)
+and fails the job if anything changed under it.
 
 ## Repoint an endpoint
 

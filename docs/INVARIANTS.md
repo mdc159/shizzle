@@ -68,20 +68,26 @@ normalization or lossy encode may be applied.
 **Invariant:** Each dispatch attempt MUST write beneath its own immutable
 `attempts/<sha256(idempotency_key)>` prefix. The prefix is claimed by a
 conditional receipt write (`dispatch.json` PUT with `IfNoneMatch: *`,
-carrying `claimed_at` and a per-invocation `execution_id`), and once
-`handoff.json` is visible the handler is a no-op for that attempt — a
-redelivery returns the stored completion metadata with no writes. Any
-invocation that does not own the claim (concurrent loser, non-stale
-predecessor, or a claim reclaimed by someone else first) raises
-`AttemptClaimedError` so the RunPod job fails and the orchestrator retries
-under a fresh idempotency key (B12); a claim abandoned longer than
-`SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s) is reclaimed via an
-`IfMatch` receipt PUT, and ownership is re-checked immediately before the
-final `handoff.json` write. On stores without conditional-write support,
+carrying `claimed_at`, `heartbeat_at`, and a per-invocation `execution_id`),
+and once `handoff.json` is visible the handler is a no-op for that attempt —
+a redelivery returns the stored completion metadata with no writes.
+Ownership is proven before every package write by a conditional receipt
+heartbeat (`IfMatch` refresh of `heartbeat_at`: after download, after
+separation, before each stem upload, and before the handoff), and staleness
+is measured from `heartbeat_at`: a claim whose heartbeat is older than
+`SHIZZLE_DISPATCH_STALE_SECONDS` (default 900 s) is abandoned and reclaimed
+via an `IfMatch` receipt PUT; a live worker that heartbeats per stem can
+never be reclaimed under. Any invocation that does not own the claim raises
+`AttemptClaimedError` (naming the current owner) so the RunPod job fails and
+the orchestrator retries under a fresh idempotency key (B12). After the
+conditional `handoff.json` write the handler re-verifies the published
+package (stem ETags against the recorded upload ETags, handoff bytes by
+sha256) and raises "package changed under handoff" on any mismatch,
+deleting nothing. On stores without conditional-write support,
 `SHIZZLE_CONDITIONAL_DISPATCH=0` falls back to an unconditional receipt PUT
 (guard degrades to the completion check).
 - Where: `stemsplit/lossless_handler.py`
-- Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_attempt_prefix_is_deterministic_and_isolates_retries`, `stemsplit/tests/test_wave3_hardening.py::test_handler_isolates_each_dispatch_attempt`, `stemsplit/tests/test_wave3_hardening.py::test_handler_replay_of_completed_attempt_writes_nothing`, `stemsplit/tests/test_wave3_hardening.py::test_concurrent_replays_only_one_claims`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_is_reclaimed_when_stale`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_raises_when_not_stale`, `stemsplit/tests/test_wave3_hardening.py::test_late_predecessor_cannot_write_handoff`, `library/tests/test_orchestrator_unit.py::test_legacy_unconfirmed_package_uses_base_prefix`
+- Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_attempt_prefix_is_deterministic_and_isolates_retries`, `stemsplit/tests/test_wave3_hardening.py::test_handler_isolates_each_dispatch_attempt`, `stemsplit/tests/test_wave3_hardening.py::test_handler_replay_of_completed_attempt_writes_nothing`, `stemsplit/tests/test_wave3_hardening.py::test_concurrent_replays_only_one_claims`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_is_reclaimed_when_stale`, `stemsplit/tests/test_wave3_hardening.py::test_crash_after_claim_raises_when_not_stale`, `stemsplit/tests/test_wave3_hardening.py::test_lost_stale_reclaim_reports_owner_and_writes_nothing`, `stemsplit/tests/test_wave3_hardening.py::test_late_predecessor_cannot_write_handoff`, `stemsplit/tests/test_wave3_hardening.py::test_displaced_predecessor_cannot_overwrite_stems`, `stemsplit/tests/test_wave3_hardening.py::test_live_worker_heartbeats_per_stem_and_is_never_stale`, `stemsplit/tests/test_wave3_hardening.py::test_package_changed_under_handoff_raises`, `library/tests/test_orchestrator_unit.py::test_legacy_unconfirmed_package_uses_base_prefix`
 - Violation smell: writing any package object outside the attempt prefix, or
   deriving the prefix from anything but the idempotency key hash.
 
