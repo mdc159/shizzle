@@ -428,6 +428,28 @@ async def test_legacy_unconfirmed_dispatch_blocks_redispatch_after_upgrade(
     ) is None
 
 
+async def test_expired_owner_cannot_record_worker_progress(job_repo, upload_job):
+    """B2 sibling (PR 42 review): a worker whose lease has expired but has
+    not yet been reclaimed is still the recorded owner — its progress write
+    must be ignored so dead work cannot look live."""
+    t0 = utcnow() - timedelta(seconds=120)
+    claimed = await job_repo.claim_next(worker_id="A", lease_seconds=5.0, now=t0)
+    assert claimed is not None and claimed.id == upload_job.id
+    # A is still lease_owner, but the lease expired ~115 s ago.
+    assert claimed.lease_owner == "A"
+
+    assert (
+        await job_repo.record_worker_progress(
+            upload_job.id, phase="separating", worker_id="A"
+        )
+        is False
+    )
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase is None
+    assert job.worker_heartbeat_at is None
+    assert [event.event for event in await job_repo.list_events(upload_job.id)] == ["created"]
+
+
 async def test_stale_worker_cannot_fail_retry_or_advance_after_reclaim(job_repo, upload_job):
     """B2 fence on stage-outcome writes (issue #19 probe): after B reclaims
     A's expired lease, every A-attempted write is rejected and B's ownership

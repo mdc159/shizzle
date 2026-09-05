@@ -150,15 +150,21 @@ class InvalidTransition(Exception):
         self.target = target
 
 
+def _lease_is_owned(job: Job, worker_id: str, now: datetime) -> bool:
+    """B2 ownership test: the caller must be the recorded owner of an
+    unexpired lease (None or past expiry fails, mirroring record_dispatch)."""
+    lease_expires_at = _aware(job.lease_expires_at)
+    return (
+        job.lease_owner == worker_id
+        and lease_expires_at is not None
+        and lease_expires_at > now
+    )
+
+
 def _require_lease(job: Job, worker_id: str, target: JobStage, now: datetime) -> None:
     """B2 fence for stage-outcome writes: inside the locked transaction, the
     caller must still own an unexpired lease, exactly like record_dispatch."""
-    lease_expires_at = _aware(job.lease_expires_at)
-    if (
-        job.lease_owner != worker_id
-        or lease_expires_at is None
-        or lease_expires_at <= now
-    ):
+    if not _lease_is_owned(job, worker_id, now):
         raise InvalidTransition(job.id, job.status, target)
 
 
@@ -494,15 +500,17 @@ class JobRepository:
     ) -> bool:
         """Record only worker phase changes, keeping heartbeat history bounded.
 
-        B2 sibling: a caller that no longer owns the lease is a stale poller;
-        its write is a silent no-op rather than an error, so polling survives
-        a reclaim without corrupting the new owner's heartbeat trail.
+        B2 sibling: only the owner of an unexpired lease may write — an
+        expired-but-unreclaimed lease must not pass dead work off as live.
+        A caller without a live lease is a stale poller; its write is a
+        silent no-op rather than an error, so polling survives a reclaim
+        without corrupting the new owner's heartbeat trail.
         """
         async with self._sf() as session, session.begin():
             job = await session.get(Job, job_id, with_for_update=True)
             if job is None:
                 raise LookupError(f"job {job_id} does not exist")
-            if job.lease_owner != worker_id:
+            if not _lease_is_owned(job, worker_id, utcnow()):
                 return False
             if job.worker_phase == phase:
                 # A stable work phase still proves liveness. Queue age is the

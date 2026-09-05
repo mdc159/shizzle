@@ -161,7 +161,8 @@ scoped the same way. Stage-outcome writes are fenced identically (issue #19):
 `advance`, `fail_job`, `schedule_retry`, and `publish_track` require
 `lease_owner == worker_id` with an unexpired lease (raising
 `InvalidTransition` otherwise), and `record_worker_progress` is a silent no-op
-for a caller that no longer owns the lease. `confirm_dispatch` stays
+for any caller without an unexpired lease it owns (owner plus expiry, the
+same rule). `confirm_dispatch` stays
 lease-independent by design (B4).
 - Where: `library/src/shizzle_server/db/repository.py`
 - Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
