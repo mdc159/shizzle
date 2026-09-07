@@ -919,6 +919,12 @@ def _ingest_steps(
                 )
             generation = int(row.generation)
             if _published_manifest_sha(s3, bucket, track_id, generation) == dropped_sha:
+                # A registered track is acknowledged as complete only after
+                # its published media are re-proven (Greptile P1, final
+                # batch): a stem removed or altered after publication must
+                # surface as GENERATION_UNVERIFIED, not as success, and the
+                # replacement drop must stay in place for repair.
+                _verify_landed_generation(publisher, track_id, generation, expected)
                 if not dry_run:
                     _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
                 return write_result("already-published", generation=generation)
@@ -941,6 +947,7 @@ def _ingest_steps(
         # finished below without re-downloading or re-copying — the landed
         # generation is re-proven instead, R1).
         if database_url is None:
+            _verify_landed_generation(publisher, track_id, generation, expected)
             if not dry_run:
                 _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
             return write_result("already-published", generation=generation)

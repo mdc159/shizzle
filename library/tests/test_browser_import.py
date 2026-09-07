@@ -1107,3 +1107,42 @@ def test_cli_error_never_prints_secrets(s3, settings, engine, monkeypatch, capsy
     assert payload["status"] == "error"
     assert payload["type"] == "RuntimeError"
     assert payload["message"] == "operation failed"
+
+
+def test_registered_retry_with_tampered_published_stem_is_unverified(
+    s3, settings, engine, track_repo, passing_audits
+):
+    """Final batch (Greptile P1): an already-registered track whose published
+    media were altered must not be acknowledged as already-published; the
+    replacement drop stays in place and the row is untouched."""
+    ref = "youtube-regtamper001"
+    _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    assert _ingest(s3, ref, database_url=settings.database_url)["status"] == "published"
+    row_before = _run(track_repo.get(tid))
+    s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/stems/drums.m4a", Body=b"corrupted")
+
+    _seed_drop(s3, ref)  # identical replacement drop
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref, database_url=settings.database_url)
+
+    assert excinfo.value.code == "GENERATION_UNVERIFIED"
+    assert _read_result(s3, ref)["code"] == "GENERATION_UNVERIFIED"
+    assert len(_keys(s3, f"imports/{ref}/")) == len(MEDIA_FILES) + 2  # drop kept for repair
+    row_after = _run(track_repo.get(tid))
+    assert row_after is not None and row_after.integrity == row_before.integrity
+
+
+def test_dbless_rerun_with_tampered_published_stem_is_unverified(s3, passing_audits):
+    """Same guard on the DB-less already-published path."""
+    ref = "youtube-dblesstamper1"
+    _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    assert _ingest(s3, ref)["status"] == "published"
+    s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/video.mp4", Body=b"corrupted")
+
+    _seed_drop(s3, ref)
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref)
+    assert excinfo.value.code == "GENERATION_UNVERIFIED"
+    assert len(_keys(s3, f"imports/{ref}/")) == len(MEDIA_FILES) + 2
