@@ -62,8 +62,9 @@ production library filter (C7) requires:
 - `~/shizzle-test/.env` sets `AWS_ENDPOINT_URL=http://minio:9000`,
   `AWS_REGION`, `S3_MEDIA_BUCKET=karaoke-pimpshizzle` and the MinIO root
   credentials (test-only values; never production keys).
-- `Caddyfile` maps the same-origin media path to the bucket in place of
-  CloudFront:
+- `Caddyfile` (this directory's copy now carries the block, so the documented
+  scp step reproduces it) maps the same-origin media path to the bucket in
+  place of CloudFront:
 
   ```text
   handle_path /cdn/* {

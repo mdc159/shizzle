@@ -32,18 +32,25 @@ successful ingest the dropped media are deleted, so a retry must be
 recognised by the published manifest hash before any inventory check. Two
 race fences back that up for concurrent ingests of different content: the
 published manifest hash is re-read after ``publish`` (which no-ops on an
-existing generation) and the row's recorded ``manifest_sha256`` is re-checked
-immediately before registration — a residual window remains between that
-read and the ``FOR UPDATE`` write; the drop-box is single-operator today.
+existing generation), the LANDED generation's seven objects are re-verified
+before any registration (a mixed generation is unregisterable,
+``GENERATION_UNVERIFIED``), and the row's recorded ``manifest_sha256`` is
+re-checked immediately before registration — a residual window remains
+between that read and the ``FOR UPDATE`` write; the drop-box is single-
+operator today, and a per-``source_ref`` lock across that window is tracked
+as a follow-up (per-attempt staging prefixes stay out of scope: the
+Publisher's layout is fixed).
 
-Usage (the api image has ffmpeg/ffprobe and the same ``.env`` as the
-orchestrator):
+Usage — from the production release directory (the api image has
+ffmpeg/ffprobe and the same ``.env`` as the orchestrator):
 
-    docker compose -f deploy/vps/compose.prod.yml exec api \
+    cd /opt/shizzle/prod
+    docker compose -f compose.prod.yml exec api \
         python -m shizzle_server.publish.browser_import --source-ref <ref>
 
-Exit codes: 0 published / already-published / would-publish, 2 rejected,
-3 not ready. Credentials never appear in output (E3).
+Exit codes: 0 published / already-published / would-publish / would-register,
+2 rejected, 3 not ready, 4 error (sanitized; credentials never appear in
+output, E3).
 """
 
 from __future__ import annotations
@@ -66,7 +73,7 @@ from typing import TYPE_CHECKING, Any
 from ..db.repository import ImportConflict, TrackRepository, track_id_for_import
 from ..metadata import resolve_track_metadata
 from .delivery_profile import (
-    AUDIO_SAMPLE_RATE,
+    AUDIO_COMPATIBLE_SAMPLE_RATES,
     CANONICAL_STEM_IDS,
     MAX_TOTAL_AVERAGE_BITRATE,
     PROFILE_ID,
@@ -83,6 +90,7 @@ from .publisher import (
     PublishError,
     StagedObject,
     _is_not_found,
+    _stored_sha256,
     generation_prefix,
     manifest_key,
     staging_prefix,
@@ -133,11 +141,47 @@ def _issue(code: str, message: str, artifact: str | None = None) -> dict[str, An
     return ProfileIssue(code, message, artifact).as_dict()
 
 
+def _sanitize_error(exc: Exception) -> dict[str, Any]:
+    """E3-safe error summary: never the raw exception text.
+
+    botocore exceptions stringify with full endpoint/proxy URLs, which can
+    carry embedded credentials. Only the class name, the service error code,
+    and the service-provided message (when present) are safe to print.
+    """
+    response = getattr(exc, "response", None)
+    code: Any = None
+    message: Any = None
+    if isinstance(response, dict):
+        error = response.get("Error")
+        if isinstance(error, dict):
+            code = error.get("Code")
+            message = error.get("Message")
+    return {
+        "type": exc.__class__.__name__,
+        "code": str(code) if code is not None else None,
+        "message": str(message)[:300] if isinstance(message, str) else "operation failed",
+    }
+
+
 def _finite_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _is_zero_number(value: Any) -> bool:
+    """Exactly the number 0 — ``False == 0`` in Python, so booleans are refused."""
+    return not isinstance(value, bool) and isinstance(value, int | float) and value == 0
+
+
+def _is_compatible_rate(value: Any) -> bool:
+    """A non-bool int in the profile's compatible sample rates (44100/48000)."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and value in AUDIO_COMPATIBLE_SAMPLE_RATES
+    )
 
 
 # --- manifest shape (pure) ----------------------------------------------------
@@ -238,11 +282,14 @@ def validate_import_manifest(
                 "timeline",
             )
         )
-    elif timeline.get("start_ms") != 0 or timeline.get("sample_rate_hz") != AUDIO_SAMPLE_RATE:
+    elif not _is_zero_number(timeline.get("start_ms")) or not _is_compatible_rate(
+        timeline.get("sample_rate_hz")
+    ):
         issues.append(
             ProfileIssue(
                 "manifest-timeline",
-                "timeline must declare start_ms 0 and sample_rate_hz 44100",
+                "timeline must declare start_ms as the number 0 and sample_rate_hz as one of "
+                f"{AUDIO_COMPATIBLE_SAMPLE_RATES}",
                 "timeline",
             )
         )
@@ -252,6 +299,7 @@ def validate_import_manifest(
         if (
             isinstance(actual_ms, bool)
             or not isinstance(actual_ms, int | float)
+            or not math.isfinite(actual_ms)
             or abs(actual_ms - expected_ms) > 1
         ):
             issues.append(
@@ -265,6 +313,14 @@ def validate_import_manifest(
     title = manifest.get("title")
     if not isinstance(title, str) or not title.strip():
         issues.append(ProfileIssue("manifest-title", "title must be a non-empty string"))
+
+    # R15: gate artist BEFORE any copy so resolve_track_metadata can never
+    # raise after publish on a non-string artist.
+    artist = manifest.get("artist")
+    if artist is not None and not isinstance(artist, str):
+        issues.append(
+            ProfileIssue("manifest-artist", "artist, when present, must be a string")
+        )
 
     integrity = manifest.get("integrity")
     objects = integrity.get("objects") if isinstance(integrity, dict) else None
@@ -347,6 +403,14 @@ def validate_import_manifest(
     return issues
 
 
+def timeline_sample_rate(manifest: dict[str, Any]) -> int:
+    """The manifest's timeline rate; 44100 when missing/unusable."""
+    rate = (manifest.get("timeline") or {}).get("sample_rate_hz")
+    if isinstance(rate, bool) or not isinstance(rate, int):
+        return int(AUDIO_COMPATIBLE_SAMPLE_RATES[0])
+    return rate
+
+
 def expected_media_files(manifest: dict[str, Any]) -> dict[str, tuple[int, str]]:
     """``{file: (bytes, sha256)}`` for the seven declared media files."""
     objects = manifest.get("integrity", {}).get("objects", [])
@@ -398,6 +462,17 @@ def _measured_duration(audit: dict[str, Any]) -> float | None:
         return None
 
 
+def _probe_sample_rate(audit: dict[str, Any]) -> int | None:
+    probe = audit.get("probe") or {}
+    for stream in probe.get("streams", []):
+        if stream.get("codec_type") == "audio" and stream.get("sample_rate") is not None:
+            try:
+                return int(stream["sample_rate"])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def validate_downloaded_bytes(
     workdir: Path,
     manifest: dict[str, Any],
@@ -406,17 +481,20 @@ def validate_downloaded_bytes(
     """Re-prove the dropped bytes locally, then run the full delivery audit.
 
     Every downloaded object's sha256 must equal the declared one (A4: the
-    manifest is never trusted). Each stem then goes through
-    ``audit_audio_file`` and the video through ``audit_video_file`` — the same
-    auditors the lossless intake uses. On top of the auditors this adds the
-    checks they cannot make: inter-stem duration spread, the C3 stem-format
-    guard over the actual sizes, and the complete-generation average-bitrate
+    manifest is never trusted); a file that already failed its sha256 gate is
+    NOT audited further (no full decode of known-bad bytes). Each surviving
+    stem goes through ``audit_audio_file`` and the video through
+    ``audit_video_file`` — the same auditors the lossless intake uses. On top
+    of the auditors this adds the checks they cannot make: stem sample rates
+    vs the timeline, inter-stem duration spread, the C3 stem-format guard
+    over the actual sizes, and the complete-generation average-bitrate
     budget. Any error-severity issue raises ``ImportRejected`` (C8); the
     returned audit list still carries warnings.
     """
     issues: list[dict[str, Any]] = []
     audits: list[dict[str, Any]] = []
     duration = float(manifest["duration"])
+    timeline_rate = timeline_sample_rate(manifest)
 
     for role in CANONICAL_STEM_IDS:
         rel = f"stems/{role}.m4a"
@@ -430,6 +508,7 @@ def validate_downloaded_bytes(
                     rel,
                 )
             )
+            continue
         try:
             # preserve_existing_lossy=True is REQUIRED here: the VPS never
             # re-encodes dropped bytes, so the profile's "existing audio" row
@@ -456,17 +535,33 @@ def validate_downloaded_bytes(
                 "video.mp4",
             )
         )
-    try:
-        # The video audit flags an audio stream in the delivery video as
-        # `video-has-audio` at error severity (D6) — an error here rejects.
-        audits.append(
-            audit_video_file(video, artifact="video.mp4", expected_duration=duration)
-        )
-    except (OSError, MediaAuditError) as exc:
-        issues.append(_issue("audit-failed", f"video.mp4: {exc}", "video.mp4"))
+    else:
+        try:
+            # The video audit flags an audio stream in the delivery video as
+            # `video-has-audio` at error severity (D6) — an error here rejects.
+            audits.append(
+                audit_video_file(video, artifact="video.mp4", expected_duration=duration)
+            )
+        except (OSError, MediaAuditError) as exc:
+            issues.append(_issue("audit-failed", f"video.mp4: {exc}", "video.mp4"))
 
     for audit in audits:
         issues.extend(i for i in audit.get("issues", []) if i.get("severity") == "error")
+
+    for audit in audits:
+        artifact = str(audit.get("artifact", ""))
+        if not artifact.startswith("stems/"):
+            continue
+        rate = _probe_sample_rate(audit)
+        if rate is not None and rate != timeline_rate:
+            issues.append(
+                _issue(
+                    "stem-sample-rate-mismatch",
+                    f"{artifact}: probed {rate} Hz does not match the timeline's "
+                    f"{timeline_rate} Hz",
+                    artifact,
+                )
+            )
 
     stem_durations = [
         d
@@ -538,6 +633,7 @@ def _register_track(
     manifest_sha: str,
     audits: list[dict[str, Any]],
     publish_result: PublishResult | None,
+    retry_evidence: dict[str, Any] | None = None,
 ) -> None:
     meta = resolve_track_metadata(manifest.get("title"), manifest.get("artist"), None)
     integrity: dict[str, Any] = {
@@ -547,6 +643,8 @@ def _register_track(
         "manifest": manifest.get("integrity"),
         "audit": audits,
     }
+    if retry_evidence is not None:
+        integrity["retry_verification"] = retry_evidence
     if publish_result is not None and publish_result.verification is not None:
         integrity["publisher"] = publish_result.verification.to_integrity()
 
@@ -585,6 +683,83 @@ def _published_manifest_sha(
     return manifest_sha256(raw)
 
 
+def _verify_landed_generation(
+    publisher: Publisher,
+    track_id: uuid.UUID,
+    generation: int,
+    expected: dict[str, tuple[int, str]],
+) -> dict[str, Any]:
+    """Re-prove the PUBLISHED generation's seven media objects (R1/R14).
+
+    Runs before any registration — after every ``publish`` and on every
+    completed-retry — because a concurrent ingest of different content can
+    leave a MIXED generation behind (its manifest no-ops under C1 while its
+    media copies land next to ours). Size comes from ``head_object``; sha256
+    from the stored ``ChecksumSHA256`` when S3 has one, else streamed. Any
+    absence or mismatch → ``GENERATION_UNVERIFIED`` and nothing is
+    registered. Per-attempt staging prefixes would narrow this window
+    further but the Publisher's layout is fixed; that stays out of scope.
+    """
+    prefix = generation_prefix(track_id, generation)
+    evidence: dict[str, Any] = {}
+    for file in sorted(expected):
+        size, sha = expected[file]
+        key = f"{prefix}{file}"
+        try:
+            head: dict[str, Any] = publisher.s3.head_object(
+                Bucket=publisher.bucket, Key=key, ChecksumMode="ENABLED"
+            )
+        except Exception as exc:
+            if _is_not_found(exc):
+                raise ImportRejected(
+                    "GENERATION_UNVERIFIED",
+                    [_issue("generation-object-missing", f"{file}: absent from the published generation", file)],
+                    generation=generation,
+                ) from exc
+            raise
+        actual_size = int(head.get("ContentLength", -1))
+        if actual_size != size:
+            raise ImportRejected(
+                "GENERATION_UNVERIFIED",
+                [
+                    _issue(
+                        "generation-object-size",
+                        f"{file}: published size {actual_size} != declared {size}",
+                        file,
+                    )
+                ],
+                generation=generation,
+            )
+        stored = _stored_sha256(head)
+        actual_sha = stored if stored is not None else publisher._stream_sha256(key)
+        if actual_sha.lower() != sha.lower():
+            raise ImportRejected(
+                "GENERATION_UNVERIFIED",
+                [
+                    _issue(
+                        "generation-object-sha",
+                        f"{file}: published sha256 does not match the declared digest",
+                        file,
+                    )
+                ],
+                generation=generation,
+            )
+        evidence[file] = {"size": actual_size, "sha256_source": "s3-checksum" if stored else "streamed"}
+    return {"result": "verified", "files": evidence}
+
+
+def _cleanup_drop_media(s3: Any, bucket: str, prefix: str, expected: dict[str, tuple[int, str]]) -> None:
+    """Delete the seven dropped media objects if present; manifest.json and
+    result.json stay (provenance and receipt)."""
+    for file in sorted(expected):
+        s3.delete_object(Bucket=bucket, Key=f"{prefix}{file}")
+
+
+def _delete_prefix(publisher: Publisher, prefix: str) -> None:
+    for rel in publisher.list_prefix(prefix):
+        publisher.s3.delete_object(Bucket=publisher.bucket, Key=f"{prefix}{rel}")
+
+
 # --- orchestration ------------------------------------------------------------
 
 
@@ -617,6 +792,11 @@ def ingest(
     publisher = Publisher(s3, bucket)
     track_id = track_id_for_import(source_ref)
     at = now or datetime.now(UTC)
+    # R6: every result carries the sha256 of the dropped manifest bytes so a
+    # client can correlate the receipt with the manifest it uploaded. The
+    # steps fill the holder as soon as the raw bytes are read (even a
+    # manifest that fails to parse has a hash).
+    manifest_sha_holder: list[str | None] = [None]
 
     def write_result(
         status: str,
@@ -633,6 +813,7 @@ def ingest(
             "generation": generation,
             "s3Prefix": generation_prefix(track_id, generation).rstrip("/"),
             "manifestKey": manifest_key(track_id, generation),
+            "manifestSha256": manifest_sha_holder[0],
             "code": code,
             "issues": issues or [],
             "warnings": warnings or [],
@@ -663,6 +844,7 @@ def ingest(
             max_duration_seconds=max_duration_seconds,
             dry_run=dry_run,
             workdir=workdir,
+            manifest_sha_holder=manifest_sha_holder,
             write_result=write_result,
             reject=reject,
         )
@@ -687,6 +869,7 @@ def _ingest_steps(
     max_duration_seconds: float,
     dry_run: bool,
     workdir: Path | None,
+    manifest_sha_holder: list[str | None],
     write_result: Callable[..., dict[str, Any]],
     reject: Callable[..., ImportRejected],
 ) -> dict[str, Any]:
@@ -700,6 +883,7 @@ def _ingest_steps(
     # 3. parse the manifest bytes.
     raw: bytes = s3.get_object(Bucket=bucket, Key=f"{prefix}manifest.json")["Body"].read()
     dropped_sha = manifest_sha256(raw)
+    manifest_sha_holder[0] = dropped_sha
     try:
         manifest = json.loads(raw)
         if not isinstance(manifest, dict):
@@ -735,6 +919,8 @@ def _ingest_steps(
                 )
             generation = int(row.generation)
             if _published_manifest_sha(s3, bucket, track_id, generation) == dropped_sha:
+                if not dry_run:
+                    _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
                 return write_result("already-published", generation=generation)
             raise reject(
                 "TRACK_CONFLICT",
@@ -752,9 +938,11 @@ def _ingest_steps(
         # The generation is complete and its manifest is byte-identical to
         # the drop: a DB-less rerun is already published; with a DB and no
         # row it is a crash between publish and register (a completed retry,
-        # finished below without re-downloading or re-copying — the completed
-        # generation proves a prior full validation).
+        # finished below without re-downloading or re-copying — the landed
+        # generation is re-proven instead, R1).
         if database_url is None:
+            if not dry_run:
+                _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
             return write_result("already-published", generation=generation)
         completed_retry = True
     else:
@@ -771,6 +959,15 @@ def _ingest_steps(
                 generation=generation,
             )
         completed_retry = False
+
+    retry_evidence: dict[str, Any] | None = None
+    if completed_retry:
+        # R1: a crash between publish and register must not register a
+        # generation it never proved — re-verify the landed objects (read-only).
+        retry_evidence = _verify_landed_generation(publisher, track_id, generation, expected)
+        if dry_run:
+            # R24: --dry-run writes/cleans/registers nothing on ANY path.
+            return write_result("would-register", generation=generation)
 
     # 6. inventory: exactly the declared files, at the declared sizes — only
     #    for a drop that still needs publishing (already-published and
@@ -857,31 +1054,56 @@ def _ingest_steps(
                     ],
                     generation=generation,
                 )
+            # R14: a no-opped publish can still sit on top of media copied by
+            # a concurrent ingest — prove the landed objects before registering.
+            _verify_landed_generation(publisher, track_id, generation, expected)
     except PublishError as exc:
         # Staged verification / promotion failed: the bytes changed under us
-        # or violate the format guard — a rejection, not a crash.
-        raise reject("INTEGRITY_GATE_FAILED", [_issue("publisher", str(exc)[:400])]) from exc
+        # or violate the format guard — a rejection, not a crash. R18: clear
+        # the incomplete staging and generation prefixes (the dropped media
+        # stay) so no later run can mistake a partial generation for one of
+        # its own. R2: the issue message is sanitized, never str(exc).
+        if not publisher.is_published(track_id, generation):
+            _delete_prefix(publisher, staging_prefix(track_id, generation))
+            _delete_prefix(publisher, generation_prefix(track_id, generation))
+        details = _sanitize_error(exc)
+        label = details["type"] + (f":{details['code']}" if details["code"] else "")
+        raise reject(
+            "INTEGRITY_GATE_FAILED", [_issue("publisher", f"publisher gate failed ({label})")]
+        ) from exc
     finally:
         if tmp is not None:
             tmp.cleanup()
 
     # 12. register the row (C5/C6/C8); title/artist resolve like any ingest.
     if database_url:
-        # Close the identity window as far as the drop-box needs it: a row
-        # that appeared meanwhile carrying a different recorded manifest hash
-        # means a concurrent ingest won this ref. A residual window remains
-        # between this read and the FOR UPDATE write; the drop-box is
-        # single-operator today.
+        # Close the identity window as far as the drop-box needs it: a live
+        # row that appeared meanwhile must carry OUR manifest hash — absent,
+        # malformed, or different ``manifest_sha256`` all mean someone else
+        # owns this ref now (R20). A residual window remains between this
+        # read and the FOR UPDATE write; the drop-box is single-operator
+        # today — a per-source_ref lock is tracked as a follow-up, and the
+        # landed-generation verification (R14) already makes a mixed or
+        # mismatched generation unregisterable.
         current = _get_track(database_url, track_id)
         if current is not None and current.deleted_at is None:
-            recorded = (current.integrity or {}).get("manifest_sha256")
-            if isinstance(recorded, str) and recorded != dropped_sha:
+            recorded = (
+                current.integrity.get("manifest_sha256")
+                if isinstance(current.integrity, dict)
+                else None
+            )
+            if (
+                not isinstance(recorded, str)
+                or re.fullmatch(r"[0-9a-f]{64}", recorded) is None
+                or recorded != dropped_sha
+            ):
                 raise reject(
                     "TRACK_CONFLICT",
                     [
                         _issue(
                             "track-conflict",
-                            "a concurrent ingest registered different content for this ref",
+                            "the row for this ref records a different or unknown manifest; "
+                            "it is never overwritten by a drop",
                         )
                     ],
                     generation=generation,
@@ -896,6 +1118,7 @@ def _ingest_steps(
                 manifest_sha=dropped_sha,
                 audits=audits,
                 publish_result=publish_result,
+                retry_evidence=retry_evidence,
             )
         except ImportConflict as exc:
             raise reject(
@@ -904,11 +1127,8 @@ def _ingest_steps(
 
     # 13. success cleanup: staging objects and the seven dropped media files
     #     go away; manifest.json stays as provenance next to result.json.
-    stage = staging_prefix(track_id, generation)
-    for rel in publisher.list_prefix(stage):
-        s3.delete_object(Bucket=bucket, Key=f"{stage}{rel}")
-    for file in sorted(expected):
-        s3.delete_object(Bucket=bucket, Key=f"{prefix}{file}")
+    _delete_prefix(publisher, staging_prefix(track_id, generation))
+    _cleanup_drop_media(s3, bucket, prefix, expected)
 
     logger.info(
         "browser import %s -> %s (generation %d)",
@@ -970,6 +1190,9 @@ def main(argv: list[str] | None = None) -> None:
             }
         )
         raise SystemExit(2) from None
+    except Exception as exc:  # E3: never print raw exception text (URLs)
+        emit({"status": "error", **_sanitize_error(exc)})
+        raise SystemExit(4) from None
     emit(result)
     raise SystemExit(0)
 

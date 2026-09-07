@@ -34,20 +34,6 @@ pytestmark = pytest.mark.postgres
 
 
 @pytest.fixture
-def fake_aws_credentials(monkeypatch):
-    for var, value in {
-        "AWS_ACCESS_KEY_ID": "testing" * 5,
-        "AWS_SECRET_ACCESS_KEY": "testing" * 6,
-        "AWS_SESSION_TOKEN": "testing",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "AWS_REGION": "us-east-1",
-    }.items():
-        monkeypatch.setenv(var, value)
-    for var in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_PROFILE"):
-        monkeypatch.delenv(var, raising=False)
-
-
-@pytest.fixture
 def s3(fake_aws_credentials):
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")

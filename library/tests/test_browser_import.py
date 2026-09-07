@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -39,26 +40,15 @@ MEDIA_FILES = [f"stems/{role}.m4a" for role in ROLES] + ["video.mp4"]
 
 
 @pytest.fixture
-def fake_aws_credentials(monkeypatch):
-    """Keep this machine's real AWS creds + R2 endpoint override away from moto."""
-    for var, value in {
-        "AWS_ACCESS_KEY_ID": "testing" * 5,
-        "AWS_SECRET_ACCESS_KEY": "testing" * 6,
-        "AWS_SESSION_TOKEN": "testing",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "AWS_REGION": "us-east-1",
-    }.items():
-        monkeypatch.setenv(var, value)
-    for var in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_PROFILE"):
-        monkeypatch.delenv(var, raising=False)
-
-
-@pytest.fixture
 def s3(fake_aws_credentials):
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket=BUCKET)
         yield client
+
+
+#: Sample rate the passing audit fakes report; tests override it (R16).
+_FAKE_RATE = {"hz": 44100}
 
 
 def _audit(path: Path, artifact: str, duration: float) -> dict[str, Any]:
@@ -69,17 +59,24 @@ def _audit(path: Path, artifact: str, duration: float) -> dict[str, Any]:
         "passed": True,
         "full_decode": "pass",
         "issues": [],
-        "probe": {"format": {"duration": str(duration)}, "streams": []},
+        "probe": {
+            "format": {"duration": str(duration)},
+            "streams": [
+                {"codec_type": "audio", "sample_rate": str(_FAKE_RATE["hz"]),
+                 "duration": str(duration)}
+            ],
+        },
     }
 
 
 @pytest.fixture
 def passing_audits(monkeypatch):
-    monkeypatch.setattr(
-        browser_import,
-        "audit_audio_file",
-        lambda path, *, artifact, expected_duration, **_kw: _audit(path, artifact, expected_duration),
-    )
+    def fake_audio(path, *, artifact, expected_duration, preserve_existing_lossy, **_kw):
+        # R5: dropped bytes are preserved as-is — the flag must never be removed.
+        assert preserve_existing_lossy is True, "browser imports preserve existing lossy audio"
+        return _audit(path, artifact, expected_duration)
+
+    monkeypatch.setattr(browser_import, "audit_audio_file", fake_audio)
     monkeypatch.setattr(
         browser_import,
         "audit_video_file",
@@ -287,9 +284,27 @@ def _mutations():
             lambda m: m["timeline"].update(start_ms=250), "manifest-timeline", id="timeline-start"
         ),
         pytest.param(
-            lambda m: m["timeline"].update(sample_rate_hz=48000),
+            lambda m: m["timeline"].update(sample_rate_hz=22050),
             "manifest-timeline",
             id="timeline-rate",
+        ),
+        pytest.param(
+            lambda m: m["timeline"].update(sample_rate_hz=44100.0),
+            "manifest-timeline",
+            id="timeline-rate-float",
+        ),
+        pytest.param(
+            lambda m: m["timeline"].update(start_ms=False),
+            "manifest-timeline",
+            id="timeline-start-false",
+        ),
+        pytest.param(
+            lambda m: m["timeline"].update(duration_ms=float("nan")),
+            "manifest-timeline",
+            id="timeline-ms-nan",
+        ),
+        pytest.param(
+            lambda m: m.update(artist=5), "manifest-artist", id="artist-type"
         ),
         pytest.param(
             lambda m: m["timeline"].update(duration_ms=m["timeline"]["duration_ms"] + 40),
@@ -350,6 +365,7 @@ def test_manifest_shape_matrix_rejects_with_stable_code(s3, mutate, expected_cod
     assert result["status"] == "rejected"
     assert result["code"] == "MANIFEST_INVALID"
     assert expected_code in [issue["code"] for issue in result["issues"]]
+    assert _keys(s3, "tracks/") == []  # rejected before any copy
 
 
 def test_manifest_not_json_rejected(s3):
@@ -401,7 +417,7 @@ def test_inventory_size_mismatch_rejected(s3):
 # --- integrity gates (C6/C8) --------------------------------------------------
 
 
-def test_sha_mismatch_rejected_no_generation_no_row(s3, settings, engine, track_repo, passing_audits):  # noqa: ARG001
+def test_sha_mismatch_rejected_no_generation_no_row(s3, settings, engine, track_repo, passing_audits, monkeypatch):  # noqa: ARG001
     ref = "youtube-shamismatch1"
     media = _drop_media()
     manifest = _manifest(media)
@@ -411,10 +427,22 @@ def test_sha_mismatch_rejected_no_generation_no_row(s3, settings, engine, track_
     _seed_drop(s3, ref, media=media, manifest=manifest)
     tid = track_id_for_import(ref)
 
+    audited: list[str] = []
+    real_audio = browser_import.audit_audio_file
+
+    def recording_audio(path, **kwargs):
+        audited.append(kwargs["artifact"])
+        return real_audio(path, **kwargs)
+
+    monkeypatch.setattr(browser_import, "audit_audio_file", recording_audio)
+
     with pytest.raises(ImportRejected) as excinfo:
         _ingest(s3, ref, database_url=settings.database_url)
     assert excinfo.value.code == "INTEGRITY_GATE_FAILED"
     assert any(i["code"] == "sha256-mismatch" for i in _read_result(s3, ref)["issues"])
+    # R4: known-bad bytes are never fully decoded — vocals is not audited.
+    assert "stems/vocals.m4a" not in audited
+    assert "stems/drums.m4a" in audited
     with pytest.raises(ClientError):
         s3.head_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/manifest.json")
     assert _run(track_repo.get(tid)) is None  # C6/C8: no row before gates pass
@@ -489,7 +517,7 @@ def test_happy_path_publishes_and_registers(
     s3, settings, engine, track_repo, passing_audits, tmp_path
 ):
     ref = "youtube-happy0000001"
-    _seed_drop(s3, ref)
+    manifest = _seed_drop(s3, ref)
     tid = track_id_for_import(ref)
 
     result = _ingest(s3, ref, database_url=settings.database_url, workdir=tmp_path / "dl")
@@ -497,6 +525,10 @@ def test_happy_path_publishes_and_registers(
     assert result["status"] == "published"
     assert result["trackId"] == str(tid)
     assert result["generation"] == 1
+    dropped_manifest_sha = browser_import.manifest_sha256(
+        json.dumps(manifest).encode()
+    )
+    assert result["manifestSha256"] == dropped_manifest_sha  # R6 correlation
     published = s3.get_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/manifest.json")
     assert json.loads(published["Body"].read())["title"] == "Dropped Track"
 
@@ -620,15 +652,12 @@ def test_register_race_with_different_row_hash_is_conflict(
     manifest = _seed_drop(s3, ref)
     tid = track_id_for_import(ref)
 
-    # Our manifest is already published (a completed retry as far as the
-    # identity check is concerned) ...
-    s3.put_object(
-        Bucket=BUCKET,
-        Key=f"tracks/{tid}/1/manifest.json",
-        Body=json.dumps(manifest).encode(),
-    )
-    # ... but a rival ingest registers the row between our identity check and
-    # our registration, recording a different manifest hash.
+    # Our manifest AND media are already published (a completed retry as far
+    # as the identity check and landed-generation verification are concerned).
+    for file, body in {**_drop_media(), "manifest.json": json.dumps(manifest).encode()}.items():
+        s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/{file}", Body=body)
+    # A rival ingest registers the row between our identity check and our
+    # registration, recording a different manifest hash.
     _run(
         track_repo.upsert_imported(
             tid,
@@ -845,3 +874,236 @@ def test_cli_exit_codes(s3, settings, engine, passing_audits, tmp_path, monkeypa
     not_ready_ref = "youtube-clinr00000001"
     _seed_drop(s3, not_ready_ref, upload_manifest=False)
     assert run_cli(not_ready_ref) == 3
+
+
+# --- landed-generation verification (R1/R14) ----------------------------------
+
+
+def _seed_generation(s3, tid: uuid.UUID, manifest: dict[str, Any]) -> None:
+    """Publish a complete generation by hand (crash-between-publish-and-register)."""
+    payload = {**_drop_media(), "manifest.json": json.dumps(manifest).encode()}
+    for file, body in payload.items():
+        s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/{file}", Body=body)
+
+
+def test_completed_retry_with_altered_published_stem_rejected(
+    s3, settings, engine, track_repo, passing_audits
+):
+    ref = "sha256-retryaltered1"
+    manifest = _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    _seed_generation(s3, tid, manifest)
+    # The published stem was corrupted after the crash.
+    s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/1/stems/vocals.m4a", Body=b"tampered-stem")
+
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref, database_url=settings.database_url)
+
+    assert excinfo.value.code == "GENERATION_UNVERIFIED"
+    assert _run(track_repo.get(tid)) is None  # no row
+    assert len(_keys(s3, f"imports/{ref}/")) == len(MEDIA_FILES) + 2  # drop left intact
+    assert _read_result(s3, ref)["code"] == "GENERATION_UNVERIFIED"
+
+
+def test_generation_tampered_after_publish_is_unverified(
+    s3, settings, engine, track_repo, passing_audits, tmp_path, monkeypatch
+):
+    """R14: even a fresh publish is re-verified before registering — a rival
+    that mixed its media into our generation makes it unregisterable."""
+    from shizzle_server.publish.publisher import Publisher
+
+    ref = "youtube-tamperpublish"
+    _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    real_publish = Publisher.publish
+
+    def tampering_publish(self, track_id_, generation_, staged_):
+        result = real_publish(self, track_id_, generation_, staged_)
+        s3.put_object(
+            Bucket=BUCKET,
+            Key=f"tracks/{track_id_}/{generation_}/stems/vocals.m4a",
+            Body=b"tampered",
+        )
+        return result
+
+    monkeypatch.setattr(Publisher, "publish", tampering_publish)
+
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref, database_url=settings.database_url, workdir=tmp_path / "dl")
+
+    assert excinfo.value.code == "GENERATION_UNVERIFIED"
+    assert _run(track_repo.get(tid)) is None
+
+
+# --- timeline sample-rate agreement (R16) -------------------------------------
+
+
+def test_timeline_48000_accepted_when_stems_agree(s3, passing_audits, monkeypatch, tmp_path):
+    monkeypatch.setitem(_FAKE_RATE, "hz", 48000)
+    ref = "youtube-rate48000001"
+    media = _drop_media()
+    manifest = _manifest(media)
+    manifest["timeline"]["sample_rate_hz"] = 48000
+    _seed_drop(s3, ref, media=media, manifest=manifest)
+
+    assert _ingest(s3, ref, workdir=tmp_path / "dl")["status"] == "published"
+
+
+def test_stem_rate_mismatch_with_timeline_rejected(s3, passing_audits, monkeypatch):
+    monkeypatch.setitem(_FAKE_RATE, "hz", 48000)  # timeline still declares 44100
+    ref = "youtube-ratemismatch1"
+    _seed_drop(s3, ref)
+
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref)
+    assert excinfo.value.code == "INTEGRITY_GATE_FAILED"
+    assert any(
+        i["code"] == "stem-sample-rate-mismatch" for i in _read_result(s3, ref)["issues"]
+    )
+
+
+# --- publisher-failure cleanup and idempotent drop cleanup (R18/R19) ----------
+
+
+def test_publish_failure_clears_incomplete_prefixes(
+    s3, settings, engine, track_repo, passing_audits, tmp_path, monkeypatch
+):
+    from shizzle_server.publish.publisher import PromotionFailed, Publisher, generation_prefix
+
+    ref = "youtube-promotefail01"
+    _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+
+    def failing_promote(self, track_id_, generation_, report_):
+        media = sorted(
+            (o for o in report_.objects if o.file != "manifest.json"), key=lambda o: o.file
+        )
+        for outcome in media[:2]:  # two copies land, then the promotion dies
+            self.copy_object(
+                outcome.staging_key,
+                f"{generation_prefix(track_id_, generation_)}{outcome.file}",
+                outcome.actual_size or 0,
+            )
+        raise PromotionFailed("simulated failure after two copies")
+
+    monkeypatch.setattr(Publisher, "promote", failing_promote)
+
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref, database_url=settings.database_url, workdir=tmp_path / "dl")
+
+    assert excinfo.value.code == "INTEGRITY_GATE_FAILED"
+    assert _keys(s3, f"tracks/{tid}/") == []  # generation AND staging cleared
+    assert len(_keys(s3, f"imports/{ref}/")) == len(MEDIA_FILES) + 2  # drop intact
+    assert _run(track_repo.get(tid)) is None
+
+
+def test_already_published_full_redrop_cleans_dropped_media(
+    s3, settings, engine, track_repo, passing_audits
+):
+    ref = "youtube-redropclean01"
+    manifest = _manifest(_drop_media())
+    _seed_drop(s3, ref, manifest=manifest)
+    assert _ingest(s3, ref, database_url=settings.database_url)["status"] == "published"
+
+    _seed_drop(s3, ref, manifest=manifest)  # producer re-drops identical content
+    result = _ingest(s3, ref, database_url=settings.database_url)
+
+    assert result["status"] == "already-published"
+    assert _keys(s3, f"imports/{ref}/") == ["manifest.json", "result.json"]  # media removed
+
+
+# --- strict pre-register row check (R20) --------------------------------------
+
+
+def test_register_race_with_blank_row_hash_is_conflict(
+    s3, settings, engine, track_repo, monkeypatch
+):
+    """A live row with no valid manifest_sha256 (e.g. written by another tool)
+    is never overwritten by a drop."""
+    ref = "youtube-raceblankrow1"
+    manifest = _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    _seed_generation(s3, tid, manifest)
+    _run(
+        track_repo.upsert_imported(
+            tid,
+            title="Foreign Row",
+            artist="",
+            duration_seconds=10.0,
+            s3_prefix=f"tracks/{tid}/1",
+            manifest_key=f"tracks/{tid}/1/manifest.json",
+            generation=1,
+            integrity={},  # no manifest_sha256 recorded
+        )
+    )
+    before = _run(track_repo.get(tid))
+
+    reads = {"n": 0}
+    real_get = browser_import._get_track
+
+    def racing_get(database_url, track_id_):
+        reads["n"] += 1
+        return None if reads["n"] == 1 else real_get(database_url, track_id_)
+
+    monkeypatch.setattr(browser_import, "_get_track", racing_get)
+
+    with pytest.raises(ImportRejected) as excinfo:
+        _ingest(s3, ref, database_url=settings.database_url)
+    assert excinfo.value.code == "TRACK_CONFLICT"
+    after = _run(track_repo.get(tid))
+    for field in ("title", "artist", "generation", "s3_prefix", "manifest_key", "integrity"):
+        assert getattr(after, field) == getattr(before, field)  # row byte-identical
+
+
+# --- dry-run on the completed-retry path (R24) --------------------------------
+
+
+def test_dry_run_completed_retry_is_would_register(
+    s3, settings, engine, track_repo, passing_audits
+):
+    ref = "sha256-dryretry0001"
+    manifest = _seed_drop(s3, ref)
+    tid = track_id_for_import(ref)
+    _seed_generation(s3, tid, manifest)
+
+    result = _ingest(s3, ref, database_url=settings.database_url, dry_run=True)
+
+    assert result["status"] == "would-register"
+    assert _run(track_repo.get(tid)) is None  # no row
+    assert len(_keys(s3, f"imports/{ref}/")) == len(MEDIA_FILES) + 2  # drop fully intact
+    assert _read_result(s3, ref)["status"] == "would-register"
+
+
+# --- sanitized error path (R2, E3) --------------------------------------------
+
+
+def test_cli_error_never_prints_secrets(s3, settings, engine, monkeypatch, capsys):
+    def exploding_ingest(**_kwargs):
+        raise RuntimeError("boom http://user:SUPERSECRET@proxy.example end")
+
+    monkeypatch.setattr(browser_import, "ingest", exploding_ingest)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "browser_import",
+            "--source-ref",
+            "youtube-secretleak1",
+            "--bucket",
+            BUCKET,
+            "--database-url",
+            settings.database_url,
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        browser_import.main()
+
+    assert excinfo.value.code == 4
+    captured = capsys.readouterr()
+    assert "SUPERSECRET" not in captured.out + captured.err
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["status"] == "error"
+    assert payload["type"] == "RuntimeError"
+    assert payload["message"] == "operation failed"

@@ -120,7 +120,7 @@ the VPS — the api image has ffmpeg/ffprobe and the same `.env` as the
 orchestrator:
 
 ```bash
-docker compose -f deploy/vps/compose.prod.yml exec api python -m shizzle_server.publish.browser_import --source-ref <ref>
+cd /opt/shizzle/prod && docker compose -f compose.prod.yml exec api python -m shizzle_server.publish.browser_import --source-ref <ref>
 ```
 
 The command validates, publishes immutably, and registers the track with no

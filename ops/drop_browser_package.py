@@ -9,8 +9,12 @@ is the completion marker, exactly like the worker's handoff (A1/C2).
 
 The local candidate is verified against the manifest's ``integrity.objects``
 (bytes + sha256) BEFORE any upload, so a corrupt candidate never half-drops.
-Uploads are restartable: an object whose remote size already matches is
-skipped. With ``--wait``, polls for the ingest's ``result.json``.
+Uploads are restartable and content-addressed: a media object is skipped only
+when the remote ETag equals the local MD5, so a same-length-but-different
+remote object is re-uploaded. With ``--wait``, polls for the ingest's
+``result.json`` and returns only a FRESH receipt - one whose ETag changed and
+whose ``manifestSha256`` equals the manifest just uploaded; a stale receipt
+from a previous drop is never returned.
 
 Client-facing contract: ``docs/contributing-completed-media.md``.
 
@@ -110,14 +114,77 @@ def _verify_local(candidate: Path, objects: dict[str, tuple[int, str]]) -> str |
     return None
 
 
-def _remote_size_matches(s3: Any, bucket: str, key: str, size: int) -> bool:
+def _sanitize_error(exc: Exception) -> dict[str, Any]:
+    """E3-safe error summary: never the raw exception text.
+
+    botocore exceptions stringify with full endpoint/proxy URLs, which can
+    carry embedded credentials. Only the class name, the service error code,
+    and the service-provided message (when present) are safe to print.
+    """
+    response = getattr(exc, "response", None)
+    code: Any = None
+    message: Any = None
+    if isinstance(response, dict):
+        error = response.get("Error")
+        if isinstance(error, dict):
+            code = error.get("Code")
+            message = error.get("Message")
+    return {
+        "type": exc.__class__.__name__,
+        "code": str(code) if code is not None else None,
+        "message": str(message)[:300] if isinstance(message, str) else "operation failed",
+    }
+
+
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5()  # noqa: S324 - correlating with S3 ETags, not a security hash
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _remote_etag(s3: Any, bucket: str, key: str) -> str | None:
+    """The object's quoted-stripped ETag, or None when absent."""
     try:
         head = s3.head_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         if str(exc.response.get("Error", {}).get("Code", "")) in ("404", "NoSuchKey", "NotFound"):
-            return False
+            return None
         raise
-    return int(head.get("ContentLength", -1)) == size
+    return str(head.get("ETag", "")).strip('"')
+
+
+def _not_yet(exc: Exception) -> bool:
+    """R9: only absence (404/NoSuchKey) counts as 'the receipt is not there yet'."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    return str(response.get("Error", {}).get("Code", "")) in ("404", "NoSuchKey", "NotFound")
+
+
+def _fetch_receipt(s3: Any, bucket: str, key: str, stale_etag: str | None) -> dict[str, Any] | None:
+    """The fresh receipt, or None while none applies (R7/R9).
+
+    A receipt counts only when its ETag differs from the one recorded before
+    uploading AND its manifestSha256 equals the manifest just uploaded. A
+    malformed body counts as not-yet; any other error propagates (fail fast).
+    """
+    etag = _remote_etag(s3, bucket, key)
+    if etag is None or etag == stale_etag:
+        return None
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        result = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None  # malformed receipt: keep waiting
+    except Exception as exc:
+        if _not_yet(exc):
+            return None  # HEAD/GET race: the receipt vanished between the calls
+        raise
+    if not isinstance(result, dict):
+        return None
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,7 +203,8 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest_path = args.candidate / "manifest.json"
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         _emit({"status": "invalid-manifest", "message": str(exc)})
         return 2
@@ -145,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"status": "invalid-manifest", "message": validated})
         return 2
     objects = validated
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
 
     # Abort before any upload on the first local/manifest disagreement.
     problem = _verify_local(args.candidate, objects)
@@ -158,59 +227,72 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s3 = boto3.client("s3", region_name=args.region)
     except Exception as exc:  # boto3/botocore failures of any class
-        _emit({"status": "client-failed", "message": f"{type(exc).__name__}: {exc}"[:400]})
+        _emit({"status": "client-failed", "error": _sanitize_error(exc)})
         return 1
 
     prefix = f"imports/{args.source_ref}/"
 
-    def upload(file: str, size: int) -> None:
-        if _remote_size_matches(s3, args.bucket, f"{prefix}{file}", size):
-            return  # restartable: already dropped with the same size
-        s3.upload_file(
-            str(args.candidate / file),
-            args.bucket,
-            f"{prefix}{file}",
-            ExtraArgs={
-                "ContentType": CONTENT_TYPES.get(Path(file).suffix, "application/octet-stream"),
-                "ChecksumAlgorithm": "SHA256",
-            },
-        )
+    def upload_media(file: str) -> None:
+        # R8: restartability is content-addressed. A single put_object makes
+        # the ETag the MD5, so skip only a byte-identical remote object — a
+        # same-length different-content object is re-uploaded. All media are
+        # far below the 128 MiB video cap, so put_object is always fine.
+        key = f"{prefix}{file}"
+        if _remote_etag(s3, args.bucket, key) == _md5_file(args.candidate / file):
+            return
+        with (args.candidate / file).open("rb") as body:
+            s3.put_object(
+                Bucket=args.bucket,
+                Key=key,
+                Body=body,
+                ContentType=CONTENT_TYPES.get(Path(file).suffix, "application/octet-stream"),
+                ChecksumAlgorithm="SHA256",
+            )
 
     try:
+        # R7: record any receipt from a PREVIOUS drop so --wait can never
+        # return a stale answer.
+        stale_etag = _remote_etag(s3, args.bucket, f"{prefix}{RESULT_NAME}")
         for file in sorted(objects):  # the seven media files
-            upload(file, objects[file][0])
+            upload_media(file)
         # manifest LAST, ALWAYS: its presence marks the drop complete, so it
-        # never goes through the size-match skip path — even a byte-identical
-        # remote manifest is re-put as the final call.
-        s3.upload_file(
-            str(manifest_path),
-            args.bucket,
-            f"{prefix}manifest.json",
-            ExtraArgs={"ContentType": "application/json", "ChecksumAlgorithm": "SHA256"},
+        # never goes through the skip path — even a byte-identical remote
+        # manifest is re-put as the final call.
+        s3.put_object(
+            Bucket=args.bucket,
+            Key=f"{prefix}manifest.json",
+            Body=manifest_bytes,
+            ContentType="application/json",
+            ChecksumAlgorithm="SHA256",
         )
     except Exception as exc:  # boto3/botocore failures of any class
-        _emit({"status": "upload-failed", "message": f"{type(exc).__name__}: {exc}"[:400]})
+        _emit({"status": "upload-failed", "error": _sanitize_error(exc)})
         return 1
 
     if not args.wait:
         _emit({"status": "uploaded", "sourceRef": args.source_ref, "prefix": prefix})
         return 0
 
+    result_key = f"{prefix}{RESULT_NAME}"
     deadline = time.monotonic() + args.wait_seconds
-    while time.monotonic() < deadline:
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            _emit({"status": "wait-timeout", "sourceRef": args.source_ref})
+            return 1
         try:
-            body = s3.get_object(Bucket=args.bucket, Key=f"{prefix}{RESULT_NAME}")["Body"].read()
-            result = json.loads(body)
-        except Exception:  # absent, unreachable, or malformed result: keep polling
-            time.sleep(POLL_SECONDS)
-            continue
-        _emit(result)
-        status = result.get("status")
-        if status == "rejected":
-            return 2
-        return 0 if status in ("published", "already-published", "would-publish") else 1
-    _emit({"status": "wait-timeout", "sourceRef": args.source_ref})
-    return 1
+            receipt = _fetch_receipt(s3, args.bucket, result_key, stale_etag)
+        except Exception as exc:  # R9: anything but absence fails fast
+            _emit({"status": "wait-failed", "error": _sanitize_error(exc)})
+            return 1
+        if receipt is not None and receipt.get("manifestSha256") == manifest_sha:
+            _emit(receipt)
+            status = receipt.get("status")
+            if status == "rejected":
+                return 2
+            return 0 if status in ("published", "already-published", "would-publish", "would-register") else 1
+        remaining = deadline - time.monotonic()
+        time.sleep(min(POLL_SECONDS, max(0.0, remaining)))
 
 
 if __name__ == "__main__":

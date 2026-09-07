@@ -17,6 +17,7 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "drop_browser_package.py"
@@ -76,7 +77,7 @@ class RecordingS3:
         return self._inner.get_paginator(name)
 
     def uploaded_keys(self) -> list[str]:
-        return [key for name, key in self.calls if name == "upload_file"]
+        return [key for name, key in self.calls if name == "put_object"]
 
 
 def _make_candidate(root: Path) -> tuple[Path, dict[str, bytes]]:
@@ -130,18 +131,27 @@ def test_manifest_is_uploaded_last(s3, monkeypatch, tmp_path):
     assert {key[len(f"imports/{ref}/"):] for key in uploaded} == {*MEDIA_FILES, "manifest.json"}
 
 
-def test_restart_skips_objects_whose_remote_size_matches(s3, monkeypatch, tmp_path):
+def test_restart_skips_byte_identical_objects_and_reuploads_changed_content(
+    s3, monkeypatch, tmp_path
+):
     candidate, media = _make_candidate(tmp_path / "candidate")
     ref = f"sha256-{uuid.uuid4().hex[:16]}"
     prefix = f"imports/{ref}/"
-    # A previous run got three stems up before dying.
-    for file in MEDIA_FILES[:3]:
-        s3.put_object(Bucket=BUCKET, Key=f"{prefix}{file}", Body=media[file])
+    # A previous run got three stems up: two byte-identical, one the SAME
+    # LENGTH but different content.
+    s3.put_object(Bucket=BUCKET, Key=f"{prefix}stems/vocals.m4a", Body=media["stems/vocals.m4a"])
+    s3.put_object(Bucket=BUCKET, Key=f"{prefix}stems/drums.m4a", Body=media["stems/drums.m4a"])
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=f"{prefix}stems/bass.m4a",
+        Body=b"x" * len(media["stems/bass.m4a"]),  # same size, wrong bytes
+    )
 
     rec = _run(s3, monkeypatch, candidate, ref)
 
     uploaded = {key[len(prefix):] for key in rec.uploaded_keys()}
-    assert set(MEDIA_FILES[:3]).isdisjoint(uploaded)  # matching sizes skipped
+    assert {"stems/vocals.m4a", "stems/drums.m4a"}.isdisjoint(uploaded)  # identical: skipped
+    assert "stems/bass.m4a" in uploaded  # R8: same-length corruption is re-uploaded
     assert set(MEDIA_FILES[3:]) | {"manifest.json"} <= uploaded
 
 
@@ -173,7 +183,7 @@ def test_manifest_put_is_final_even_when_remote_size_matches(s3, monkeypatch, tm
 
     rec = _run(s3, monkeypatch, candidate, ref)
 
-    uploads = [key for name, key in rec.calls if name == "upload_file"]
+    uploads = [key for name, key in rec.calls if name == "put_object"]
     assert uploads[-1] == f"{prefix}manifest.json"  # manifest put is the FINAL put
     assert f"{prefix}stems/vocals.m4a" in uploads  # changed media re-uploaded
 
@@ -280,3 +290,178 @@ def test_invalid_source_ref_refused_without_client(monkeypatch, tmp_path):
         ["--candidate", str(candidate), "--source-ref", "karaoke/pub/x", "--bucket", BUCKET]
     )
     assert code == 2
+
+
+# --- --wait receipt correlation (R7/R9/R21) ------------------------------------
+
+
+def _manifest_sha(candidate: Path) -> str:
+    return hashlib.sha256((candidate / "manifest.json").read_bytes()).hexdigest()
+
+
+def test_wait_returns_fresh_matching_receipt_and_ignores_stale(
+    s3, monkeypatch, tmp_path, capsys
+):
+    candidate, _media = _make_candidate(tmp_path / "candidate")
+    ref = f"youtube-{uuid.uuid4().hex[:8]}"
+    result_key = f"imports/{ref}/result.json"
+    # A stale receipt from a PREVIOUS drop of different content.
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=result_key,
+        Body=json.dumps({"status": "published", "manifestSha256": "0" * 64}).encode(),
+    )
+    fresh = {
+        "status": "published",
+        "manifestSha256": _manifest_sha(candidate),
+    }
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds):
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:  # the ingest finishes while we are waiting
+            s3.put_object(Bucket=BUCKET, Key=result_key, Body=json.dumps(fresh).encode())
+
+    monkeypatch.setattr(drop.time, "sleep", fake_sleep)
+    code = drop.main(
+        ["--candidate", str(candidate), "--source-ref", ref, "--bucket", BUCKET, "--wait",
+         "--wait-seconds", "60"]
+    )
+    assert code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload == fresh  # the STALE receipt was never returned
+
+
+def test_wait_rejected_receipt_exits_2(s3, monkeypatch, tmp_path, capsys):
+    candidate, _media = _make_candidate(tmp_path / "candidate")
+    ref = f"youtube-{uuid.uuid4().hex[:8]}"
+    result_key = f"imports/{ref}/result.json"
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds):
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            s3.put_object(
+                Bucket=BUCKET,
+                Key=result_key,
+                Body=json.dumps(
+                    {"status": "rejected", "manifestSha256": _manifest_sha(candidate)}
+                ).encode(),
+            )
+
+    monkeypatch.setattr(drop.time, "sleep", fake_sleep)
+    code = drop.main(
+        ["--candidate", str(candidate), "--source-ref", ref, "--bucket", BUCKET, "--wait",
+         "--wait-seconds", "60"]
+    )
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["status"] == "rejected"
+
+
+def test_wait_timeout_exits_1_with_one_line(s3, tmp_path, capsys):
+    candidate, _media = _make_candidate(tmp_path / "candidate")
+    ref = f"youtube-{uuid.uuid4().hex[:8]}"
+    # Only a stale, non-matching receipt exists; the deadline is immediate.
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=f"imports/{ref}/result.json",
+        Body=json.dumps({"status": "published", "manifestSha256": "0" * 64}).encode(),
+    )
+    code = drop.main(
+        ["--candidate", str(candidate), "--source-ref", ref, "--bucket", BUCKET, "--wait",
+         "--wait-seconds", "0"]
+    )
+    assert code == 1
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["status"] == "wait-timeout"
+
+
+class _FailingPollS3(RecordingS3):
+    """head_object on result.json denies once the uploads are done (R9)."""
+
+    def __init__(self, inner):
+        super().__init__(inner)
+        self.puts = 0
+
+    def put_object(self, *args, **kwargs):
+        self.calls.append(("put_object", str(kwargs.get("Key", ""))))
+        self.puts += 1
+        return self._inner.put_object(*args, **kwargs)
+
+    def head_object(self, *args, **kwargs):
+        if str(kwargs.get("Key", "")).endswith("result.json") and self.puts >= 8:
+            raise ClientError(
+                {"Error": {"Code": "403", "Message": "AccessDenied"}}, "HeadObject"
+            )
+        self.calls.append(("head_object", str(kwargs.get("Key", ""))))
+        return self._inner.head_object(*args, **kwargs)
+
+
+def test_wait_poll_failure_fails_fast_one_line(s3, monkeypatch, tmp_path, capsys):
+    candidate, _media = _make_candidate(tmp_path / "candidate")
+    ref = f"youtube-{uuid.uuid4().hex[:8]}"
+    rec = _FailingPollS3(s3)
+    monkeypatch.setattr(drop.boto3, "client", lambda *_args, **_kwargs: rec)
+    code = drop.main(
+        ["--candidate", str(candidate), "--source-ref", ref, "--bucket", BUCKET, "--wait",
+         "--wait-seconds", "60"]
+    )
+    assert code == 1
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["status"] == "wait-failed"
+    assert payload["error"]["code"] == "403"
+
+
+class _FailingUploadS3(RecordingS3):
+    def put_object(self, *_args, **kwargs):
+        self.calls.append(("put_object", str(kwargs.get("Key", ""))))
+        raise RuntimeError("put failed via http://user:SUPERSECRET@proxy.example")
+
+
+def test_upload_failure_is_sanitized_and_never_leaks(s3, monkeypatch, tmp_path, capsys):
+    candidate, _media = _make_candidate(tmp_path / "candidate")
+    rec = _FailingUploadS3(s3)
+    monkeypatch.setattr(drop.boto3, "client", lambda *_args, **_kwargs: rec)
+    ref = f"youtube-{uuid.uuid4().hex[:8]}"
+    code = drop.main(["--candidate", str(candidate), "--source-ref", ref, "--bucket", BUCKET])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "SUPERSECRET" not in captured.out + captured.err
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["status"] == "upload-failed"
+    assert payload["error"]["type"] == "RuntimeError"
+    assert payload["error"]["message"] == "operation failed"
+
+
+def test_fetch_receipt_treats_get_race_and_bad_utf8_as_not_yet(s3, monkeypatch):
+    """R9: a receipt that vanishes between HEAD and GET, or whose body is not
+    valid UTF-8, is a 'not yet' condition — the poll keeps waiting."""
+    from botocore.exceptions import ClientError
+
+    key = "imports/youtube-fetchrace001/result.json"
+    s3.put_object(Bucket=BUCKET, Key=key, Body=bytes([0xFF, 0xFE]) + b" not json")
+    assert drop._fetch_receipt(s3, BUCKET, key, stale_etag=None) is None  # bad UTF-8
+
+    real_get = s3.get_object
+
+    def racing_get(**_kwargs):
+        raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "gone"}}, "GetObject")
+
+    monkeypatch.setattr(s3, "get_object", racing_get)
+    assert drop._fetch_receipt(s3, BUCKET, key, stale_etag=None) is None  # GET raced to 404
+    monkeypatch.setattr(s3, "get_object", real_get)
+
+    def denied_get(**_kwargs):
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject")
+
+    monkeypatch.setattr(s3, "get_object", denied_get)
+    with pytest.raises(ClientError):  # anything else still fails fast
+        drop._fetch_receipt(s3, BUCKET, key, stale_etag=None)
