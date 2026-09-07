@@ -111,6 +111,22 @@ directory for inspection. Do not substitute `up` for the release transaction:
 it does not take a rollback snapshot or migrate the database. API and orchestrator
 must use the same image and shared data volume.
 
+## Ingesting a dropped package
+
+A producer that finished a complete `shizzle-browser-v1` package can drop it
+under `imports/{source_ref}/` (see
+[contributing completed media](contributing-completed-media.md)). Ingest it on
+the VPS — the api image has ffmpeg/ffprobe and the same `.env` as the
+orchestrator:
+
+```bash
+cd /opt/shizzle/prod && docker compose -f compose.prod.yml exec api python -m shizzle_server.publish.browser_import --source-ref <ref>
+```
+
+The command validates, publishes immutably, and registers the track with no
+re-separation or re-encode; `--dry-run` validates only. Exit codes: 0 ok,
+2 rejected, 3 not ready.
+
 ## Supported boundaries
 
 URL acquisition remains unavailable. `local` mode requires FFmpeg/Demucs and

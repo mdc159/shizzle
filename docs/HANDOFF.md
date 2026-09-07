@@ -22,6 +22,8 @@ on runtime changes.
 - [Invariants](INVARIANTS.md): required contracts and guards.
 - [Testing](TESTING.md): automated, stem optimization, browser stress and listening procedures.
 - [Playback troubleshooting](playback-troubleshooting.md): diagnosis and evidence.
+- [Contributing completed media](contributing-completed-media.md): the S3 drop-box
+  for finished `shizzle-browser-v1` packages and its VPS ingest (issue #45).
 - [Lossless handoff](../interfaces/lossless-stem-v1/spec.md) and
   [browser delivery](../interfaces/shizzle-browser-v1/spec.md): format contracts.
 

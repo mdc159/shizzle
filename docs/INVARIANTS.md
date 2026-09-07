@@ -346,6 +346,21 @@ require the explicit opt-in `SHIZZLE_ALLOW_TEST_PIPELINE` (default off), and
   table (the 2026-08-19 phantom), or `SHIZZLE_PIPELINE=test` selected
   without the opt-in flag.
 
+### C8 — drop-box imports register only after validation
+
+**Invariant:** A drop-box import MUST register a track only after the dropped
+bytes pass sha256 verification and the full delivery-profile audit and the
+Publisher's staged verification; an existing generation MUST be treated as a
+completed retry only when its published manifest hash equals the dropped
+manifest's hash, otherwise refused without touching the row; a rejected drop
+MUST leave no row and no generation manifest.
+- Where: `library/src/shizzle_server/publish/browser_import.py`, `docs/contributing-completed-media.md`
+- Guarded by: `library/tests/test_browser_import.py::test_sha_mismatch_rejected_no_generation_no_row`, `library/tests/test_browser_import.py::test_audit_error_rejected_no_generation_no_row`, `library/tests/test_browser_import.py::test_happy_path_publishes_and_registers`, `library/tests/test_browser_import.py::test_rerun_after_crash_between_publish_and_register`, `library/tests/test_browser_import.py::test_same_content_rerun_is_already_published_row_untouched`, `library/tests/test_browser_import.py::test_different_content_conflict_refused_row_untouched`, `library/tests/test_browser_import.py::test_soft_deleted_row_rejected_never_resurrected`, `library/tests/contract/test_browser_import_postgres.py::test_ingest_cannot_resurrect_soft_deleted_track`, `library/tests/contract/test_browser_import_postgres.py::test_advanced_generation_with_different_manifest_is_rejected_unchanged`
+- Violation smell: writing the tracks row before the downloaded bytes are
+  re-hashed and audited, re-copying or overwriting an existing generation
+  whose manifest hash differs from the drop, or a rejection that leaves a
+  row or generation objects behind.
+
 ## D. Delivery-profile gates
 
 ### D1 — track duration tolerance 0.100 s
