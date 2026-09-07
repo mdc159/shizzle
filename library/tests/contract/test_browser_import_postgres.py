@@ -18,7 +18,8 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from shizzle_server.db.repository import track_id_for_import
+from shizzle_server.db import create_engine, create_session_factory
+from shizzle_server.db.repository import TrackRepository, track_id_for_import
 from shizzle_server.publish import browser_import
 from shizzle_server.publish.browser_import import ImportRejected
 from shizzle_server.publish.delivery_profile import CANONICAL_STEM_IDS
@@ -131,37 +132,50 @@ def _ingest(s3, ref: str) -> dict[str, Any]:
     )
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _with_tracks(op):
+    """Run one repository operation on a fresh engine and event loop.
+
+    The shared ``pg_engine`` fixture belongs to pytest-asyncio's loop; the
+    ingest under test drives its own ``asyncio.run`` loops (mirroring
+    ``browser_import._get_track``), so test-side DB calls do the same rather
+    than sharing asyncpg connections across loops.
+    """
+
+    async def go():
+        engine = create_engine(PG_URL)
+        try:
+            return await op(TrackRepository(create_session_factory(engine)))
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
 
 
 def test_ingest_cannot_resurrect_soft_deleted_track(
-    pg_repos, migrated_database, s3, passing_audits  # noqa: ARG001
+    pg_engine, s3, passing_audits  # noqa: ARG001 - pg_engine truncates tables
 ):
-    _jobs, tracks, _heartbeats = pg_repos
     ref = "youtube-pgdeleted001"
     _seed_drop(s3, ref)
     tid = track_id_for_import(ref)
 
     assert _ingest(s3, ref)["status"] == "published"
-    assert _run(tracks.soft_delete(tid))
+    assert _with_tracks(lambda t: t.soft_delete(tid))
 
     _seed_drop(s3, ref)  # identical re-drop after deletion
     with pytest.raises(ImportRejected) as excinfo:
         _ingest(s3, ref)
     assert excinfo.value.code == "TRACK_DELETED"
 
-    row = _run(tracks.get(tid))
+    row = _with_tracks(lambda t: t.get(tid))
     assert row is not None and row.deleted_at is not None  # still deleted
-    assert _run(tracks.list_tracks()) == []  # and not listed
+    assert _with_tracks(lambda t: t.list_tracks()) == []  # and not listed
 
 
 def test_advanced_generation_with_different_manifest_is_rejected_unchanged(
-    pg_repos, migrated_database, s3, passing_audits  # noqa: ARG001
+    pg_engine, s3, passing_audits  # noqa: ARG001 - pg_engine truncates tables
 ):
     from shizzle_server.publish.publisher import manifest_key
 
-    _jobs, tracks, _heartbeats = pg_repos
     ref = "youtube-pgadvanced001"
     tid = track_id_for_import(ref)
 
@@ -171,8 +185,8 @@ def test_advanced_generation_with_different_manifest_is_rejected_unchanged(
     for file in MEDIA_FILES:
         s3.put_object(Bucket=BUCKET, Key=f"tracks/{tid}/2/{file}", Body=b"repaired")
     s3.put_object(Bucket=BUCKET, Key=manifest_key(tid, 2), Body=other_manifest)
-    _run(
-        tracks.upsert_imported(
+    _with_tracks(
+        lambda t: t.upsert_imported(
             tid,
             title="Repaired Mix",
             artist="",
@@ -189,7 +203,7 @@ def test_advanced_generation_with_different_manifest_is_rejected_unchanged(
         _ingest(s3, ref)
     assert excinfo.value.code == "TRACK_CONFLICT"
 
-    row = _run(tracks.get(tid))
+    row = _with_tracks(lambda t: t.get(tid))
     assert row is not None
     assert row.generation == 2  # unchanged
     assert row.title == "Repaired Mix"
