@@ -92,8 +92,10 @@ Run the production playback harness against the twin with
 `SHIZZLE_E2E_IGNORE_HTTPS_ERRORS=1` (self-signed certificate) and
 `SHIZZLE_E2E_BASE_URL=https://192.168.176.52`.
 
-Snapshots: `shizzle-stack-v1` (2026-08-17, local-profile fixture only) and
-`shizzle-stack-v2-minio-cdn` (2026-09-07, this configuration, taken live).
+Snapshots: `shizzle-stack-v1` (2026-08-17, local-profile fixture only),
+`shizzle-stack-v2-minio-cdn` (2026-09-07, this configuration, taken live) and
+`shizzle-stack-v3-imperial-march` (2026-09-07, plus the drop-box-ingested
+Imperial March and the current player bundle; stress/natural/faults passed).
 The VM folder's `SHIZZLE-TEST-HANDOFF.md` is the authoritative record of the
 machine itself; keep both in step.
 
