@@ -14,6 +14,7 @@ from functools import lru_cache
 from typing import Any
 
 import boto3
+from botocore.config import Config
 
 from ..settings import Settings
 from . import cloudfront
@@ -25,7 +26,7 @@ def _s3_client(region: str, endpoint: str) -> Any:
     # Pop it so real-AWS S3 calls are not silently rerouted (spike 0.2 gotcha).
     os.environ.pop("AWS_ENDPOINT_URL", None)
     os.environ.pop("AWS_ENDPOINT_URL_S3", None)
-    kwargs: dict[str, Any] = {"region_name": region}
+    kwargs: dict[str, Any] = {"region_name": region, "config": Config(signature_version="s3v4")}
     if endpoint:
         kwargs["endpoint_url"] = endpoint
     return boto3.client("s3", **kwargs)

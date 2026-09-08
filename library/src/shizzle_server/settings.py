@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GB
     max_duration_seconds: int = 1800  # 30 minutes
 
+    # Enable only after deploying the completed-import schema and worker.
+    shizzle_completed_imports_enabled: bool = False
+
     # --- orchestrator --------------------------------------------------------
     # Embedded mode runs the orchestrator loop inside the API process (single
     # container `local` profile). The `stack` profile sets this false and runs
