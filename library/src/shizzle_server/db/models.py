@@ -88,6 +88,31 @@ class Base(DeclarativeBase):
     pass
 
 
+class CompletedImport(Base):
+    """A finished package; deliberately never dispatched to a separator."""
+
+    __tablename__ = "completed_imports"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
+    validation: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="uploading")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CompletedImportEvent(Base):
+    __tablename__ = "completed_import_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("completed_imports.id"), index=True)
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 

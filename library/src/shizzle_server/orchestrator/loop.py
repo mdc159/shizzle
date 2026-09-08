@@ -72,9 +72,30 @@ class Orchestrator:
         self._stopping.set()
 
     async def run_forever(self) -> None:
-        """Poll-claim-execute until stopped. Survives transient DB outages."""
         self.settings.data_dir.mkdir(parents=True, exist_ok=True)
-        await init_db(self.engine)  # no-op on Postgres (Alembic owns schema)
+        await init_db(self.engine)
+        imports = asyncio.create_task(self._run_imports())
+        try:
+            await self._run_source_jobs()
+        finally:
+            imports.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await imports
+            await self.engine.dispose()
+
+    async def _run_imports(self) -> None:
+        from ..publish.completed import ImportRepository, process_one
+        repo = ImportRepository(create_session_factory(self.engine))
+        while not self._stopping.is_set():
+            if self.settings.shizzle_completed_imports_enabled:
+                try:
+                    await process_one(repo, self.settings, self.worker_id + "-imports")
+                except Exception:
+                    logger.warning("Completed-media worker retrying after an unavailable dependency")
+            await self._sleep(max(1, self.settings.orchestrator_poll_seconds))
+
+    async def _run_source_jobs(self) -> None:
+        """Poll-claim-execute until stopped. Survives transient DB outages."""
         logger.info(
             "orchestrator %s started (db=%s, pipeline=%s)",
             self.worker_id,
@@ -106,7 +127,6 @@ class Orchestrator:
                 # DB down, etc. — durable design: wait and retry, never crash the loop.
                 logger.exception("orchestrator loop iteration failed; backing off")
                 await self._sleep(max(2.0, self.settings.orchestrator_poll_seconds))
-        await self.engine.dispose()
         logger.info("orchestrator %s stopped", self.worker_id)
 
     async def _sleep(self, seconds: float) -> None:

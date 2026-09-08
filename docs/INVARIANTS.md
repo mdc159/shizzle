@@ -466,7 +466,7 @@ MUST be under `tracks/`.
 
 **Invariant:** Migrations MUST form a single linear chain with numeric prefix ==
 revision id, explicit `down_revision`, and a paired real downgrade.
-- Where: `library/alembic/versions/` — revisions 0001 through 0005
+- Where: `library/alembic/versions/` — revisions 0001 through 0006
 - Violation smell: a branch, a filename/revision mismatch, or a no-op
   downgrade.
 

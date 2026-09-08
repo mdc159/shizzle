@@ -33,10 +33,11 @@ def test_single_linear_chain_with_matching_ids():
     script = _script()
     heads = script.get_heads()
     assert len(heads) == 1, f"migration chain has branched: {heads}"
-    assert heads[0] == "0005_job_artist"
+    assert heads[0] == "0006_completed_imports"
 
     order = list(script.walk_revisions())
     assert [r.revision for r in order] == [
+        "0006_completed_imports",
         "0005_job_artist",
         "0004_worker_heartbeats",
         "0003_playback_event_bigint",

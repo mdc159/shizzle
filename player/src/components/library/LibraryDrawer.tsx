@@ -57,7 +57,10 @@ export const LibraryDrawer: React.FC = () => {
 
   const isOpen = activeDrawer === 'library';
 
+  const fetching = useRef(false);
   const fetchLibrary = useCallback(async () => {
+    if (fetching.current) return;
+    fetching.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -68,15 +71,19 @@ export const LibraryDrawer: React.FC = () => {
       setError(message);
       toast.error(message);
     } finally {
+      fetching.current = false;
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (isOpen && tracks.length === 0 && !error) {
-      fetchLibrary();
-    }
-  }, [isOpen, tracks.length, error, fetchLibrary]);
+    if (!isOpen) return;
+    void fetchLibrary();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void fetchLibrary();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [isOpen, fetchLibrary]);
 
   const handleSelect = (track: Track) => {
     playTrack(track);
@@ -190,12 +197,12 @@ export const LibraryDrawer: React.FC = () => {
         </div>
 
         <div className="mt-4 flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
-          {loading ? (
+          {loading && tracks.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-8 gap-3">
               <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />
               <p className="text-sm text-zinc-500">Loading library...</p>
             </div>
-          ) : error ? (
+          ) : error && tracks.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-8 gap-4">
               <AlertCircle className="h-8 w-8 text-red-400" />
               <p className="text-sm text-red-400">{error}</p>

@@ -255,3 +255,35 @@ test('space on a focused library row selects without toggling playback', async (
   // And the transport stays parked on the loading state.
   await expect(page.getByRole('button', { name: 'Loading stems' })).toBeVisible({ timeout: 5_000 });
 });
+
+test('visible library refreshes metadata without fetching media or clearing search', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.clock.install();
+  let catalogRequests = 0;
+  let mediaRequests = 0;
+  await page.addInitScript(() => localStorage.setItem('shizzle_token', 'e2e-token'));
+  await page.route('**/api/media/session', route => route.fulfill({ json: { cloudfront: false } }));
+  await page.route('**/api/library', route => {
+    catalogRequests += 1;
+    const updated = tracks.map(track => ({ ...track, artist: catalogRequests > 1 ? 'Updated artist' : track.artist }));
+    return route.fulfill({ json: { tracks: updated, total: updated.length } });
+  });
+  await page.route('**/api/tracks/**', route => {
+    mediaRequests += 1;
+    return route.abort();
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Library', exact: true }).click();
+  await expect(page.getByText('27 tracks available')).toBeVisible();
+  const search = page.getByRole('textbox', { name: 'Search library' });
+  await search.fill('Track 27');
+  await page.clock.fastForward(30_001);
+  await expect(page.getByText('Updated artist', { exact: true })).toBeVisible();
+  await expect(search).toHaveValue('Track 27');
+  expect(catalogRequests).toBe(2);
+  expect(mediaRequests).toBe(0);
+  await page.keyboard.press('Escape'); // clear search
+  await page.keyboard.press('Escape'); // close drawer
+  await page.clock.fastForward(60_001);
+  expect(catalogRequests).toBe(2);
+});
