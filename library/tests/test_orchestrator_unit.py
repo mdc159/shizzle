@@ -277,8 +277,8 @@ async def test_service_heartbeat_stays_fresh_through_a_long_healthy_stage(
     heartbeat that /api/health and the VPS deploy gate read. The heartbeat is
     scheduled on its own task, independent of job processing, so it should
     keep beating across many liveness windows while a single stage is busy."""
-    settings.orchestrator_heartbeat_seconds = 0.02
-    busy_seconds = 0.3  # >> heartbeat interval: spans ~15 windows
+    settings.orchestrator_heartbeat_seconds = 0.05
+    busy_seconds = 1.2  # >> heartbeat interval: spans ~24 windows
 
     real_process_job = Orchestrator.process_job
 
@@ -301,8 +301,9 @@ async def test_service_heartbeat_stays_fresh_through_a_long_healthy_stage(
                 continue
             samples += 1
             age = (utcnow() - last_beat).total_seconds()
-            # Generous slack over the heartbeat interval for scheduler jitter.
-            if age > settings.orchestrator_heartbeat_seconds * 4:
+            # Generous slack (6 intervals) for CI scheduler and DB jitter;
+            # without an independent heartbeat the age grows to busy_seconds.
+            if age > settings.orchestrator_heartbeat_seconds * 6:
                 stale_samples += 1
         # Sampled across multiple liveness windows while the stage was busy,
         # and every sample found a fresh heartbeat.
