@@ -46,9 +46,9 @@ proxy to `http://localhost:8001`; `SHIZZLE_API_PROXY` overrides it.
 `npm run build` includes TypeScript checking. `lint:all` runs ESLint and Knip;
 Knip can print unused-export warnings without failing under the current
 `knip.json`. The library mypy step is currently informational in CI. The
-required `player` CI job runs build, ESLint, and **only**
-`e2e/library-scroll.spec.ts`, so green CI does not imply every retained browser
-spec has passed. The source of truth for check selection is
+required `player` CI job runs build, ESLint, and **only** the Playwright specs
+named in its test step, so green CI does not imply every retained browser spec
+has passed. The source of truth for check selection is
 [ci.yml](../.github/workflows/ci.yml).
 
 The retained `e2e/stem-split.spec.ts` is an old full upload/separate/play
