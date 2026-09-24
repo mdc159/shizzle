@@ -29,7 +29,7 @@ npm run lint:all
 npx playwright install chromium
 $env:SHIZZLE_E2E_HEADLESS = '1'
 $env:SHIZZLE_E2E_BASE_URL = $null  # an inherited base URL would bypass the local Vite server
-npx playwright test e2e/library-scroll.spec.ts e2e/remote-mixer.spec.ts e2e/source-title-parity.spec.ts --reporter=list
+npx playwright test e2e/library-scroll.spec.ts e2e/manifest-trim.spec.ts e2e/manifest-request-race.spec.ts e2e/auth-recovery.spec.ts e2e/space-shortcut.spec.ts --reporter=list
 Pop-Location
 ```
 
@@ -38,7 +38,7 @@ Pop-Location
 locator matches both the Library and Add Source dialogs, so both of its checks
 fail before reaching their upload assertions.
 
-The four listed browser specs use fixtures or mocked API/WebSocket responses;
+The five listed browser specs use fixtures or mocked API/WebSocket responses;
 they do not submit a real separation job. Clear `SHIZZLE_E2E_BASE_URL` in this
 shell before running them so Playwright starts local Vite. Vite defaults its API
 proxy to `http://localhost:8001`; `SHIZZLE_API_PROXY` overrides it.
@@ -46,9 +46,9 @@ proxy to `http://localhost:8001`; `SHIZZLE_API_PROXY` overrides it.
 `npm run build` includes TypeScript checking. `lint:all` runs ESLint and Knip;
 Knip can print unused-export warnings without failing under the current
 `knip.json`. The library mypy step is currently informational in CI. The
-required `player` CI job runs build, ESLint, and **only**
-`e2e/library-scroll.spec.ts`, so green CI does not imply every retained browser
-spec has passed. The source of truth for check selection is
+required `player` CI job runs build, ESLint, and **only** the Playwright specs
+named in its test step, so green CI does not imply every retained browser spec
+has passed. The source of truth for check selection is
 [ci.yml](../.github/workflows/ci.yml).
 
 The retained `e2e/stem-split.spec.ts` is an old full upload/separate/play

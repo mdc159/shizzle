@@ -64,6 +64,32 @@ async def _cancel_best_effort(
         )
 
 
+def _workers_initializing(health: dict[str, Any] | None) -> int | None:
+    """Extract the endpoint's initializing-worker count from a health payload.
+
+    Returns ``None`` when the shape is not the expected
+    ``{"workers": {"initializing": N, ...}, ...}`` — callers must treat that
+    as "unknown", not as "zero" (a cold start must not be missed just because
+    the payload shape drifted).
+    """
+    if not isinstance(health, dict):
+        return None
+    workers = health.get("workers")
+    if not isinstance(workers, dict):
+        return None
+    initializing = workers.get("initializing")
+    if isinstance(initializing, bool) or not isinstance(initializing, (int, float)):
+        return None
+    if isinstance(initializing, float) and not (
+        initializing.is_integer() and initializing >= 0
+    ):
+        # NaN / Infinity (json.loads accepts them) or a fractional count.
+        return None
+    if initializing < 0:
+        return None
+    return int(initializing)
+
+
 async def _confirm_dispatch(
     ctx: StageContext, *, idempotency_key: str, runpod_job_id: str
 ) -> None:
@@ -281,6 +307,48 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         if status == "IN_QUEUE":
             queued_for = _age_seconds(job.worker_heartbeat_at)
             if queued_for is not None and queued_for > ctx.settings.runpod_queue_timeout_seconds:
+                # Cold start (2026-09-24 production incident): a worker can be
+                # allocated and still pulling its ~5 GB image past the plain
+                # queue timeout. Cancelling and redispatching under a new key
+                # just restarts the same wait on the same endpoint. Consult
+                # endpoint health before cancelling, and keep waiting up to a
+                # separate, larger cold-start budget while workers are still
+                # initializing. A health-check failure carries no signal
+                # either way, so it falls back to the existing behavior
+                # (cancel) rather than granting an unearned extension.
+                if queued_for <= ctx.settings.runpod_cold_start_seconds:
+                    initializing = None
+                    try:
+                        health = await ctx.runpod.health()
+                    except Exception:
+                        logger.warning(
+                            "job %s: RunPod health check failed while deciding "
+                            "queue-timeout cold start; falling back to cancel",
+                            job.id,
+                            exc_info=True,
+                        )
+                    else:
+                        initializing = _workers_initializing(health)
+                    if initializing is not None and initializing > 0:
+                        events = await ctx.jobs.list_events(job.id)
+                        already_recorded = any(
+                            event.event == "runpod_cold_start_extended"
+                            and isinstance(event.detail, dict)
+                            and event.detail.get("runpod_job_id") == job.runpod_job_id
+                            for event in events
+                        )
+                        if not already_recorded:
+                            await ctx.jobs.append_event(
+                                job.id,
+                                "runpod_cold_start_extended",
+                                {
+                                    "runpod_job_id": job.runpod_job_id,
+                                    "queued_seconds": round(queued_for, 1),
+                                    "workers_initializing": initializing,
+                                },
+                                worker_id=ctx.worker_id,
+                            )
+                        return None
                 if not await ctx.jobs.owns_lease(job.id, ctx.worker_id):
                     # B2: lease lost — never cancel the new owner's RunPod job.
                     logger.info(
@@ -303,6 +371,24 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             return None
 
         if status == "IN_PROGRESS":
+            # Issue #20: worker_heartbeat_at still holds the queue-entry (or
+            # dispatch) time while worker_phase is "dispatched" or "queued" —
+            # a valid 300-900 s queue wait must not be measured against the
+            # running-stall timeout. On this transition, establish a fresh
+            # running heartbeat first and skip the stall check for this one
+            # observation; the next poll checks stall age against that new,
+            # durable heartbeat like any other running phase.
+            if job.worker_phase in ("dispatched", "queued"):
+                # Never persist a queue marker here: a worker reporting
+                # phase "queued" while IN_PROGRESS would otherwise re-enter
+                # this branch on every poll and never reach the stall check.
+                running_phase = (
+                    phase if phase and phase not in ("dispatched", "queued") else "running"
+                )
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase=running_phase, worker_id=ctx.worker_id
+                )
+                return None
             stalled_for = _age_seconds(job.worker_heartbeat_at)
             if stalled_for is not None and (
                 stalled_for > ctx.settings.runpod_worker_stall_seconds
@@ -393,8 +479,16 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             )
             return JobStage.verifying
         pending_for = _age_seconds(pending_dispatch.created_at) or 0.0
+        # A dispatch identity can legitimately stay unresolved for as long as
+        # the queue-timeout watchdog above will wait before failing the job —
+        # which, since a cold start extends that wait, is now
+        # max(queue_timeout, cold_start) rather than the plain queue timeout —
+        # plus one more running-stall window after that.
         fail_closed_after = (
-            ctx.settings.runpod_queue_timeout_seconds
+            max(
+                ctx.settings.runpod_queue_timeout_seconds,
+                ctx.settings.runpod_cold_start_seconds,
+            )
             + ctx.settings.runpod_worker_stall_seconds
         )
         if pending_for > fail_closed_after:

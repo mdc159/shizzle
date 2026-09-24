@@ -124,8 +124,8 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
  * fetchable URLs (same-origin `/cdn` for cloud tracks, relative for local).
  * @param trackId - Track id (slug).
  */
-export async function loadManifest(trackId: string): Promise<StemsManifest> {
-  const response = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/manifest`);
+export async function loadManifest(trackId: string, signal?: AbortSignal): Promise<StemsManifest> {
+  const response = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/manifest`, { signal });
 
   if (!response.ok) {
     throw new Error(`Failed to load manifest: ${response.statusText}`);
