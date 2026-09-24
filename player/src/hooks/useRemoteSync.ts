@@ -251,9 +251,16 @@ export function useRemoteSync(role: 'player' | 'remote') {
           // set before the next attempt; if the server actually rejects it
           // (a real passcode is configured), the next protected API call's
           // own 401 handling surfaces the gate.
-          silentReauth().finally(() => {
-            if (!disposed) reconnectTimer = window.setTimeout(connect, RECONNECT_MAX_MS);
-          });
+          silentReauth()
+            .catch(() => 'error' as const)
+            .then((result) => {
+              if (disposed) return;
+              // Fresh cookie: reconnect promptly. Otherwise back off fully.
+              reconnectTimer = window.setTimeout(
+                connect,
+                result === 'ok' ? RECONNECT_BASE_MS : RECONNECT_MAX_MS,
+              );
+            });
           return;
         }
 

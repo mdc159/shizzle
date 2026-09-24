@@ -12,7 +12,19 @@ import { hasToken, subscribeAuthInvalidated } from '@/lib/auth';
 export function useAuthGate(): [boolean, () => void] {
   const [authed, setAuthed] = useState<boolean>(() => hasToken());
 
-  useEffect(() => subscribeAuthInvalidated(() => setAuthed(false)), []);
+  useEffect(() => {
+    const unsubscribe = subscribeAuthInvalidated(() => setAuthed(false));
+    // An invalidation may have fired between the initial hasToken() read and
+    // this subscription; the event is not replayed, so re-check once here.
+    let active = true;
+    queueMicrotask(() => {
+      if (active && !hasToken()) setAuthed(false);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
 
   return [authed, () => setAuthed(true)];
 }

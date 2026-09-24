@@ -6,18 +6,30 @@
  * cookies the server sets at login — those ride along same-origin, no JS.
  *
  * Recovery (issue #30): production intentionally runs with an empty
- * SHIZZLE_PASSCODE — any passcode, including empty, is accepted while the
+ * SHIZZLE_PASSCODE — any non-empty passcode is accepted while the
  * gate is off — and users must never see a passcode prompt for that case. A
  * stored token can still go bad (7-day TTL, or an AUTH_VERSION bump /
  * passcode rotation revoking every token at once, invariant E4). `authFetch`
- * treats a 401 as session invalidation: clear the token, try one silent
- * `POST /api/auth` with an empty passcode, and retry the original request
- * once with the fresh token. Only when the server itself rejects that silent
+ * treats a 401 as session invalidation: try one silent `POST /api/auth`
+ * with a fixed placeholder passcode (the schema requires at least one
+ * character, and any value is accepted while the gate is off), and retry
+ * the original request once with the fresh token. Only when the server itself rejects that silent
  * attempt (a real passcode is configured) do we notify subscribers so the
  * UI falls back to PasscodeGate.
  */
 
 const TOKEN_KEY = 'shizzle_token';
+
+/**
+ * Passcode sent by silent re-authentication. `AuthRequest.passcode` requires
+ * min_length=1, so an empty string is a 422. With the gate off any value is
+ * accepted; with a real passcode configured this is simply rejected (401).
+ */
+export const SILENT_REAUTH_PASSCODE = 'silent-reauth';
+
+/** Upper bound on one silent re-auth request, so a hung POST cannot wedge
+ * every later 401 behind a single-flight promise that never settles. */
+const SILENT_REAUTH_TIMEOUT_MS = 10_000;
 
 export function getToken(): string | null {
   try {
@@ -78,7 +90,8 @@ type SilentReauthResult = 'ok' | 'rejected' | 'error';
 let reauthPromise: Promise<SilentReauthResult> | null = null;
 
 /**
- * One silent re-authentication attempt (`POST /api/auth` with passcode: '').
+ * One silent re-authentication attempt (`POST /api/auth` with
+ * `SILENT_REAUTH_PASSCODE`).
  * Concurrent callers (multiple 401s racing, a WS 4401 close) share the same
  * in-flight attempt so we never issue parallel or repeated re-auth calls.
  */
@@ -98,14 +111,16 @@ async function performSilentReauth(): Promise<SilentReauthResult> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ passcode: '' }),
+      body: JSON.stringify({ passcode: SILENT_REAUTH_PASSCODE }),
+      signal: AbortSignal.timeout(SILENT_REAUTH_TIMEOUT_MS),
     });
   } catch {
-    return 'error'; // network failure attempting recovery — not a rejection
+    return 'error'; // network failure or timeout — not a rejection
   }
 
-  if (response.status === 401) {
-    // A real passcode is configured; an empty one is genuinely wrong here.
+  if (response.status === 401 || response.status === 422) {
+    // A real passcode is configured (401), or the request was refused as
+    // invalid (422): either way silent recovery cannot succeed.
     // Clear here too (not just in authFetch's caller): a WS 4401 close
     // drives this same silent attempt directly, with no authFetch 401 of
     // its own to have cleared the token first.
@@ -161,7 +176,9 @@ export async function authFetch(input: string, init: RequestInit = {}): Promise<
     return rawAuthedFetch(input, init);
   }
 
-  clearToken();
+  // Keep the rejected token until re-auth resolves: a transient failure must
+  // not leave storage empty while the UI still reports authenticated. A
+  // real rejection clears it inside performSilentReauth.
   const result = await silentReauth();
   if (result === 'ok') {
     return rawAuthedFetch(input, init);

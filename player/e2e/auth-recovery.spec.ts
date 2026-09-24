@@ -7,10 +7,10 @@ import { test, expect, type Page, type Route } from '@playwright/test';
 // "Unauthorized" errors, even across reloads.
 //
 // Production intentionally runs with an empty SHIZZLE_PASSCODE (any
-// passcode, including empty, is accepted while the gate is off), so recovery
-// must be silent: on a 401, authFetch clears the stored token, tries one
-// `POST /api/auth` with passcode: '', and retries the original request with
-// the fresh token. Only when that silent attempt is itself rejected (a real
+// non-empty passcode is accepted while the gate is off; an empty one fails
+// schema validation), so recovery must be silent: on a 401, authFetch tries
+// one `POST /api/auth` with a placeholder passcode and retries the original
+// request with the fresh token. Only when that silent attempt is itself rejected (a real
 // passcode is configured) does the UI fall back to PasscodeGate.
 //
 // All tests run fully offline via page.route() mocks against the local dev
@@ -33,16 +33,20 @@ const TRACKS = [
 const stubBackgroundApi = (page: Page) =>
   page.route('**/api/**', (route) => route.fulfill({ json: {} }));
 
-/** `POST /api/auth` mock: accepts passcode `""` (the production posture —
- * the gate is off) and mints `freshToken`; rejects everything else with 401,
- * as the server does whenever a real SHIZZLE_PASSCODE is configured. */
+/** `POST /api/auth` mock mirroring the real API: an empty passcode fails
+ * schema validation (422, `min_length=1`); with `realPasscode: null` (the
+ * production posture, gate off) any non-empty passcode mints `freshToken`;
+ * with a real passcode configured only that value is accepted, else 401. */
 const routeAuth = (
   page: Page,
-  { freshToken, acceptPasscode }: { freshToken: string; acceptPasscode: string | null }
+  { freshToken, realPasscode }: { freshToken: string; realPasscode: string | null }
 ) =>
   page.route('**/api/auth', async (route: Route) => {
     const body = route.request().postDataJSON() as { passcode: string };
-    if (acceptPasscode !== null && body.passcode === acceptPasscode) {
+    if (typeof body.passcode !== 'string' || body.passcode.length === 0) {
+      return route.fulfill({ status: 422, json: { detail: 'passcode: min_length 1' } });
+    }
+    if (realPasscode === null || body.passcode === realPasscode) {
       return route.fulfill({
         json: { token: freshToken, expiresIn: 999_999, mediaCookies: false },
       });
@@ -77,8 +81,14 @@ const routeLibrary = (
     return route.fulfill({ status: otherwiseStatus, json: { detail: 'nope' } });
   });
 
+/** Seed the stored token on first load only: addInitScript re-runs on
+ * every navigation, and a reload must see whatever token recovery stored. */
 const setToken = (page: Page, token: string) =>
-  page.addInitScript((t) => localStorage.setItem('shizzle_token', t), token);
+  page.addInitScript((t) => {
+    if (sessionStorage.getItem('e2e-token-seeded')) return;
+    sessionStorage.setItem('e2e-token-seeded', '1');
+    localStorage.setItem('shizzle_token', t);
+  }, token);
 
 const storedToken = (page: Page) => page.evaluate(() => localStorage.getItem('shizzle_token'));
 
@@ -92,7 +102,7 @@ test.describe('auth recovery (app route)', () => {
     test.setTimeout(60_000);
     await setToken(page, 'expired-token');
     await stubBackgroundApi(page);
-    await routeAuth(page, { freshToken: 'fresh-token', acceptPasscode: '' });
+    await routeAuth(page, { freshToken: 'fresh-token', realPasscode: null });
     await routeMediaSession(page, ['fresh-token']);
     await routeLibrary(page, { acceptedTokens: ['fresh-token'] });
 
@@ -127,7 +137,7 @@ test.describe('auth recovery (app route)', () => {
     test.setTimeout(60_000);
     await setToken(page, 'good-token');
     await stubBackgroundApi(page);
-    await routeAuth(page, { freshToken: 'rotated-token', acceptPasscode: '' });
+    await routeAuth(page, { freshToken: 'rotated-token', realPasscode: null });
     await routeMediaSession(page, ['good-token', 'rotated-token']);
 
     let revoked = false;
@@ -162,9 +172,9 @@ test.describe('auth recovery (app route)', () => {
     test.setTimeout(60_000);
     await setToken(page, 'expired-token');
     await stubBackgroundApi(page);
-    // A real passcode is configured server-side: the silent empty-passcode
+    // A real passcode is configured server-side: the silent placeholder-passcode
     // attempt is rejected, but the actual passcode works.
-    await routeAuth(page, { freshToken: 'manual-token', acceptPasscode: 'letmein' });
+    await routeAuth(page, { freshToken: 'manual-token', realPasscode: 'letmein' });
     await routeMediaSession(page, ['manual-token']);
     await routeLibrary(page, { acceptedTokens: ['manual-token'] });
 
@@ -215,11 +225,16 @@ test.describe('auth recovery (app route)', () => {
     await page.route('**/api/media/session', (route: Route) =>
       route.fulfill({ json: { cloudfront: false, expiresIn: 999_999 } })
     );
-    await page.route('**/api/library', (route: Route) => route.abort('failed'));
+    let libraryRequests = 0;
+    await page.route('**/api/library', (route: Route) => {
+      libraryRequests += 1;
+      return route.abort('failed');
+    });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Library' }).click();
-    await page.waitForTimeout(1000);
+    await expect.poll(() => libraryRequests).toBeGreaterThan(0);
+    await expect(page.locator('p.text-red-400')).toBeVisible({ timeout: 10_000 });
     expect(await passcodeGateVisible(page)).toBe(false);
     await expect.poll(() => storedToken(page)).toBe('good-token');
   });
@@ -235,7 +250,7 @@ test.describe('auth recovery (dashboard route)', () => {
     // most-recently-registered-first, so the specific overrides below must
     // come after it to actually take priority.
     await stubBackgroundApi(page);
-    await routeAuth(page, { freshToken: 'fresh-token', acceptPasscode: '' });
+    await routeAuth(page, { freshToken: 'fresh-token', realPasscode: null });
     await routeMediaSession(page, ['fresh-token']);
     await page.route('**/api/jobs', (route: Route) => {
       const auth = route.request().headers()['authorization'] ?? '';
