@@ -80,7 +80,11 @@ def _workers_initializing(health: dict[str, Any] | None) -> int | None:
     initializing = workers.get("initializing")
     if isinstance(initializing, bool) or not isinstance(initializing, (int, float)):
         return None
-    return int(initializing)
+    try:
+        return int(initializing)
+    except (OverflowError, ValueError):
+        # NaN / Infinity: json.loads accepts them by default.
+        return None
 
 
 async def _confirm_dispatch(

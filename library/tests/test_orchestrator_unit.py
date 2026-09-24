@@ -1299,32 +1299,64 @@ async def test_cold_start_budget_exhausted_still_cancels(
     settings, job_repo, session_factory, upload_job
 ):
     """Even with workers still initializing, the cold-start grace is bounded:
-    past runpod_cold_start_seconds the job cancels like any other timeout."""
+    inside runpod_cold_start_seconds the wait extends, and once the queue age
+    passes it the job cancels like any other timeout."""
     settings.runpod_queue_timeout_seconds = 10.0
     settings.runpod_cold_start_seconds = 20.0
     await _dispatch_to_queue(job_repo, upload_job.id, "cold-exhausted", "rp-cold-2")
-    async with session_factory() as session, session.begin():
-        row = await session.get(Job, upload_job.id)
-        row.worker_heartbeat_at = utcnow() - timedelta(seconds=30)
+
+    async def set_queue_age(seconds: float) -> None:
+        async with session_factory() as session, session.begin():
+            row = await session.get(Job, upload_job.id)
+            row.worker_heartbeat_at = utcnow() - timedelta(seconds=seconds)
 
     fake = FakeRunPodClient(
-        [{"status": "IN_QUEUE", "output": {}}],
-        health_responses=[{"workers": {"initializing": 1}, "jobs": {}}],
+        [{"status": "IN_QUEUE", "output": {}}, {"status": "IN_QUEUE", "output": {}}],
+        health_responses=[
+            {"workers": {"initializing": 1}, "jobs": {}},
+            {"workers": {"initializing": 1}, "jobs": {}},
+        ],
     )
-    ctx = StageContext(
-        job=await job_repo.get_job(upload_job.id),
-        settings=settings,
-        pipeline=None,  # type: ignore[arg-type]
-        jobs=job_repo,
-        runpod=fake,
-        worker_id="cold-exhausted",
-    )
+
+    async def poll_once():
+        return await handle_dispatched(
+            StageContext(
+                job=await job_repo.get_job(upload_job.id),
+                settings=settings,
+                pipeline=None,  # type: ignore[arg-type]
+                jobs=job_repo,
+                runpod=fake,
+                worker_id="cold-exhausted",
+            )
+        )
+
+    # Past the queue timeout but inside the cold-start budget: grace applies.
+    await set_queue_age(15)
+    assert await poll_once() is None
+    assert fake.cancelled == []
+
+    # Past the budget, workers still initializing: the grace is exhausted.
+    await set_queue_age(30)
     with pytest.raises(StageError) as excinfo:
-        await handle_dispatched(ctx)
+        await poll_once()
     assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
     assert fake.cancelled == ["rp-cold-2"]
     job = await job_repo.get_job(upload_job.id)
     assert job.worker_phase == "failed"
+
+
+def test_workers_initializing_rejects_malformed_counts():
+    """Unexpected or non-finite health payloads read as "unknown" (None),
+    never as a count and never as an exception."""
+    from shizzle_server.orchestrator.stages import _workers_initializing
+
+    assert _workers_initializing({"workers": {"initializing": 2}}) == 2
+    assert _workers_initializing({"workers": {"initializing": float("nan")}}) is None
+    assert _workers_initializing({"workers": {"initializing": float("inf")}}) is None
+    assert _workers_initializing({"workers": {"initializing": True}}) is None
+    assert _workers_initializing({"workers": {"initializing": "1"}}) is None
+    assert _workers_initializing({"workers": []}) is None
+    assert _workers_initializing(None) is None
 
 
 async def test_health_check_failure_falls_back_to_existing_cancel_behavior(
