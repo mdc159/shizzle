@@ -61,31 +61,43 @@ export const PlayerShell: React.FC = () => {
 
   const trackSlug = currentTrack?.slug;
 
-  // Load manifest when track changes
+  // Load manifest when track changes. A delayed response (success or error)
+  // for a track the user has since navigated away from must never overwrite
+  // the currently selected track's state, so the in-flight request is both
+  // aborted on cleanup and identity-gated via `cancelled` (issue #26).
   useEffect(() => {
     if (!trackSlug) {
       setManifest(null);
       return;
     }
 
+    const controller = new AbortController();
+    let cancelled = false;
+
     const fetchManifest = async () => {
       setIsLoading(true);
       try {
         // The authenticated server resolves cloud media refs to exact-object,
         // expiring CloudFront URLs. Local manifests remain relative.
-        const manifestData = await loadManifest(trackSlug);
+        const manifestData = await loadManifest(trackSlug, controller.signal);
+        if (cancelled) return;
         setManifest(manifestData);
         setDuration(manifestData.duration);
       } catch (err) {
+        if (cancelled) return;
         console.error('Failed to load manifest:', err);
         toast.error('Failed to load track stems');
         setManifest(null);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       }
     };
 
-    fetchManifest();
+    void fetchManifest();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [trackSlug, setManifest, setDuration]);
 
   // Handle Time Updates - sync store with video time
