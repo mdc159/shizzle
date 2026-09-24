@@ -100,6 +100,11 @@ class HttpRunPodClient:
         self._breaker: CircuitBreaker[httpx.Response] = CircuitBreaker(
             failure_threshold=5, timeout_seconds=60, name="runpod"
         )
+        # /health is advisory (cold-start detection only); its failures must
+        # never open the breaker that guards dispatch, polling, and cancel.
+        self._health_breaker: CircuitBreaker[httpx.Response] = CircuitBreaker(
+            failure_threshold=5, timeout_seconds=60, name="runpod-health"
+        )
 
     async def dispatch(
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
@@ -143,7 +148,9 @@ class HttpRunPodClient:
         await self._call(lambda: self._request("POST", f"/cancel/{runpod_job_id}"))
 
     async def health(self) -> dict[str, Any]:
-        response = await self._call(lambda: self._request("GET", "/health"))
+        response = await self._call(
+            lambda: self._request("GET", "/health"), breaker=self._health_breaker
+        )
         try:
             payload = response.json()
         except ValueError as exc:
@@ -156,9 +163,14 @@ class HttpRunPodClient:
             )
         return payload
 
-    async def _call(self, factory: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+    async def _call(
+        self,
+        factory: Callable[[], Awaitable[httpx.Response]],
+        *,
+        breaker: CircuitBreaker[httpx.Response] | None = None,
+    ) -> httpx.Response:
         try:
-            response = await self._breaker.call_async(factory)
+            response = await (breaker or self._breaker).call_async(factory)
         except RuntimeError as exc:
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,

@@ -127,6 +127,20 @@ async def test_health_non_object_body_is_an_error() -> None:
     assert "not an object" in exc.value.detail
 
 
+async def test_health_failures_do_not_open_the_job_breaker() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/health"):
+            raise httpx.ConnectError("health down", request=request)
+        return httpx.Response(200, json={"id": "job-1", "status": "IN_QUEUE"})
+
+    runpod = client(handler)
+    for _ in range(6):
+        with pytest.raises((StageError, httpx.ConnectError)):
+            await runpod.health()
+    # Polling still works: health failures tripped only the health breaker.
+    assert (await runpod.poll("job-1"))["status"] == "IN_QUEUE"
+
+
 async def test_breaker_opens_after_five_failures() -> None:
     calls = 0
 

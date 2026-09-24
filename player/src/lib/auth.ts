@@ -146,7 +146,10 @@ async function performSilentReauth(): Promise<SilentReauthResult> {
   // single-flight re-auth, so routing it through authFetch's own 401
   // handling would await this very promise and deadlock.
   try {
-    await rawAuthedFetch('/api/media/session', { method: 'POST' });
+    await rawAuthedFetch('/api/media/session', {
+      method: 'POST',
+      signal: AbortSignal.timeout(SILENT_REAUTH_TIMEOUT_MS),
+    });
   } catch {
     /* CDN may be unwired (front end still viewable); ignore */
   }

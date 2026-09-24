@@ -80,11 +80,14 @@ def _workers_initializing(health: dict[str, Any] | None) -> int | None:
     initializing = workers.get("initializing")
     if isinstance(initializing, bool) or not isinstance(initializing, (int, float)):
         return None
-    try:
-        return int(initializing)
-    except (OverflowError, ValueError):
-        # NaN / Infinity: json.loads accepts them by default.
+    if isinstance(initializing, float) and not (
+        initializing.is_integer() and initializing >= 0
+    ):
+        # NaN / Infinity (json.loads accepts them) or a fractional count.
         return None
+    if initializing < 0:
+        return None
+    return int(initializing)
 
 
 async def _confirm_dispatch(
@@ -376,8 +379,14 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             # observation; the next poll checks stall age against that new,
             # durable heartbeat like any other running phase.
             if job.worker_phase in ("dispatched", "queued"):
+                # Never persist a queue marker here: a worker reporting
+                # phase "queued" while IN_PROGRESS would otherwise re-enter
+                # this branch on every poll and never reach the stall check.
+                running_phase = (
+                    phase if phase and phase not in ("dispatched", "queued") else "running"
+                )
                 await ctx.jobs.record_worker_progress(
-                    job.id, phase=phase or "running", worker_id=ctx.worker_id
+                    job.id, phase=running_phase, worker_id=ctx.worker_id
                 )
                 return None
             stalled_for = _age_seconds(job.worker_heartbeat_at)

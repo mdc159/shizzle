@@ -1247,6 +1247,53 @@ async def _dispatch_to_queue(job_repo, job_id, worker_id, runpod_job_id):
     await job_repo.record_dispatch(job_id, worker_id=worker_id, runpod_job_id=runpod_job_id)
 
 
+async def test_in_progress_reporting_queued_phase_still_reaches_stall_check(
+    settings, job_repo, session_factory, upload_job
+):
+    """A worker that reports phase "queued" while RunPod says IN_PROGRESS must
+    not keep re-entering the queued-to-running transition: the transition
+    records a running phase, so a later real stall still times out."""
+    settings.runpod_worker_stall_seconds = 300.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "queued-phase", "rp-qp")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_phase = "queued"
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=600)
+
+    fake = FakeRunPodClient(
+        [
+            {"status": "IN_PROGRESS", "output": {"phase": "queued"}},
+            {"status": "IN_PROGRESS", "output": {"phase": "queued"}},
+        ]
+    )
+
+    def ctx():
+        return StageContext(
+            job=None,  # type: ignore[arg-type]
+            settings=settings,
+            pipeline=None,  # type: ignore[arg-type]
+            jobs=job_repo,
+            runpod=fake,
+            worker_id="queued-phase",
+        )
+
+    first = ctx()
+    first.job = await job_repo.get_job(upload_job.id)
+    assert await handle_dispatched(first) is None
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == "running"
+
+    # The worker then stalls: no progress past the running-stall window.
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=400)
+    second = ctx()
+    second.job = await job_repo.get_job(upload_job.id)
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(second)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+
+
 async def test_queued_to_running_transition_does_not_trip_running_stall(
     settings, job_repo, session_factory, upload_job
 ):
@@ -1460,6 +1507,9 @@ def test_workers_initializing_rejects_malformed_counts():
     assert _workers_initializing({"workers": {"initializing": 2}}) == 2
     assert _workers_initializing({"workers": {"initializing": float("nan")}}) is None
     assert _workers_initializing({"workers": {"initializing": float("inf")}}) is None
+    assert _workers_initializing({"workers": {"initializing": 1.5}}) is None
+    assert _workers_initializing({"workers": {"initializing": -1}}) is None
+    assert _workers_initializing({"workers": {"initializing": 2.0}}) == 2
     assert _workers_initializing({"workers": {"initializing": True}}) is None
     assert _workers_initializing({"workers": {"initializing": "1"}}) is None
     assert _workers_initializing({"workers": []}) is None

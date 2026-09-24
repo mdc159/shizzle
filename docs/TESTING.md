@@ -29,7 +29,7 @@ npm run lint:all
 npx playwright install chromium
 $env:SHIZZLE_E2E_HEADLESS = '1'
 $env:SHIZZLE_E2E_BASE_URL = $null  # an inherited base URL would bypass the local Vite server
-npx playwright test e2e/library-scroll.spec.ts e2e/remote-mixer.spec.ts e2e/source-title-parity.spec.ts --reporter=list
+npx playwright test e2e/library-scroll.spec.ts e2e/manifest-trim.spec.ts e2e/manifest-request-race.spec.ts e2e/auth-recovery.spec.ts e2e/space-shortcut.spec.ts --reporter=list
 Pop-Location
 ```
 
