@@ -79,6 +79,54 @@ async def test_other_request_errors_are_mapped() -> None:
     assert exc.value.retryable is True
 
 
+async def test_health_returns_worker_and_job_counts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url == "https://runpod.test/v2/endpoint-1/health"
+        return httpx.Response(
+            200,
+            json={
+                "workers": {
+                    "initializing": 2,
+                    "running": 1,
+                    "idle": 0,
+                    "ready": 0,
+                    "throttled": 0,
+                    "unhealthy": 0,
+                },
+                "jobs": {"inQueue": 1, "inProgress": 1},
+            },
+        )
+
+    payload = await client(handler).health()
+    assert payload["workers"]["initializing"] == 2
+    assert payload["jobs"]["inQueue"] == 1
+
+
+async def test_health_http_errors_are_mapped() -> None:
+    runpod = client(lambda _request: httpx.Response(500))
+    with pytest.raises(StageError) as exc:
+        await runpod.health()
+    assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert exc.value.retryable is True
+
+
+async def test_health_non_json_body_is_an_error() -> None:
+    runpod = client(lambda _request: httpx.Response(200, text="not json"))
+    with pytest.raises(StageError) as exc:
+        await runpod.health()
+    assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert "not JSON" in exc.value.detail
+
+
+async def test_health_non_object_body_is_an_error() -> None:
+    runpod = client(lambda _request: httpx.Response(200, json=[1, 2]))
+    with pytest.raises(StageError) as exc:
+        await runpod.health()
+    assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
+    assert "not an object" in exc.value.detail
+
+
 async def test_breaker_opens_after_five_failures() -> None:
     calls = 0
 

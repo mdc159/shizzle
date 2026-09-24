@@ -238,11 +238,15 @@ appending an event; stages signal it purely via `ctx.park_seconds`.
 ### B10 — unresolvable dispatch identity fails closed
 
 **Invariant:** An unresolvable dispatch identity MUST fail closed after
-`queue_timeout + worker_stall` — explicit operator recovery, never silent
-redispatch.
+`max(queue_timeout, cold_start) + worker_stall` — explicit operator recovery,
+never silent redispatch. The window includes `cold_start` (not just
+`queue_timeout`) because the queue-timeout watchdog (B13) itself waits that
+long before failing a job whose worker is still initializing.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`
 - Indirect coverage via the reservation tests (`test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover`, `test_dispatch_timeout_reservation_prevents_redispatch`).
-- Violation smell: any automatic retry after a dispatch identity is lost.
+- Violation smell: any automatic retry after a dispatch identity is lost, or a
+  fail-closed window shorter than the queue-timeout watchdog can legitimately
+  wait.
 
 ### B11 — stage handlers idempotent under crash-rerun
 
@@ -267,6 +271,57 @@ worker failed. The marker location comes from the confirmed dispatch key
 - Guarded by: `library/tests/test_orchestrator_unit.py::test_cloud_dispatched_runpod_failed_redispatches_fresh`, `library/tests/test_orchestrator_unit.py::test_superseded_completion_requires_handoff`
 - Violation smell: reusing the old idempotency key after a RunPod-side
   failure.
+
+### B13 — queue timeout defers to cold start before cancelling
+
+**Invariant:** When `IN_QUEUE` age exceeds `runpod_queue_timeout_seconds`, the
+handler MUST consult RunPod endpoint health before cancelling. If workers are
+reported `initializing` and the queue age is still within
+`runpod_cold_start_seconds`, the job MUST keep waiting instead of being
+cancelled and redispatched under a new key onto the same endpoint. Once queue
+age exceeds `runpod_cold_start_seconds`, or the health check itself fails
+(carries no signal either way), the existing cancel behavior applies
+unchanged. A cold-start extension records one `runpod_cold_start_extended`
+event per RunPod job id (deduped per dispatch attempt, not per poll) — see B6
+for the dedup pattern this follows. This check runs before the B2 lease-owner
+gate, same as the existing queue-timeout cancel.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runpod_client.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_cold_start_extends_queue_wait_when_workers_initializing`, `library/tests/test_orchestrator_unit.py::test_cold_start_budget_exhausted_still_cancels`, `library/tests/test_orchestrator_unit.py::test_health_check_failure_falls_back_to_existing_cancel_behavior`, `library/tests/lib/test_runpod_client.py::test_health_returns_worker_and_job_counts`
+- Violation smell: cancelling a queued job without checking health first, or
+  granting an unbounded extension when workers never leave `initializing`.
+
+### B14 — running-stall heartbeat is established on the queued-to-running transition
+
+**Invariant:** The first `IN_PROGRESS` observation after `worker_phase` is
+`"dispatched"` or `"queued"` MUST establish a fresh running heartbeat (via
+`record_worker_progress`) and skip the running-stall check for that one
+observation, rather than comparing the running-stall timeout against the
+queue-phase heartbeat age. A subsequent stall — no progress for longer than
+`runpod_worker_stall_seconds` measured from that fresh heartbeat — MUST still
+cancel and fail the job. The heartbeat is a durable DB column, so this holds
+across orchestrator restarts (issue #20).
+- Where: `library/src/shizzle_server/orchestrator/stages.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_queued_to_running_transition_does_not_trip_running_stall`, `library/tests/test_orchestrator_unit.py::test_actual_running_stall_after_transition_still_times_out`
+- Violation smell: computing `stalled_for` from `worker_heartbeat_at` before
+  the queued-to-running transition has had a chance to refresh it.
+
+### B15 — service liveness heartbeat is independent of job processing
+
+**Invariant:** The orchestrator's service-liveness heartbeat (the row
+`/api/health` reads for `orchestratorAlive`, which gates VPS deploy health
+checks) MUST be written on its own schedule, never as a side effect that a
+long job stage can delay. It runs on a task separate from the claim/process
+loop and from the per-job lease renewer, is cancelled cleanly on shutdown,
+and a write failure (e.g. DB unreachable) is logged rather than swallowed —
+the row is left stale so the age check correctly reports the process as not
+alive. This is distinct from job-level worker-phase heartbeats, which write
+only on phase change (B8).
+- Where: `library/src/shizzle_server/orchestrator/loop.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stays_fresh_through_a_long_healthy_stage`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stops_when_loop_stops`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_db_failure_is_logged_and_does_not_crash_loop`
+- Violation smell: writing the service heartbeat only from inside the
+  claim-and-process loop, so a busy healthy stage (source transfer, package
+  verification, AAC/video derivation) starves it past the liveness threshold
+  (issue #21).
 
 ## C. Publication immutability
 

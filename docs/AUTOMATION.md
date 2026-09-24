@@ -63,12 +63,26 @@ NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
 under `/opt/shizzle/prod` per invariant E3. The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
-its heartbeat keeps /api/health green, and new jobs fail closed at dispatch
-with `RUNPOD_DISPATCH_FAILED`. A job already dispatched to RunPod when
+its service-liveness heartbeat keeps /api/health green, and new jobs fail
+closed at dispatch with `RUNPOD_DISPATCH_FAILED`. That heartbeat runs on its
+own schedule independent of job processing (B15), so a healthy but long job
+stage (source transfer, package verification, AAC/video derivation) cannot
+starve it and falsely trip the deploy health gate below. A job already
+dispatched to RunPod when
 credentials disappear parks instead: its polls fail retryable and the stall
 watchdog does not fire while the client is unconfigured, so the live remote
 job reconciles on the first poll after credentials return. Set both
 variables in the production `.env` when the RunPod path is connected.
+
+The queue-timeout watchdog (`RUNPOD_QUEUE_TIMEOUT_SECONDS`, default 900s)
+checks RunPod endpoint health before cancelling a job stuck `IN_QUEUE`: a
+worker that is allocated and still pulling its image reports `initializing`,
+and the wait extends up to `RUNPOD_COLD_START_SECONDS` (default 1800s)
+instead of cancelling and redispatching a fresh worker onto the same endpoint
+(invariant B13, hardened after the 2026-09-24 production cold-start
+incident). The running-stall watchdog (`RUNPOD_WORKER_STALL_SECONDS`, default
+300s) is measured from a heartbeat established on the queued-to-running
+transition, never from queue age (invariant B14).
 
 ## 3. Deploy procedure
 
@@ -197,7 +211,12 @@ swallows (B7). Park frees the lease without consuming an attempt or appending
 an event (B9). Every unresolvable error path fails closed (B5, B10) and every
 stage handler must be idempotent under crash-rerun (B11). Heartbeats are
 written only on phase change (B8); a RunPod job already marked failed
-dispatches fresh under a new idempotency key (B12).
+dispatches fresh under a new idempotency key (B12). A queue timeout consults
+endpoint health and waits out a cold start (initializing workers) up to the
+cold-start budget before cancelling (B13), and the queued-to-running
+transition establishes a fresh running heartbeat before any stall check (B14).
+The service liveness heartbeat runs on its own task, independent of job
+processing, and a failed write leaves it stale rather than faking it (B15).
 ```
 
 <!-- Mirrored copy: duplicates the library/src/shizzle_server/db/repository.py
