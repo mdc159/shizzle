@@ -215,6 +215,8 @@ dispatches fresh under a new idempotency key (B12). A queue timeout consults
 endpoint health and waits out a cold start (initializing workers) up to the
 cold-start budget before cancelling (B13), and the queued-to-running
 transition establishes a fresh running heartbeat before any stall check (B14).
+The service liveness heartbeat runs on its own task, independent of job
+processing, and a failed write leaves it stale rather than faking it (B15).
 ```
 
 <!-- Mirrored copy: duplicates the library/src/shizzle_server/db/repository.py
