@@ -216,6 +216,12 @@ def test_derive_video_caps_and_probes_synthetic_fixture(tmp_path: Path):
         text=True,
     ).stdout.strip())
     assert abs(actual - 0.75) <= 0.05
+    # Duration-only checks missed an invalid avg_frame_rate in a real cloud
+    # acceptance run. Exercise the publication gate on the encoded artifact.
+    from shizzle_server.publish.media_audit import audit_video_file
+
+    audit = audit_video_file(out, artifact="video.mp4", expected_duration=0.75)
+    assert audit["passed"], audit["issues"]
 
 
 def _write_verification_package(root: Path, *, sample_count: int = 10) -> dict:
