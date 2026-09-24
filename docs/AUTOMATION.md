@@ -207,7 +207,10 @@ swallows (B7). Park frees the lease without consuming an attempt or appending
 an event (B9). Every unresolvable error path fails closed (B5, B10) and every
 stage handler must be idempotent under crash-rerun (B11). Heartbeats are
 written only on phase change (B8); a RunPod job already marked failed
-dispatches fresh under a new idempotency key (B12).
+dispatches fresh under a new idempotency key (B12). A queue timeout consults
+endpoint health and waits out a cold start (initializing workers) up to the
+cold-start budget before cancelling (B13), and the queued-to-running
+transition establishes a fresh running heartbeat before any stall check (B14).
 ```
 
 <!-- Mirrored copy: duplicates the library/src/shizzle_server/db/repository.py
