@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { useAudioSync } from '@/hooks/useAudioSync';
 import { loadManifest } from '@/lib/api';
 import { resolveMediaUrl } from '@/lib/playback/mediaUrl';
+import { registerTransportControls } from '@/lib/playback/transportControls';
 import { Activity, LayoutDashboard, Loader2, SlidersHorizontal } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -170,6 +171,20 @@ export const PlayerShell: React.FC = () => {
   }, [videoSrc, isReady]);
 
   const mediaReady = isReady && Boolean(bufferedVideoSrc) && !isBufferingVideo;
+
+  // Publish the exact user-gesture play/pause path (and its readiness gate)
+  // the transport button below uses, so other entry points — the Space
+  // keyboard shortcut in App.tsx — can drive the same engine calls instead of
+  // only flipping store state.
+  useEffect(() => {
+    registerTransportControls({
+      ready: mediaReady,
+      playing,
+      play: handlePlay,
+      pause: handlePause,
+    });
+    return () => registerTransportControls(null);
+  }, [mediaReady, playing, handlePlay, handlePause]);
 
   return (
     <div
