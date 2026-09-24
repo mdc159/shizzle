@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { PlayerShell } from '@/components/player/PlayerShell';
 import { LibraryDrawer } from '@/components/library/LibraryDrawer';
 import { MixerDrawer } from '@/components/mixer/MixerDrawer';
@@ -6,9 +6,9 @@ import { AddSourceModal } from '@/components/source/AddSourceModal';
 import { PasscodeGate } from '@/components/auth/PasscodeGate';
 import { Toaster } from 'sonner';
 import { useStore } from '@/stores/useStore';
-import { hasToken } from '@/lib/auth';
 import { refreshMediaSession } from '@/lib/api';
 import { useRemoteSync } from '@/hooks/useRemoteSync';
+import { useAuthGate } from '@/hooks/useAuthGate';
 
 /** Applies remote mixer commands and publishes mix state (mounted when authed). */
 const RemoteSyncBridge = () => {
@@ -18,7 +18,7 @@ const RemoteSyncBridge = () => {
 
 function App() {
   const { setActiveDrawer, togglePlay } = useStore();
-  const [authed, setAuthed] = useState<boolean>(() => hasToken());
+  const [authed, setAuthedTrue] = useAuthGate();
 
   // Re-arm CloudFront media cookies whenever we hold a token (fresh login or a
   // returning device). Best-effort: playback surfaces its own errors if unmet.
@@ -75,7 +75,7 @@ function App() {
   if (!authed) {
     return (
       <div className="relative w-full h-full bg-black text-white antialiased">
-        <PasscodeGate onAuthed={() => setAuthed(true)} />
+        <PasscodeGate onAuthed={setAuthedTrue} />
         <Toaster theme="dark" position="bottom-left" />
       </div>
     );
