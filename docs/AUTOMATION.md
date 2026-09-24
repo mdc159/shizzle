@@ -63,8 +63,12 @@ NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
 under `/opt/shizzle/prod` per invariant E3. The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
-its heartbeat keeps /api/health green, and new jobs fail closed at dispatch
-with `RUNPOD_DISPATCH_FAILED`. A job already dispatched to RunPod when
+its service-liveness heartbeat keeps /api/health green, and new jobs fail
+closed at dispatch with `RUNPOD_DISPATCH_FAILED`. That heartbeat runs on its
+own schedule independent of job processing (B15), so a healthy but long job
+stage (source transfer, package verification, AAC/video derivation) cannot
+starve it and falsely trip the deploy health gate below. A job already
+dispatched to RunPod when
 credentials disappear parks instead: its polls fail retryable and the stall
 watchdog does not fire while the client is unconfigured, so the live remote
 job reconciles on the first poll after credentials return. Set both

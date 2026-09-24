@@ -305,6 +305,24 @@ across orchestrator restarts (issue #20).
 - Violation smell: computing `stalled_for` from `worker_heartbeat_at` before
   the queued-to-running transition has had a chance to refresh it.
 
+### B15 — service liveness heartbeat is independent of job processing
+
+**Invariant:** The orchestrator's service-liveness heartbeat (the row
+`/api/health` reads for `orchestratorAlive`, which gates VPS deploy health
+checks) MUST be written on its own schedule, never as a side effect that a
+long job stage can delay. It runs on a task separate from the claim/process
+loop and from the per-job lease renewer, is cancelled cleanly on shutdown,
+and a write failure (e.g. DB unreachable) is logged rather than swallowed —
+the row is left stale so the age check correctly reports the process as not
+alive. This is distinct from job-level worker-phase heartbeats, which write
+only on phase change (B8).
+- Where: `library/src/shizzle_server/orchestrator/loop.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stays_fresh_through_a_long_healthy_stage`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stops_when_loop_stops`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_db_failure_is_logged_and_does_not_crash_loop`
+- Violation smell: writing the service heartbeat only from inside the
+  claim-and-process loop, so a busy healthy stage (source transfer, package
+  verification, AAC/video derivation) starves it past the liveness threshold
+  (issue #21).
+
 ## C. Publication immutability
 
 ### C1 — generations are immutable

@@ -269,6 +269,112 @@ async def test_orchestrator_heartbeat_written(settings, heartbeat_repo, job_repo
     assert await heartbeat_repo.latest() is not None
 
 
+async def test_service_heartbeat_stays_fresh_through_a_long_healthy_stage(
+    settings, heartbeat_repo, job_repo, upload_job, monkeypatch
+):
+    """Issue #21: a healthy stage that runs long (source transfer, package
+    verification, AAC/video derivation) must not starve the service liveness
+    heartbeat that /api/health and the VPS deploy gate read. The heartbeat is
+    scheduled on its own task, independent of job processing, so it should
+    keep beating across many liveness windows while a single stage is busy."""
+    settings.orchestrator_heartbeat_seconds = 0.02
+    busy_seconds = 0.3  # >> heartbeat interval: spans ~15 windows
+
+    real_process_job = Orchestrator.process_job
+
+    async def slow_process_job(self, job):
+        await asyncio.sleep(busy_seconds)
+        return await real_process_job(self, job)
+
+    monkeypatch.setattr(Orchestrator, "process_job", slow_process_job)
+
+    orch = Orchestrator(settings, worker_id="busy-worker")
+    task = asyncio.create_task(orch.run_forever())
+    try:
+        deadline = asyncio.get_event_loop().time() + busy_seconds
+        samples = 0
+        stale_samples = 0
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(settings.orchestrator_heartbeat_seconds)
+            last_beat = await heartbeat_repo.latest()
+            if last_beat is None:
+                continue
+            samples += 1
+            age = (utcnow() - last_beat).total_seconds()
+            # Generous slack over the heartbeat interval for scheduler jitter.
+            if age > settings.orchestrator_heartbeat_seconds * 4:
+                stale_samples += 1
+        # Sampled across multiple liveness windows while the stage was busy,
+        # and every sample found a fresh heartbeat.
+        assert samples >= 3
+        assert stale_samples == 0
+    finally:
+        orch.request_stop()
+        await asyncio.wait_for(task, timeout=10)
+
+
+async def test_service_heartbeat_stops_when_loop_stops(settings, heartbeat_repo):
+    """Once the loop is stopped, the heartbeat task must be cancelled too —
+    a stopped/dead process must stop reading as alive."""
+    orch = Orchestrator(settings, worker_id="stoppable-worker")
+    task = asyncio.create_task(orch.run_forever())
+    try:
+        # Let at least one heartbeat land.
+        async def _wait_for_first_beat():
+            while await heartbeat_repo.latest() is None:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_wait_for_first_beat(), timeout=5)
+    finally:
+        orch.request_stop()
+        await asyncio.wait_for(task, timeout=10)
+
+    last_beat_at_stop = await heartbeat_repo.latest()
+    assert last_beat_at_stop is not None
+    # No further beats should land after the loop (and its heartbeat task)
+    # have stopped, even after waiting several heartbeat intervals.
+    await asyncio.sleep(settings.orchestrator_heartbeat_seconds * 5)
+    assert await heartbeat_repo.latest() == last_beat_at_stop
+
+
+async def test_service_heartbeat_db_failure_is_logged_and_does_not_crash_loop(
+    settings, heartbeat_repo, job_repo, caplog, monkeypatch
+):
+    """A heartbeat write failure (DB down/disconnected) must be surfaced via
+    logging, not swallowed, and must not crash the orchestrator loop or fake
+    freshness. /api/health then correctly reports orchestratorAlive=false
+    because the heartbeat row stays stale."""
+    settings.orchestrator_heartbeat_seconds = 0.02
+
+    async def failing_beat(worker_id):
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(heartbeat_repo, "beat", failing_beat)
+
+    orch = Orchestrator(settings, worker_id="db-down-worker")
+    orch.heartbeats = heartbeat_repo
+    job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://x")
+
+    with caplog.at_level(logging.ERROR, logger="shizzle_server.orchestrator.loop"):
+        task = asyncio.create_task(orch.run_forever())
+        try:
+            # The loop must keep making progress on job processing even
+            # though the heartbeat writer is failing on every attempt.
+            failed = await asyncio.wait_for(
+                wait_for_status(job_repo, job.id, JobStage.failed), timeout=10
+            )
+        finally:
+            orch.request_stop()
+            await asyncio.wait_for(task, timeout=10)
+
+    assert failed.status is JobStage.failed
+    assert await heartbeat_repo.latest() is None  # never faked as fresh
+    assert any(
+        record.levelno == logging.ERROR and "service heartbeat write failed" in record.message
+        for record in caplog.records
+    )
+
+
 async def test_effect_counter_stage_idempotency(settings, job_repo, upload_job):
     """The test pipeline's marker files mirror real on-disk idempotency:
     a re-run of split after completion must not repeat the effects."""
