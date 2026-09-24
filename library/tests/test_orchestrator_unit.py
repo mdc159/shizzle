@@ -474,6 +474,7 @@ class FakeRunPodClient:
         responses: list[dict | Exception],
         *,
         cancel_error: Exception | None = None,
+        health_responses: list[dict | Exception] | None = None,
     ) -> None:
         self.responses = list(responses)
         self._i = 0
@@ -481,6 +482,16 @@ class FakeRunPodClient:
         self.polled: list[str] = []
         self.cancelled: list[str] = []
         self.cancel_error = cancel_error
+        # Defaults to "no workers initializing" so existing tests that never
+        # configure health keep exercising the plain queue-timeout cancel
+        # path unchanged.
+        self.health_responses = (
+            list(health_responses)
+            if health_responses is not None
+            else [{"workers": {"initializing": 0}, "jobs": {}}]
+        )
+        self._health_i = 0
+        self.health_calls = 0
 
     async def dispatch(self, *, job_id, idempotency_key, payload):
         rid = f"rp-{len(self.dispatched) + 1}"
@@ -499,6 +510,14 @@ class FakeRunPodClient:
         self.cancelled.append(runpod_job_id)
         if self.cancel_error is not None:
             raise self.cancel_error
+
+    async def health(self) -> dict:
+        self.health_calls += 1
+        resp = self.health_responses[min(self._health_i, len(self.health_responses) - 1)]
+        self._health_i += 1
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
 
 
 def _stub_cloud_intake(monkeypatch) -> None:
@@ -1106,6 +1125,245 @@ async def test_owner_with_failed_phase_still_cancels_on_timeout(
     assert fake.cancelled == ["rp-still-queued"]
 
 
+async def _dispatch_to_queue(job_repo, job_id, worker_id, runpod_job_id):
+    """Shared setup: claim, advance to dispatched, record the RunPod id."""
+    claimed = await job_repo.claim_next(worker_id=worker_id, lease_seconds=60)
+    assert claimed is not None and claimed.id == job_id
+    await job_repo.advance(
+        job_id, from_stage=JobStage.pending, to_stage=JobStage.downloading,
+        worker_id=worker_id,
+    )
+    await job_repo.advance(
+        job_id, from_stage=JobStage.downloading, to_stage=JobStage.dispatched,
+        worker_id=worker_id,
+    )
+    await job_repo.record_dispatch(job_id, worker_id=worker_id, runpod_job_id=runpod_job_id)
+
+
+async def test_queued_to_running_transition_does_not_trip_running_stall(
+    settings, job_repo, session_factory, upload_job
+):
+    """Issue #20: the first IN_PROGRESS observation after a valid 300-900 s
+    queue wait must establish a fresh running heartbeat instead of measuring
+    the running-stall timeout against queue age — a healthy worker that just
+    started must not be cancelled."""
+    settings.runpod_worker_stall_seconds = 300.0
+    settings.runpod_queue_timeout_seconds = 900.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "queue-run", "rp-transition")
+    # A valid queue wait inside [300, 900]s: well past the running-stall
+    # threshold, comfortably inside the queue-timeout budget.
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_phase = "queued"
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=600)
+
+    fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "separating"}}])
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="queue-run",
+    )
+
+    assert await handle_dispatched(ctx) is None
+    assert fake.cancelled == []
+    job = await job_repo.get_job(upload_job.id)
+    assert job.status == JobStage.dispatched
+    assert job.worker_phase == "separating"
+    assert job.error_code is None
+    # The new heartbeat is fresh (established this poll), not the stale
+    # 600s-old queue-anchored one.
+    age = _age_seconds(job.worker_heartbeat_at)
+    assert age is not None and age < 5
+
+    # Resumed polling: a further healthy poll must not cancel either.
+    fake.responses.append({"status": "IN_PROGRESS", "output": {"phase": "encoding"}})
+    ctx2 = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="queue-run",
+    )
+    assert await handle_dispatched(ctx2) is None
+    assert fake.cancelled == []
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == "encoding"
+
+
+async def test_actual_running_stall_after_transition_still_times_out(
+    settings, job_repo, session_factory, upload_job
+):
+    """Issue #20 acceptance: once the running heartbeat is established, a real
+    stall (no progress for longer than runpod_worker_stall_seconds) must still
+    cancel and fail the job."""
+    settings.runpod_worker_stall_seconds = 5.0
+    settings.runpod_queue_timeout_seconds = 900.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "queue-stall", "rp-stall")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_phase = "queued"
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=600)
+
+    fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "separating"}}])
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="queue-stall",
+    )
+    # First observation establishes the running heartbeat; must not cancel.
+    assert await handle_dispatched(ctx) is None
+    assert fake.cancelled == []
+
+    # Now age the freshly-established running heartbeat past the (tiny)
+    # stall threshold: a real stall.
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=10)
+
+    ctx2 = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="queue-stall",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(ctx2)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+    assert fake.cancelled == ["rp-stall"]
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == "failed"
+
+
+async def test_cold_start_extends_queue_wait_when_workers_initializing(
+    settings, job_repo, session_factory, upload_job
+):
+    """Cold start (2026-09-24 prod incident): a worker allocated and still
+    pulling its image must not be cancelled and redispatched at the plain
+    queue timeout — the endpoint health check shows initializing workers, so
+    the wait extends up to the cold-start budget, recording one event."""
+    settings.runpod_queue_timeout_seconds = 10.0
+    settings.runpod_cold_start_seconds = 1800.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "cold-start", "rp-cold")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=60)
+
+    fake = FakeRunPodClient(
+        [{"status": "IN_QUEUE", "output": {}}],
+        health_responses=[{"workers": {"initializing": 1}, "jobs": {}}],
+    )
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="cold-start",
+    )
+    assert await handle_dispatched(ctx) is None
+    assert fake.cancelled == []
+    job = await job_repo.get_job(upload_job.id)
+    assert job.status == JobStage.dispatched
+    events = await job_repo.list_events(upload_job.id)
+    extensions = [e for e in events if e.event == "runpod_cold_start_extended"]
+    assert len(extensions) == 1
+    assert extensions[0].detail["runpod_job_id"] == "rp-cold"
+
+    # A second poll during the same cold start must not add a second event
+    # (deduped per attempt/runpod job id, not per poll).
+    ctx2 = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="cold-start",
+    )
+    assert await handle_dispatched(ctx2) is None
+    assert fake.cancelled == []
+    events = await job_repo.list_events(upload_job.id)
+    extensions = [e for e in events if e.event == "runpod_cold_start_extended"]
+    assert len(extensions) == 1
+
+
+async def test_cold_start_budget_exhausted_still_cancels(
+    settings, job_repo, session_factory, upload_job
+):
+    """Even with workers still initializing, the cold-start grace is bounded:
+    past runpod_cold_start_seconds the job cancels like any other timeout."""
+    settings.runpod_queue_timeout_seconds = 10.0
+    settings.runpod_cold_start_seconds = 20.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "cold-exhausted", "rp-cold-2")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=30)
+
+    fake = FakeRunPodClient(
+        [{"status": "IN_QUEUE", "output": {}}],
+        health_responses=[{"workers": {"initializing": 1}, "jobs": {}}],
+    )
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="cold-exhausted",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(ctx)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+    assert fake.cancelled == ["rp-cold-2"]
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == "failed"
+
+
+async def test_health_check_failure_falls_back_to_existing_cancel_behavior(
+    settings, job_repo, session_factory, upload_job
+):
+    """A health-check failure carries no signal about a cold start; it must
+    not itself cancel the job, but it also must not grant an extension — the
+    existing queue-timeout cancel behavior applies."""
+    settings.runpod_queue_timeout_seconds = 10.0
+    settings.runpod_cold_start_seconds = 1800.0
+    await _dispatch_to_queue(job_repo, upload_job.id, "health-fail", "rp-health-fail")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.worker_heartbeat_at = utcnow() - timedelta(seconds=60)
+
+    fake = FakeRunPodClient(
+        [{"status": "IN_QUEUE", "output": {}}],
+        health_responses=[
+            StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, "health down", retryable=True)
+        ],
+    )
+    ctx = StageContext(
+        job=await job_repo.get_job(upload_job.id),
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="health-fail",
+    )
+    with pytest.raises(StageError) as excinfo:
+        await handle_dispatched(ctx)
+    assert excinfo.value.code is ErrorCode.RUNPOD_TIMEOUT
+    assert fake.cancelled == ["rp-health-fail"]
+    job = await job_repo.get_job(upload_job.id)
+    assert job.worker_phase == "failed"
+    events = await job_repo.list_events(upload_job.id)
+    assert not any(e.event == "runpod_cold_start_extended" for e in events)
+
+
 async def test_transient_poll_failure_dedupes_one_event_per_outage(
     settings, job_repo, upload_job
 ):
@@ -1408,7 +1666,7 @@ async def test_dispatch_timeout_reservation_prevents_redispatch(
     assert "runpod_dispatched" not in events
 
     fail_closed_after = (
-        settings.runpod_queue_timeout_seconds
+        max(settings.runpod_queue_timeout_seconds, settings.runpod_cold_start_seconds)
         + settings.runpod_worker_stall_seconds
         + 1
     )

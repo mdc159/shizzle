@@ -238,11 +238,15 @@ appending an event; stages signal it purely via `ctx.park_seconds`.
 ### B10 — unresolvable dispatch identity fails closed
 
 **Invariant:** An unresolvable dispatch identity MUST fail closed after
-`queue_timeout + worker_stall` — explicit operator recovery, never silent
-redispatch.
+`max(queue_timeout, cold_start) + worker_stall` — explicit operator recovery,
+never silent redispatch. The window includes `cold_start` (not just
+`queue_timeout`) because the queue-timeout watchdog (B13) itself waits that
+long before failing a job whose worker is still initializing.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`
 - Indirect coverage via the reservation tests (`test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover`, `test_dispatch_timeout_reservation_prevents_redispatch`).
-- Violation smell: any automatic retry after a dispatch identity is lost.
+- Violation smell: any automatic retry after a dispatch identity is lost, or a
+  fail-closed window shorter than the queue-timeout watchdog can legitimately
+  wait.
 
 ### B11 — stage handlers idempotent under crash-rerun
 
@@ -267,6 +271,39 @@ worker failed. The marker location comes from the confirmed dispatch key
 - Guarded by: `library/tests/test_orchestrator_unit.py::test_cloud_dispatched_runpod_failed_redispatches_fresh`, `library/tests/test_orchestrator_unit.py::test_superseded_completion_requires_handoff`
 - Violation smell: reusing the old idempotency key after a RunPod-side
   failure.
+
+### B13 — queue timeout defers to cold start before cancelling
+
+**Invariant:** When `IN_QUEUE` age exceeds `runpod_queue_timeout_seconds`, the
+handler MUST consult RunPod endpoint health before cancelling. If workers are
+reported `initializing` and the queue age is still within
+`runpod_cold_start_seconds`, the job MUST keep waiting instead of being
+cancelled and redispatched under a new key onto the same endpoint. Once queue
+age exceeds `runpod_cold_start_seconds`, or the health check itself fails
+(carries no signal either way), the existing cancel behavior applies
+unchanged. A cold-start extension records one `runpod_cold_start_extended`
+event per RunPod job id (deduped per dispatch attempt, not per poll) — see B6
+for the dedup pattern this follows. This check runs before the B2 lease-owner
+gate, same as the existing queue-timeout cancel.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runpod_client.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_cold_start_extends_queue_wait_when_workers_initializing`, `library/tests/test_orchestrator_unit.py::test_cold_start_budget_exhausted_still_cancels`, `library/tests/test_orchestrator_unit.py::test_health_check_failure_falls_back_to_existing_cancel_behavior`, `library/tests/lib/test_runpod_client.py::test_health_returns_worker_and_job_counts`
+- Violation smell: cancelling a queued job without checking health first, or
+  granting an unbounded extension when workers never leave `initializing`.
+
+### B14 — running-stall heartbeat is established on the queued-to-running transition
+
+**Invariant:** The first `IN_PROGRESS` observation after `worker_phase` is
+`"dispatched"` or `"queued"` MUST establish a fresh running heartbeat (via
+`record_worker_progress`) and skip the running-stall check for that one
+observation, rather than comparing the running-stall timeout against the
+queue-phase heartbeat age. A subsequent stall — no progress for longer than
+`runpod_worker_stall_seconds` measured from that fresh heartbeat — MUST still
+cancel and fail the job. The heartbeat is a durable DB column, so this holds
+across orchestrator restarts (issue #20).
+- Where: `library/src/shizzle_server/orchestrator/stages.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_queued_to_running_transition_does_not_trip_running_stall`, `library/tests/test_orchestrator_unit.py::test_actual_running_stall_after_transition_still_times_out`
+- Violation smell: computing `stalled_for` from `worker_heartbeat_at` before
+  the queued-to-running transition has had a chance to refresh it.
 
 ## C. Publication immutability
 

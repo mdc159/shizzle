@@ -36,6 +36,16 @@ class RunPodClient(Protocol):
         """Cancel a RunPod job."""
         ...
 
+    async def health(self) -> dict[str, Any]:
+        """Fetch the endpoint's worker/job health counts.
+
+        Used only to distinguish a genuine queue stall from a cold start
+        (workers still initializing/pulling the image) before cancelling a
+        queued job. Callers must treat a raised error as "unknown" rather
+        than as evidence either way.
+        """
+        ...
+
 
 class NotConfiguredRunPodClient:
     """Parked-cloud stand-in used while cloud mode lacks RunPod settings.
@@ -69,6 +79,9 @@ class NotConfiguredRunPodClient:
     async def cancel(self, runpod_job_id: str) -> None:
         del runpod_job_id
         raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
+
+    async def health(self) -> dict[str, Any]:
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=True)
 
 
 class HttpRunPodClient:
@@ -128,6 +141,20 @@ class HttpRunPodClient:
 
     async def cancel(self, runpod_job_id: str) -> None:
         await self._call(lambda: self._request("POST", f"/cancel/{runpod_job_id}"))
+
+    async def health(self) -> dict[str, Any]:
+        response = await self._call(lambda: self._request("GET", "/health"))
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED, "RunPod health response was not JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED, "RunPod health response was not an object"
+            )
+        return payload
 
     async def _call(self, factory: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
         try:

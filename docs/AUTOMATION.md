@@ -70,6 +70,16 @@ watchdog does not fire while the client is unconfigured, so the live remote
 job reconciles on the first poll after credentials return. Set both
 variables in the production `.env` when the RunPod path is connected.
 
+The queue-timeout watchdog (`RUNPOD_QUEUE_TIMEOUT_SECONDS`, default 900s)
+checks RunPod endpoint health before cancelling a job stuck `IN_QUEUE`: a
+worker that is allocated and still pulling its image reports `initializing`,
+and the wait extends up to `RUNPOD_COLD_START_SECONDS` (default 1800s)
+instead of cancelling and redispatching a fresh worker onto the same endpoint
+(invariant B13, hardened after the 2026-09-24 production cold-start
+incident). The running-stall watchdog (`RUNPOD_WORKER_STALL_SECONDS`, default
+300s) is measured from a heartbeat established on the queued-to-running
+transition, never from queue age (invariant B14).
+
 ## 3. Deploy procedure
 
 **On merge to master:**

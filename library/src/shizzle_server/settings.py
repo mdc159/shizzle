@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     runpod_poll_seconds: float = 10.0
     runpod_queue_timeout_seconds: float = 900.0
     runpod_worker_stall_seconds: float = 300.0
+    # Cold start grace: a worker that is allocated but still pulling its
+    # multi-GB image reports IN_QUEUE past runpod_queue_timeout_seconds with
+    # no fault of its own (2026-09-24 production incident — cancelling and
+    # redispatching under a new key just restarts the same wait on the same
+    # endpoint). When the endpoint health check reports workers still
+    # initializing, the queue timeout is extended up to this separate budget
+    # before the existing cancel/redispatch behavior applies.
+    runpod_cold_start_seconds: float = 1800.0
 
     processing_profile_version: int = 1
 
