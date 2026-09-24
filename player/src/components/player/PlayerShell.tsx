@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '@/stores/useStore';
 import { TransportControls } from './TransportControls';
 import { PipelineDrawer } from '@/components/pipeline/PipelineDrawer';
@@ -61,6 +61,15 @@ export const PlayerShell: React.FC = () => {
 
   const trackSlug = currentTrack?.slug;
 
+  // Bumped during commit, before passive-effect cleanup can run, so a request
+  // that resolves between a track change's commit and its effect cleanup is
+  // still recognised as stale. A generation (not the slug) also rejects the
+  // first A response after a quick A -> B -> A.
+  const manifestGenerationRef = useRef(0);
+  useLayoutEffect(() => {
+    manifestGenerationRef.current += 1;
+  }, [trackSlug]);
+
   // Load manifest when track changes. A delayed response (success or error)
   // for a track the user has since navigated away from must never overwrite
   // the currently selected track's state, so the in-flight request is both
@@ -72,7 +81,9 @@ export const PlayerShell: React.FC = () => {
     }
 
     const controller = new AbortController();
+    const generation = manifestGenerationRef.current;
     let cancelled = false;
+    const isStale = () => cancelled || generation !== manifestGenerationRef.current;
 
     const fetchManifest = async () => {
       setIsLoading(true);
@@ -80,16 +91,16 @@ export const PlayerShell: React.FC = () => {
         // The authenticated server resolves cloud media refs to exact-object,
         // expiring CloudFront URLs. Local manifests remain relative.
         const manifestData = await loadManifest(trackSlug, controller.signal);
-        if (cancelled) return;
+        if (isStale()) return;
         setManifest(manifestData);
         setDuration(manifestData.duration);
       } catch (err) {
-        if (cancelled) return;
+        if (isStale()) return;
         console.error('Failed to load manifest:', err);
         toast.error('Failed to load track stems');
         setManifest(null);
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!isStale()) setIsLoading(false);
       }
     };
 

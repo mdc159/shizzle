@@ -82,6 +82,7 @@ class ManifestGate {
   private queues: Record<string, Deferred[]> = { a: [], b: [] };
   private outcomes: Record<string, Array<'success' | 'fail'>> = { a: [], b: [] };
   private seen: Record<string, number> = { a: 0, b: 0 };
+  private settled: Record<string, Deferred[]> = { a: [], b: [] };
 
   async install(page: Page) {
     await page.route('**/api/tracks/*/manifest', async (route: Route) => {
@@ -92,7 +93,9 @@ class ManifestGate {
         return;
       }
       const gate = makeDeferred();
+      const done = makeDeferred();
       this.queues[slug].push(gate);
+      this.settled[slug].push(done);
       this.seen[slug] += 1;
       await gate.promise;
       const idx = this.queues[slug].indexOf(gate);
@@ -107,6 +110,8 @@ class ManifestGate {
         // The underlying request may already be aborted client-side (the
         // whole point of this test); Playwright can throw when fulfilling a
         // cancelled route. That is expected and not a test failure.
+      } finally {
+        done.resolve();
       }
     });
   }
@@ -116,12 +121,16 @@ class ManifestGate {
     void page; // kept for symmetry/readability with other wait helpers
   }
 
-  /** Release the Nth (1-indexed) request for a slug with the given outcome. */
-  release(slug: 'a' | 'b', requestNumber: number, outcome: 'success' | 'fail' = 'success') {
+  /**
+   * Release the Nth (1-indexed) request for a slug with the given outcome.
+   * Resolves once the route has been fulfilled (or found already aborted).
+   */
+  release(slug: 'a' | 'b', requestNumber: number, outcome: 'success' | 'fail' = 'success'): Promise<void> {
     const gate = this.queues[slug][requestNumber - 1];
     if (!gate) throw new Error(`No request #${requestNumber} recorded for slug ${slug}`);
     this.outcomes[slug][requestNumber - 1] = outcome;
     gate.resolve();
+    return this.settled[slug][requestNumber - 1].promise;
   }
 }
 
@@ -157,6 +166,20 @@ async function setup(page: Page) {
   return gate;
 }
 
+/**
+ * After a stale response has been delivered, let the page run its fetch
+ * continuation, JSON parse, and any React state update (macrotask plus two
+ * animation frames) before asserting that nothing changed.
+ */
+async function settleBrowser(page: Page) {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())), 0),
+      ),
+  );
+}
+
 async function selectTrack(page: Page, slug: 'a' | 'b') {
   await page.getByRole('button', { name: 'Library' }).click();
   const row = page.getByText(TRACKS[slug].title, { exact: true });
@@ -184,11 +207,11 @@ test.describe('manifest request race (issue #26)', () => {
     // Release the stale A response last. Whether it lands as a genuine
     // abort or a very-late fulfil, it must never win: B is the latest
     // active request.
-    gate.release('a', 1, 'success');
+    await gate.release('a', 1, 'success');
 
-    // Give any (incorrect) state update a chance to land before asserting
-    // it did not.
-    await page.waitForTimeout(500);
+    // Wait until the stale response was actually delivered and processed
+    // before asserting it changed nothing.
+    await settleBrowser(page);
 
     const finalState = await getState(page);
     expect(finalState.currentTrack?.slug).toBe(TRACKS.b.slug);
@@ -214,8 +237,8 @@ test.describe('manifest request race (issue #26)', () => {
 
     // The stale A request fails after B has already succeeded. It must not
     // clear B's manifest or surface a user-visible error toast.
-    gate.release('a', 1, 'fail');
-    await page.waitForTimeout(500);
+    await gate.release('a', 1, 'fail');
+    await settleBrowser(page);
 
     const finalState = await getState(page);
     expect(finalState.currentTrack?.slug).toBe(TRACKS.b.slug);
@@ -246,9 +269,9 @@ test.describe('manifest request race (issue #26)', () => {
 
     // Now release the two stale requests (first A, then B). Neither may
     // change the final state.
-    gate.release('b', 1, 'success');
-    gate.release('a', 1, 'success');
-    await page.waitForTimeout(500);
+    await gate.release('b', 1, 'success');
+    await gate.release('a', 1, 'success');
+    await settleBrowser(page);
 
     const finalState = await getState(page);
     expect(finalState.currentTrack?.slug).toBe(TRACKS.a.slug);
