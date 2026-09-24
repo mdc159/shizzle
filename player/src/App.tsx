@@ -9,6 +9,7 @@ import { useStore } from '@/stores/useStore';
 import { refreshMediaSession } from '@/lib/api';
 import { useRemoteSync } from '@/hooks/useRemoteSync';
 import { useAuthGate } from '@/hooks/useAuthGate';
+import { getTransportControls } from '@/lib/playback/transportControls';
 
 /** Applies remote mixer commands and publishes mix state (mounted when authed). */
 const RemoteSyncBridge = () => {
@@ -17,7 +18,7 @@ const RemoteSyncBridge = () => {
 };
 
 function App() {
-  const { setActiveDrawer, togglePlay } = useStore();
+  const { setActiveDrawer } = useStore();
   const [authed, setAuthedTrue] = useAuthGate();
 
   // Re-arm CloudFront media cookies whenever we hold a token (fresh login or a
@@ -48,10 +49,21 @@ function App() {
       }
 
       switch (e.key.toLowerCase()) {
-        case ' ':
+        case ' ': {
           e.preventDefault();
-          togglePlay();
+          // Route through the same user-gesture play/pause path (and
+          // readiness gate) the transport button uses. Do not flip store
+          // state directly — that leaves the UI showing Pause while the
+          // media engine never actually starts (issue #27).
+          const transport = getTransportControls();
+          if (!transport || !transport.ready) break;
+          if (transport.playing) {
+            transport.pause();
+          } else {
+            void transport.play();
+          }
           break;
+        }
         case 'l':
           setActiveDrawer('library');
           break;
@@ -70,7 +82,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, setActiveDrawer]);
+  }, [setActiveDrawer]);
 
   if (!authed) {
     return (
