@@ -44,7 +44,7 @@ RUN pip3 install --upgrade pip==26.2 \
 
 # Demucs and audio deps
 RUN pip3 install \
-    demucs==4.0.1 \
+    demucs==4.1.0 \
     soundfile==0.14.0 \
     numpy==1.26.4
 
@@ -53,8 +53,15 @@ RUN pip3 install \
 # (cold workers dying on multi-GB first-run downloads) cannot occur.
 RUN python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s')"
 # Prove the bake under a genuinely air-gapped BuildKit step. This fails the
-# image build if Demucs attempts any first-run network fetch.
-RUN --network=none python3 -c "from demucs.pretrained import get_model; get_model('htdemucs_6s'); print('WEIGHTS-BAKED-OFFLINE-OK')"
+# image build if Demucs attempts any first-run network fetch, or if the
+# handler's own import path is missing: lossless_worker.separate() uses
+# demucs.api.Separator, which demucs 4.0.1 does not ship (2026-09-24 incident:
+# every image from 2026-08-16 on failed at runtime with ModuleNotFoundError).
+RUN --network=none HF_HUB_OFFLINE=1 python3 -c "from demucs.api import Separator; s = Separator(model='htdemucs_6s', device='cpu', progress=False); assert s.samplerate == 44100; print('WEIGHTS-BAKED-OFFLINE-OK')"
+
+# Runtime must never reach for model weights over the network (weights are
+# baked above; demucs 4.1 looks up the HuggingFace hub first by default).
+ENV HF_HUB_OFFLINE=1
 
 # Handler deps
 RUN pip3 install \

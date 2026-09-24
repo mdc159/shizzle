@@ -111,7 +111,10 @@ interface — no AAC encode, no video, no delivery manifest.
 
 **Invariant:** The worker image MUST bake the htdemucs_6s weights at build
 time: the Dockerfile's `RUN --network=none` model-load check fails the build
-if any weight would need a network download.
+if any weight would need a network download. That check loads the model
+through the handler's own import path (`demucs.api.Separator`), so a demucs
+version missing that module also fails the build, and the image runs with
+`HF_HUB_OFFLINE=1`.
 - Where: `stemsplit/Dockerfile.lossless`
 - Enforced by the image build itself (the offline weights check fails the
   build if any weight is missing). Violation smell: removing the
