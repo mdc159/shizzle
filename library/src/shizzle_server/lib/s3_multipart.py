@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
@@ -46,14 +47,15 @@ ProgressCallback = Callable[[int, int, float], None]  # (completed_parts, total_
 class S3UploadConfig:
     """Configuration for S3 multipart uploads."""
 
-    endpoint: str
+    endpoint: str | None
     bucket: str
-    access_key: str
-    secret_key: str
+    access_key: str | None = None
+    secret_key: str | None = None
     region: str = "us-east-1"
     part_size_mb: int = 50
     max_retries: int = 5
     max_concurrency: int = 4
+    session_token: str | None = None
 
     @property
     def part_size_bytes(self) -> int:
@@ -111,12 +113,30 @@ class S3MultipartUploader:
         self._progress_lock = Lock()
         self._parts_completed = 0
 
-        # Initialize boto3 session and client
-        self._session = boto3.session.Session(
-            aws_access_key_id=config.access_key,
-            aws_secret_access_key=config.secret_key,
-            region_name=config.region,
-        )
+        # AWS uses the renewable SDK chain. Non-AWS S3 stores require an
+        # explicit credential pair, so ambient AWS credentials cannot leak to
+        # an R2 or RunPod storage endpoint. Explicit temporary credentials are
+        # supported but their caller owns replacement; they do not auto-renew.
+        if bool(config.access_key) != bool(config.secret_key):
+            raise ValueError("Both access_key and secret_key are required together")
+        if config.session_token and not config.access_key:
+            raise ValueError("session_token requires an explicit credential pair")
+        host = urlsplit(config.endpoint).hostname if config.endpoint else None
+        if (
+            config.endpoint
+            and not config.access_key
+            and (not host or not (host == "s3.amazonaws.com" or host.endswith(".amazonaws.com")))
+        ):
+            raise ValueError("Non-AWS storage requires explicit credentials")
+        credentials: dict[str, str] = {}
+        if config.access_key and config.secret_key:
+            credentials = {
+                "aws_access_key_id": config.access_key,
+                "aws_secret_access_key": config.secret_key,
+            }
+            if config.session_token:
+                credentials["aws_session_token"] = config.session_token
+        self._session = boto3.session.Session(region_name=config.region, **credentials)
         self._botocore_config = Config(
             region_name=config.region,
             retries={"max_attempts": config.max_retries, "mode": "standard"},
@@ -611,5 +631,6 @@ def create_uploader_from_config(
         part_size_mb=config.part_size_mb,
         max_retries=config.max_retries,
         max_concurrency=config.max_concurrency,
+        session_token=getattr(config, "session_token", None),
     )
     return S3MultipartUploader(upload_config, progress_callback)
