@@ -38,7 +38,7 @@ Pop-Location
 locator matches both the Library and Add Source dialogs, so both of its checks
 fail before reaching their upload assertions.
 
-The four listed browser specs use fixtures or mocked API/WebSocket responses;
+The five listed browser specs use fixtures or mocked API/WebSocket responses;
 they do not submit a real separation job. Clear `SHIZZLE_E2E_BASE_URL` in this
 shell before running them so Playwright starts local Vite. Vite defaults its API
 proxy to `http://localhost:8001`; `SHIZZLE_API_PROXY` overrides it.

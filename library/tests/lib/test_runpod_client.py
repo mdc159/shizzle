@@ -135,7 +135,7 @@ async def test_health_failures_do_not_open_the_job_breaker() -> None:
 
     runpod = client(handler)
     for _ in range(6):
-        with pytest.raises((StageError, httpx.ConnectError)):
+        with pytest.raises(StageError):
             await runpod.health()
     # Polling still works: health failures tripped only the health breaker.
     assert (await runpod.poll("job-1"))["status"] == "IN_QUEUE"
