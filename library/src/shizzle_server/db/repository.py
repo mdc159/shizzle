@@ -206,6 +206,24 @@ class ImportConflict(Exception):
         self.deleted = deleted
 
 
+def recoverable_publication_failure(job: Job, events: list[JobEvent]) -> bool:
+    """Retain explicit recovery eligibility after a verification outage."""
+    failures = [event for event in events if event.event == "failed"]
+    if job.status != JobStage.failed or not failures:
+        return False
+    failure = failures[-1]
+    stage = (failure.detail or {}).get("stage")
+    if stage == "publishing" and job.error_code == ErrorCode.PUBLISH_FAILED.value:
+        return True
+    recoveries = [event for event in events if event.event == "publication_recovery_started"
+                  and event.id < failure.id]
+    if not recoveries or stage not in {"verifying", "publishing"}:
+        return False
+    provenance = recoveries[-1].detail or {}
+    return (provenance.get("provider_job_id") == job.runpod_job_id
+            and provenance.get("input_checksum") == job.input_checksum)
+
+
 class JobRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -710,6 +728,84 @@ class JobRepository:
                     },
                 )
             )
+            return job
+
+    async def recover_publication(
+        self,
+        job_id: uuid.UUID,
+        *,
+        expected_provider_id: str,
+        expected_checksum: str,
+        expected_idempotency_key: str,
+        expected_dispatch_key: str,
+        recovery_id: uuid.UUID,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> Job:
+        """Operator-only claim of a proven failed publication; never dispatch.
+
+        The recovery command first verifies provider completion and package
+        bytes. This transaction rechecks its exact input/dispatch identity and
+        failure history before granting a lease for verification/publication.
+        Normal advance() still treats failed jobs as terminal.
+        """
+        if not worker_id or not 0 < lease_seconds <= 3600:
+            raise ValueError("A bounded recovery lease and owner are required")
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            job = result.scalar_one_or_none()
+            now = utcnow()
+            if (
+                job is None or job.status != JobStage.failed
+                or not expected_provider_id or not expected_checksum
+                or not expected_idempotency_key
+                or job.runpod_job_id != expected_provider_id
+                or job.input_checksum != expected_checksum
+                or job.idempotency_key != expected_idempotency_key
+                or job.track_id is not None
+                or (job.lease_expires_at is not None and _aware(job.lease_expires_at) > now)
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            events = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            if not recoverable_publication_failure(job, events) or any(
+                event.event == "publication_recovery_started"
+                and (event.detail or {}).get("recovery_id") == str(recovery_id)
+                for event in events
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            failure = next(event for event in reversed(events) if event.event == "failed")
+            dispatch = await session.scalar(
+                select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event == "runpod_dispatched")
+                .order_by(JobEvent.id.desc()).limit(1)
+            )
+            if (
+                dispatch is None or not expected_dispatch_key
+                or (dispatch.detail or {}).get("idempotency_key") != expected_dispatch_key
+                or (dispatch.detail or {}).get("runpod_job_id") != expected_provider_id
+                or await session.get(Track, track_id_for_job(job.id)) is not None
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            # Preserve the reservation/provider ID and attempt counter. A
+            # crash after commit can only resume verification/publication.
+            job.status = JobStage.verifying
+            job.lease_owner = worker_id
+            job.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            job.next_retry_at = None
+            job.error_code = None
+            job.error_detail = None
+            job.updated_at = now
+            session.add(JobEvent(job_id=job.id, event="publication_recovery_started", detail={
+                "recovery_id": str(recovery_id), "worker": worker_id,
+                "provider_job_id": expected_provider_id,
+                "dispatch_key": expected_dispatch_key,
+                "input_checksum": expected_checksum,
+                "previous_failure_event_id": failure.id,
+                "from": "failed", "to": "verifying",
+            }))
             return job
 
     # --- publishing ----------------------------------------------------------

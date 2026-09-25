@@ -2173,6 +2173,7 @@ async def test_cloud_publish_cleans_job_dir_and_persists_verification(
                 s3_prefix=f"tracks/{tid}/1",
                 manifest_key=f"tracks/{tid}/1/manifest.json",
                 verification=Verification(),
+                already_published=False,
             )
 
     monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
@@ -2253,6 +2254,7 @@ async def test_cloud_publish_plumbs_job_artist_to_manifest_and_track(
                 s3_prefix=f"tracks/{tid}/1",
                 manifest_key=f"tracks/{tid}/1/manifest.json",
                 verification=Verification(),
+                already_published=False,
             )
 
     transform_calls = []
