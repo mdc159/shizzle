@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.config import Config
 
 Heartbeat = Callable[[str], None]
 
@@ -52,20 +53,15 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _env(name: str) -> str:
-    """Get required environment variable."""
-    v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing env var: {name}")
-    return v
-
-
 def create_s3_client() -> Any:
-    """Create and return boto3 S3 client."""
+    """Use the SDK chain, including refreshable process/role credentials.
+
+    Environment credentials remain supported, including AWS_SESSION_TOKEN.
+    Do not freeze credentials from a renewable provider into client arguments.
+    """
     return boto3.client(
         "s3",
-        aws_access_key_id=_env("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=_env("AWS_SECRET_ACCESS_KEY"),
+        config=Config(ignore_configured_endpoint_urls=True),
         region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
 

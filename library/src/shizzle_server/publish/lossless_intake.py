@@ -310,6 +310,9 @@ def derive_video(
         "-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{2 * maxrate_kbps}k",
         "-profile:v", "main", "-level:v", "3.1",
         "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
+        # The fps filter alone can leave the final packet with zero duration
+        # on FFmpeg 7, producing 27000/899 instead of 30 fps for a 30s clip.
+        "-r", "30", "-fps_mode", "cfr",
         "-movflags", "+faststart", "-video_track_timescale", "90000",
         str(out),
     ])
