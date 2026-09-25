@@ -182,6 +182,12 @@ and appends recovery provenance. The operator command first verifies provider
 completion, package bytes and source identity. A crash can only resume
 verification/publication, never dispatch. Ordinary terminal transitions stay
 forbidden.
+Reusing a recovery UUID is refused and every operator process gets a fresh
+lease-owner nonce. Later verification/publication failures retain that checked
+recovery provenance, permitting another explicit recovery after its cause is
+fixed without resetting the dispatch attempt counter. An already-published
+generation can activate only when its immutable manifest equals the rebuilt
+candidate; mismatches fail closed for reconciliation.
 - Recovery guards: `library/tests/test_publication_recovery.py`
 - Where: `library/src/shizzle_server/db/repository.py`
 - Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`

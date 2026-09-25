@@ -91,7 +91,7 @@ async def test_latest_failure_must_be_publication(job_repo, session_factory):
         await job_repo.recover_publication(job.id, **recovery_args(job))
 
 
-@pytest.mark.parametrize("provider_status", ["IN_QUEUE", "IN_PROGRESS", "FAILED", "UNKNOWN"])
+@pytest.mark.parametrize("provider_status", ["IN_QUEUE", "IN_PROGRESS", "FAILED", "UNKNOWN", "COMPLETED"])
 async def test_command_never_claims_uncertain_provider(monkeypatch, provider_status):
     from argparse import Namespace
     from types import SimpleNamespace
@@ -100,13 +100,16 @@ async def test_command_never_claims_uncertain_provider(monkeypatch, provider_sta
     from shizzle_server.orchestrator import recover_publication as command
 
     job = SimpleNamespace(
+        id=uuid.uuid4(),
         runpod_job_id="provider", input_checksum="a" * 64,
         status=JobStage.failed, error_code="PUBLISH_FAILED",
     )
     orchestrator = SimpleNamespace(
         settings=SimpleNamespace(cloud_pipeline=True),
         pipeline=None,
-        jobs=SimpleNamespace(get_job=AsyncMock(return_value=job), recover_publication=AsyncMock()),
+        jobs=SimpleNamespace(get_job=AsyncMock(return_value=job), recover_publication=AsyncMock(),
+                             list_events=AsyncMock(return_value=[SimpleNamespace(
+                                 id=1, event="failed", detail={"stage": "publishing"})])),
         runpod=SimpleNamespace(poll=AsyncMock(return_value={"status": provider_status})),
         engine=SimpleNamespace(dispose=AsyncMock()),
     )
@@ -169,3 +172,137 @@ async def test_provider_failures_never_silently_fall_back(status, allow):
     with pytest.raises(StageError):
         await command.completion_evidence(ctx, allow_receipt=allow)
     ctx.jobs.list_events.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure", "interrupted", "existing_same", "existing_different"])
+async def test_execute_uses_real_lease_loop_and_atomic_publication(
+    job_repo, session_factory, settings, monkeypatch, outcome,
+):
+    import asyncio
+    import hashlib
+    from argparse import Namespace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from shizzle_server.db.repository import track_id_for_job
+    from shizzle_server.orchestrator import cloud
+    from shizzle_server.orchestrator import recover_publication as command
+    from shizzle_server.orchestrator.loop import Orchestrator
+    from shizzle_server.publish.lossless_intake import IntakeError
+
+    job = await failed_publication(job_repo, session_factory)
+    source_bytes = b"verified test source"
+    checksum = hashlib.sha256(source_bytes).hexdigest()
+    track_id = track_id_for_job(job.id)
+    prefix = cloud.attempt_prefix(track_id, "actual-dispatch-key")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.input_checksum = checksum
+    await job_repo.append_event(job.id, "stage_completed", {
+        "from": "dispatched", "to": "verifying", "package_prefix": prefix,
+    })
+    directory = settings.data_dir / job.id.hex
+    (directory / "package").mkdir(parents=True)
+    (directory / "source.mp4").write_bytes(source_bytes)
+    package = SimpleNamespace(duration_seconds=1.0, handoff={
+        "source": {"sha256": checksum, "object_key": cloud.source_key(track_id)},
+        "separation": {"sample_count": 44100},
+    })
+    settings.shizzle_pipeline = "cloud"
+    settings.orchestrator_lease_seconds = 1.5
+    orchestrator = Orchestrator(settings, worker_id="temporary")
+    orchestrator.runpod = SimpleNamespace(
+        poll=AsyncMock(return_value={"status": "COMPLETED", "id": job.runpod_job_id}),
+        dispatch=AsyncMock(side_effect=AssertionError("Recovery must never dispatch")),
+        cancel=AsyncMock(side_effect=AssertionError("Recovery must never cancel")),
+    )
+    renew = AsyncMock(wraps=orchestrator.jobs.renew_lease)
+    monkeypatch.setattr(orchestrator.jobs, "renew_lease", renew)
+
+    def construct(*, worker_id):
+        orchestrator.worker_id = worker_id
+        return orchestrator
+
+    monkeypatch.setattr(command, "Orchestrator", construct)
+    monkeypatch.setattr(command, "load_and_verify_package", lambda _path: package)
+    monkeypatch.setattr(cloud, "load_and_verify_package", lambda _path: package)
+    selected = []
+
+    def download(_s3, _bucket, chosen_prefix, _destination):
+        selected.append(chosen_prefix)
+        assert chosen_prefix == prefix
+
+    monkeypatch.setattr(cloud, "download_package", download)
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+
+    def transform(*_args):
+        if outcome == "failure":
+            raise IntakeError("Synthetic publication failure")
+        return {"duration": 1.0, "title": "recovered"}
+
+    monkeypatch.setattr(cloud, "transform", transform)
+    monkeypatch.setattr(cloud, "stage", lambda *_args: "staged")
+
+    class Publisher:
+        def __init__(self, *_args):
+            pass
+
+        async def publish_async(self, *_args):
+            # Outlive the initial lease: ready can commit only if the actual
+            # orchestrator renewer keeps its ownership valid.
+            await asyncio.sleep(2.2)
+            if outcome == "interrupted":
+                raise asyncio.CancelledError
+            return SimpleNamespace(verification=None,
+                                   already_published=outcome.startswith("existing"),
+                                   s3_prefix=f"tracks/{track_id}/1",
+                                   manifest_key=f"tracks/{track_id}/1/manifest.json")
+
+    monkeypatch.setattr(cloud, "Publisher", Publisher)
+    monkeypatch.setattr(cloud, "_read_json_or_none", lambda *_args: {
+        "duration": 2.0 if outcome == "existing_different" else 1.0, "title": "recovered",
+    })
+    args = Namespace(job_id=str(job.id), provider_job_id=job.runpod_job_id,
+                     input_checksum=checksum, recovery_id=str(uuid.uuid4()),
+                     execute=True, use_completion_receipts=False)
+    if outcome == "interrupted":
+        with pytest.raises(asyncio.CancelledError):
+            await command.recover(args)
+    else:
+        report = await command.recover(args)
+        assert report["executed"] is True
+        succeeded = outcome in {"success", "existing_same"}
+        assert report["published"] is succeeded
+        assert report["status"] == ("ready" if succeeded else "failed")
+    current = await job_repo.get_job(job.id)
+    assert current.runpod_job_id == job.runpod_job_id
+    assert current.idempotency_key == job.idempotency_key
+    assert current.lease_owner is None
+    assert selected == [prefix]
+    orchestrator.runpod.dispatch.assert_not_called()
+    orchestrator.runpod.cancel.assert_not_called()
+    if outcome != "failure":
+        assert renew.await_count >= 1
+    if outcome == "interrupted":
+        assert current.status == JobStage.publishing
+        claimed = await job_repo.claim_next(worker_id="replacement", lease_seconds=120)
+        assert claimed.id == job.id
+        assert claimed.status == JobStage.publishing
+
+
+async def test_verification_failure_keeps_provenance_but_rejects_reused_id(job_repo, session_factory):
+    job = await failed_publication(job_repo, session_factory)
+    args = recovery_args(job)
+    await job_repo.recover_publication(job.id, **args)
+    await job_repo.fail_job(job.id, worker_id=args["worker_id"],
+                            error_code=ErrorCode.CHECKSUM_MISMATCH,
+                            error_detail="Transient verification failed with an exhausted attempt budget")
+    # The old ownership credential must never be revived, even after failure.
+    with pytest.raises(InvalidTransition):
+        await job_repo.recover_publication(job.id, **args)
+    replacement = {**args, "recovery_id": uuid.uuid4(), "worker_id": "new-recovery-owner"}
+    recovered = await job_repo.recover_publication(job.id, **replacement)
+    assert recovered.status == JobStage.verifying
+    assert recovered.attempt == job.attempt
+    assert recovered.runpod_job_id == job.runpod_job_id
+    assert not await job_repo.renew_lease(job.id, worker_id=args["worker_id"], lease_seconds=120)

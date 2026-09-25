@@ -319,6 +319,14 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
             stage, s3, bucket, track_id, GENERATION, candidate, manifest
         )
         result = await Publisher(s3, bucket).publish_async(track_id, GENERATION, staged)
+        if result.already_published:
+            existing = await asyncio.to_thread(
+                _read_json_or_none, s3, bucket, result.manifest_key
+            )
+            if existing != manifest:
+                raise IntakeError(
+                    "immutable published manifest differs from rebuilt candidate; reconcile before activation"
+                )
         integrity = dict(manifest.get("integrity") or {})
         if result.verification is not None:
             integrity["publisher"] = result.verification.to_integrity()

@@ -42,3 +42,12 @@ again, preserve the new failure evidence and address its cause before another
 explicit recovery. The original failure and recovery events remain in the
 append-only history. Rollback must preserve this database and must not replay
 dispatch. This change has no schema migration.
+
+Every execution uses a fresh lease-owner nonce, and reusing a recorded recovery
+UUID is refused. A transient verification failure with an exhausted ordinary
+attempt budget retains its recovery provenance: after fixing the cause, repeat
+the verified preflight with a new recovery UUID. It still cannot redispatch.
+If a previous attempt already published the immutable generation, its stored
+manifest must exactly equal the rebuilt candidate before activation. A mismatch
+fails closed for separate reconciliation; recovery never invents metadata for
+bytes that were not promoted.

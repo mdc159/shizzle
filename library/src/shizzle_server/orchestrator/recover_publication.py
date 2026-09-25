@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 
 from ..db.models import JobStage
-from ..db.repository import track_id_for_job
+from ..db.repository import recoverable_publication_failure, track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..publish.lossless_intake import load_and_verify_package
 from .cloud import accepted_dispatch_id, attempt_prefix, package_ready, source_key
@@ -54,14 +54,14 @@ async def completion_evidence(ctx: StageContext, *, allow_receipt: bool) -> str:
         ):
             raise ValueError("Provider history is missing and completion receipts do not reconcile") from None
         return "durable_receipts_after_provider_404"
-    if result.get("status") != "COMPLETED" or result.get("id", ctx.job.runpod_job_id) != ctx.job.runpod_job_id:
+    if result.get("status") != "COMPLETED" or result.get("id") != ctx.job.runpod_job_id:
         raise ValueError("Provider completion is not confirmed; do not resubmit")
     return "live_provider"
 
 
 async def recover(args: argparse.Namespace) -> dict:
     recovery_id = uuid.UUID(args.recovery_id)
-    worker_id = "publication-recovery-" + recovery_id.hex
+    worker_id = "publication-recovery-" + recovery_id.hex + "-" + uuid.uuid4().hex
     orchestrator = Orchestrator(worker_id=worker_id)
     try:
         job = await orchestrator.jobs.get_job(uuid.UUID(args.job_id))
@@ -70,9 +70,11 @@ async def recover(args: argparse.Namespace) -> dict:
             or job.runpod_job_id != args.provider_job_id
             or job.input_checksum != args.input_checksum
             or job.status != JobStage.failed
-            or job.error_code != ErrorCode.PUBLISH_FAILED.value
         ):
             raise ValueError("Recovery requires the exact failed publication identity")
+        events = await orchestrator.jobs.list_events(job.id)
+        if not recoverable_publication_failure(job, events):
+            raise ValueError("No recoverable publication failure provenance")
         ctx = StageContext(
             job=job, settings=orchestrator.settings, pipeline=orchestrator.pipeline,
             jobs=orchestrator.jobs, runpod=orchestrator.runpod, worker_id=worker_id,
