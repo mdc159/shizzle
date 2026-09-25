@@ -23,3 +23,13 @@ def test_worker_leaves_provider_resolution_to_sdk():
     with patch.object(s3_ops.boto3, "client") as factory:
         s3_ops.create_s3_client()
     assert not any(key.startswith("aws_") for key in factory.call_args.kwargs)
+
+
+def test_worker_ignores_foreign_endpoint_override(monkeypatch):
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://r2.example.test")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "synthetic")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "synthetic")
+    session = boto3.Session()
+    with patch.object(s3_ops.boto3, "client", side_effect=session.client):
+        client = s3_ops.create_s3_client()
+    assert client.meta.endpoint_url.endswith(".amazonaws.com")

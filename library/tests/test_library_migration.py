@@ -169,7 +169,7 @@ def test_video_encode_command_makes_nonstandard_source_dimensions_even(tmp_path:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height,avg_frame_rate",
             "-of",
             "json",
             str(destination),
@@ -184,3 +184,4 @@ def test_video_encode_command_makes_nonstandard_source_dimensions_even(tmp_path:
     assert 0 < stream["height"] <= 720
     assert stream["width"] % 2 == 0
     assert stream["height"] % 2 == 0
+    assert stream["avg_frame_rate"] == "30/1"

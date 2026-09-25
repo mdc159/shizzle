@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.config import Config
 
 Heartbeat = Callable[[str], None]
 
@@ -60,6 +61,7 @@ def create_s3_client() -> Any:
     """
     return boto3.client(
         "s3",
+        config=Config(ignore_configured_endpoint_urls=True),
         region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
 

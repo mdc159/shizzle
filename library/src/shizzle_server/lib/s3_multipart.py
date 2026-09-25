@@ -121,7 +121,13 @@ class S3MultipartUploader:
             raise ValueError("Both access_key and secret_key are required together")
         if config.session_token and not config.access_key:
             raise ValueError("session_token requires an explicit credential pair")
-        host = urlsplit(config.endpoint).hostname if config.endpoint else None
+        endpoint = urlsplit(config.endpoint) if config.endpoint else None
+        host = endpoint.hostname if endpoint else None
+        if endpoint and not config.access_key and (
+            endpoint.scheme != "https" or endpoint.username or endpoint.password
+            or endpoint.query or endpoint.fragment
+        ):
+            raise ValueError("AWS provider credentials require an HTTPS endpoint without URL credentials")
         if (
             config.endpoint
             and not config.access_key
@@ -138,6 +144,7 @@ class S3MultipartUploader:
                 credentials["aws_session_token"] = config.session_token
         self._session = boto3.session.Session(region_name=config.region, **credentials)
         self._botocore_config = Config(
+            ignore_configured_endpoint_urls=True,
             region_name=config.region,
             retries={"max_attempts": config.max_retries, "mode": "standard"},
         )
