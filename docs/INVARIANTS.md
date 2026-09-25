@@ -171,6 +171,18 @@ non-worker callers append unfenced. `owns_lease` exposes the owner-plus-
 expiry predicate for callers that gate remote effects (e.g. cancelling the
 RunPod job) rather than writes. `confirm_dispatch` stays
 lease-independent by design (B4).
+
+Operator publication recovery is a separate, explicit claim, never a normal
+`advance` from a terminal state. `recover_publication` locks the exact failed
+job with `FOR UPDATE SKIP LOCKED`, requires its latest failure to be at
+publication with `PUBLISH_FAILED`, checks the expected provider/input/reservation
+identity, refuses a live lease or published track, and grants a bounded lease
+at `verifying`. It preserves the provider ID, reservation and attempt counter
+and appends recovery provenance. The operator command first verifies provider
+completion, package bytes and source identity. A crash can only resume
+verification/publication, never dispatch. Ordinary terminal transitions stay
+forbidden.
+- Recovery guards: `library/tests/test_publication_recovery.py`
 - Where: `library/src/shizzle_server/db/repository.py`
 - Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
