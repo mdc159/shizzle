@@ -72,13 +72,15 @@ const RECOVERY_COOLDOWN_MS = 1000;
 // and behind the master by however long it took. Re-judging sync before that
 // seek had landed re-seeked all six stems about ten times a second for whole
 // sessions (production playback telemetry, 2026-10-01). Sync is therefore not
-// judged until a correction has landed and settled, corrections back off
-// while sync does not hold, and each aims ahead of the master by what the
-// previous one was measured to lose while landing.
+// judged while any stem seek is landing, nor until a while-playing correction
+// has settled; corrections back off while sync does not hold, and each aims
+// ahead of the master by what the previous one was measured to lose while
+// landing. Seeks issued by recover() get the landing wait only.
 const RESYNC_SETTLE_MS = 400;
 const RESYNC_BACKOFF_MAX_MS = 5000;
-/** A correction that stayed in sync this long has held; the next is a new event. */
-const RESYNC_HOLD_MS = 10_000;
+/** Sync observed for this long after a correction means it held; losing sync
+ *  after that is a new event, corrected at once. */
+const RESYNC_HOLD_MS = 2000;
 /** A stem that still reports `seeking` after this long is judged as it stands. */
 const SEEK_LANDING_TIMEOUT_MS = 1500;
 const MAX_SEEK_LEAD_SEC = 0.5;
@@ -151,6 +153,8 @@ class MediaElementEngine implements PlaybackEngine {
   private lastResyncAt = 0;
   /** Corrections issued since sync last held for RESYNC_HOLD_MS. */
   private resyncStreak = 0;
+  /** performance.now() when sync was first observed since the last correction. */
+  private syncHeldSince: number | null = null;
   /** The last correction, until its landing has been measured. */
   private resyncInFlight: { leadSec: number; landedAt: number | null } | null = null;
   private incidentSequence = 0;
@@ -574,19 +578,23 @@ class MediaElementEngine implements PlaybackEngine {
   }
 
   /**
-   * True while any stem's hard seek is still landing. Until `seeked`, a media
-   * element reports the seek target as currentTime, so its offset from the
-   * master says nothing about what is audible.
+   * True while this stem's seek is still landing. Until `seeked`, a media
+   * element reports the seek target as currentTime, so its clock neither
+   * advances nor says anything about what is audible.
    */
+  private seekLanding(c: StemChannel, now: number): boolean {
+    if (!c.el.seeking) {
+      c.seekingSinceMs = null;
+      return false;
+    }
+    c.seekingSinceMs ??= now;
+    return now - c.seekingSinceMs < SEEK_LANDING_TIMEOUT_MS;
+  }
+
   private stemSeekLanding(now: number): boolean {
     let landing = false;
     for (const c of this.channels.values()) {
-      if (!c.el.seeking) {
-        c.seekingSinceMs = null;
-        continue;
-      }
-      c.seekingSinceMs ??= now;
-      if (now - c.seekingSinceMs < SEEK_LANDING_TIMEOUT_MS) landing = true;
+      if (this.seekLanding(c, now)) landing = true;
     }
     return landing;
   }
@@ -622,15 +630,16 @@ class MediaElementEngine implements PlaybackEngine {
    * budget does not allow another correction yet.
    */
   private resyncPlayingStems(video: HTMLVideoElement, now: number): boolean {
-    const sinceLast = now - this.lastResyncAt;
-    if (this.lastResyncAt === 0 || sinceLast >= RESYNC_HOLD_MS) {
+    const held = this.syncHeldSince !== null && now - this.syncHeldSince >= RESYNC_HOLD_MS;
+    this.syncHeldSince = null;
+    if (this.lastResyncAt === 0 || held) {
       this.resyncStreak = 0;
     } else {
       // Sync has not held since the last correction: each further one waits
       // twice as long, so a browser this cannot converge on hears a seek
       // every few seconds, not ten a second.
       const spacingMs = Math.min(RESYNC_SETTLE_MS * 2 ** (this.resyncStreak - 1), RESYNC_BACKOFF_MAX_MS);
-      if (sinceLast < spacingMs) return false;
+      if (now - this.lastResyncAt < spacingMs) return false;
     }
     const target = video.currentTime + this.seekLeadSec;
     for (const c of this.channels.values()) {
@@ -644,10 +653,18 @@ class MediaElementEngine implements PlaybackEngine {
     return true;
   }
 
+  /**
+   * Start a fresh budget. The learned lead is kept: it describes how this
+   * browser lands seeks on these elements, which a pause, a user seek or a
+   * recovery does not change. A new track resets it with its elements.
+   */
   private resetResyncBudget(): void {
     this.lastResyncAt = 0;
     this.resyncStreak = 0;
+    this.syncHeldSince = null;
     this.resyncInFlight = null;
+    // The watchdog may not have been running to see the last seek finish.
+    for (const c of this.channels.values()) c.seekingSinceMs = null;
   }
 
   private setRateAll(rate: number): void {
@@ -819,7 +836,10 @@ class MediaElementEngine implements PlaybackEngine {
       const prior = this.lastStemTimes.get(c.id) ?? c.el.currentTime;
       const advanced = c.el.currentTime > prior + CLOCK_PROGRESS_EPSILON_SEC;
       if (!advanced) allStemsAdvanced = false;
-      const stalledFor = advanced ? 0 : (this.stemNoProgressMs.get(c.id) ?? 0) + elapsed;
+      // A landing seek holds currentTime at its target. That is not a stalled
+      // decoder, and recovering from it would seek on top of the seek.
+      const landing = this.seekLanding(c, now);
+      const stalledFor = advanced || landing ? 0 : (this.stemNoProgressMs.get(c.id) ?? 0) + elapsed;
       this.lastStemTimes.set(c.id, c.el.currentTime);
       this.stemNoProgressMs.set(c.id, stalledFor);
       if (c.el.error) {
@@ -863,6 +883,7 @@ class MediaElementEngine implements PlaybackEngine {
         }
         return;
       }
+      this.syncHeldSince ??= now;
     }
     // Healthy is an observation, not an optimistic default: the master and
     // every decoder must all be advancing in this sample.
@@ -1155,6 +1176,7 @@ class MediaElementEngine implements PlaybackEngine {
     }
     this.lastRecoveryAt = 0;
     this.resetResyncBudget();
+    this.seekLeadSec = 0;
     this.incidentSequence = 0;
     this.incidents = [];
   }

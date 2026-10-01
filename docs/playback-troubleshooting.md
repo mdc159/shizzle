@@ -115,9 +115,11 @@ buffered and no stem reports `waiting`.
    stem lands later than one 100 ms watchdog tick and behind the video by
    however long it took. Before the resync budget existed, that produced about
    ten hard seeks per second per stem there and none on desktop Chromium.
-3. The engine does not judge sync until a correction has landed and settled,
-   spaces further corrections out while sync does not hold, and aims each one
-   ahead of the video by the lag the previous one was measured to lose.
+3. The engine does not judge sync while any stem seek is landing, nor until one
+   of its while-playing corrections has settled. It spaces further corrections
+   out while sync does not hold, and aims each one ahead of the video by the
+   lag the previous one was measured to lose. A landing seek is not counted as
+   a stalled stem.
    `player/e2e/resync-budget.spec.ts` reproduces late-landing seeks in Chromium
    and holds the engine to a hard-seek budget.
 4. Keep the existing 3-second recovery and 50 ms settled-offset limits.
