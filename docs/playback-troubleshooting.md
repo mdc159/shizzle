@@ -43,6 +43,7 @@ enough to locate a playback problem.
 | One or more stems stop | Stem clock/ready state/buffer/error and aborted Range incidents | Stem delivery and recovery |
 | Video advances but output is silent | Per-stem PCM, master PCM, `AudioContext`, mute/solo/gain state | Silent graph versus real source silence |
 | Audio sounds doubled or smeared | Inter-stem skew, stem/video offset, duplicate elements/nodes | Synchronization and transition leak |
+| Audio cuts in and out continuously, worst on iPad | Per-stem `hardSeeks` climbing in every heartbeat while `waitingEvents` stays 0 | Hard-seek loop |
 | Seek hangs or resumes out of sync | Seek target, buffered ranges, recovery time, final settled offsets | Random-seek reproduction |
 | Next song contains previous audio or mixer settings | Active media elements, node/timer counts, Blob revocation, mixer state | Sequential transition test |
 | Clipping, pumping, or gain jump | Decoded true peak, limiter reduction, common gain, fader state | Audio-quality check |
@@ -100,6 +101,26 @@ Use when the picture advances but no audio is heard.
 This distinction came from the silent intro in Mother Love Bone — Stardog
 Champion. Evidence:
 `evidence/cloud-continuous-playback/evidence/browser/stardog-input-pcm-replay-natural.json`.
+
+## Hard-seek loop
+
+Use when audio cuts in and out for a whole session although every stem is
+buffered and no stem reports `waiting`.
+
+1. Read the session's `playback_events`: each event carries per-stem
+   `hardSeeks` and `skewMs`. A count that grows by more than a few per minute
+   on every stem at once is the engine re-seeking the ensemble, not the
+   network.
+2. Compare by browser. Every iPad browser is WebKit, where a seek on a playing
+   stem lands later than one 100 ms watchdog tick and behind the video by
+   however long it took. Before the resync budget existed, that produced about
+   ten hard seeks per second per stem there and none on desktop Chromium.
+3. The engine does not judge sync until a correction has landed and settled,
+   spaces further corrections out while sync does not hold, and aims each one
+   ahead of the video by the lag the previous one was measured to lose.
+   `player/e2e/resync-budget.spec.ts` reproduces late-landing seeks in Chromium
+   and holds the engine to a hard-seek budget.
+4. Keep the existing 3-second recovery and 50 ms settled-offset limits.
 
 ## Random-seek reproduction
 
