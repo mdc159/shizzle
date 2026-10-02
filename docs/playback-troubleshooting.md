@@ -43,7 +43,7 @@ enough to locate a playback problem.
 | One or more stems stop | Stem clock/ready state/buffer/error and aborted Range incidents | Stem delivery and recovery |
 | Video advances but output is silent | Per-stem PCM, master PCM, `AudioContext`, mute/solo/gain state | Silent graph versus real source silence |
 | Audio sounds doubled or smeared | Inter-stem skew, stem/video offset, duplicate elements/nodes | Synchronization and transition leak |
-| Audio cuts in and out continuously, worst on iPad | Per-stem `hardSeeks` climbing in every heartbeat while `waitingEvents` stays 0 | Hard-seek loop |
+| Audio cuts in and out continuously, worst on iPad | Per-stem `hardSeeks` climbing in every heartbeat while `waitingEvents` stays 0 | Synchronization and the audio-master alignment |
 | Seek hangs or resumes out of sync | Seek target, buffered ranges, recovery time, final settled offsets | Random-seek reproduction |
 | Next song contains previous audio or mixer settings | Active media elements, node/timer counts, Blob revocation, mixer state | Sequential transition test |
 | Clipping, pumping, or gain jump | Decoded true peak, limiter reduction, common gain, fader state | Audio-quality check |
@@ -102,33 +102,68 @@ This distinction came from the silent intro in Mother Love Bone — Stardog
 Champion. Evidence:
 `evidence/cloud-continuous-playback/evidence/browser/stardog-input-pcm-replay-natural.json`.
 
-## Hard-seek loop
+## Synchronization and the audio-master alignment
 
 Use when audio cuts in and out for a whole session although every stem is
-buffered and no stem reports `waiting`.
+buffered and no stem reports `waiting`, or when audio and picture do not
+line up.
 
-1. Read the session's `playback_events`: each event carries per-stem
-   `hardSeeks` and `skewMs`. A count that grows by more than a few per minute
-   on every stem at once is the engine re-seeking the ensemble, not the
-   network.
-2. Compare by browser. Every iPad browser is WebKit, where a seek on a playing
-   stem lands later than one 100 ms watchdog tick and behind the video by
-   however long it took. Before the resync budget existed, that produced about
-   ten hard seeks per second per stem there and none on desktop Chromium.
-3. The engine does not judge sync or issue a correction while any stem is
-   mid-seek, nor until one of its while-playing corrections has settled. It
-   spaces further corrections out while sync does not hold, and aims each one
-   ahead of the video by the lag the previous one was measured to lose, up to
-   1.7 s, except within the last seconds of a stem. A mid-seek stem is not
-   counted as stalled for 1.5 s; on the first watchdog tick after that,
-   recovery pauses the ensemble and re-seeks it. If the paused re-seek cannot
-   become ready within its own 1.5 s, the recovery fails and playback stops.
-   `player/e2e/resync-budget.spec.ts` reproduces late-landing seeks in Chromium
-   and holds the engine to a hard-seek budget.
-4. Keep the existing 3-second recovery and 50 ms settled-offset limits. A
-   browser whose seeks take about a second or more to land cannot meet the
-   3-second limit after a loss of sync: it needs one correction to measure the
-   landing and a second to make up for it.
+The engine's sync loop never seeks or rate-changes a playing stem (the
+stall recovery paths inherited from before may still seek stems). On WebKit — every
+iPad browser — either operation freezes the stem's clock for about a third
+of a second, while a stem left alone holds a constant offset to the
+millisecond (iPad probe, 2026-10-02: a seek on a playing stem lands ~350 ms
+behind; six stems seeked together land 600–800 ms behind and up to 200 ms
+apart; a `playbackRate` change freezes the stem 300–400 ms; correcting a
+playing stem was itself the dropout — ten corrections a second produced the
+continuous cutouts heard in production on 2026-10-01).
+
+Instead, each stem's Web Audio `DelayNode` holds it back to the
+latest-running stem, so all stems sound together without touching their
+elements, and the silent, blob-backed video — whose seeks land quickly even
+on WebKit — is seeked to the stems' audible position (`currentTime -
+delayMs/1000`), aimed ahead by the lead its previous seek was measured to
+lose, inside a settle/backoff/hold budget. Stem seeks remain only in the
+user-seek and recovery paths, which seek the paused ensemble.
+
+Start behaviour: a browser whose stems start together is left untouched —
+no delay, no gate, audio from the first sample. A device whose starts
+proved staggered remembers the delays it needed (`localStorage`) and
+applies them before playback begins; when playback restarts at least
+2.5 s in (resume, scrub) it rolls in from 2 s earlier with the output
+silent and fades in over 250 ms finishing at the requested position, and
+at the top of a song nothing is silenced. Restarts re-base every stem to
+the same raw position with the remembered delays, so delays never
+accumulate across restarts.
+
+1. Read the session's `playback_events`: heartbeats, incidents and pause
+   events carry per-stem
+   `hardSeeks`, `skewMs` (audible offset), and `delayMs`, plus top-level
+   `videoSeeks`. In a healthy session `hardSeeks` stays flat after any user
+   seeks, `skewMs` settles within 50 ms, and the alignment shows itself only
+   as `delayMs` settling once after a start or seek and `videoSeeks` ticking
+   up when a correction was needed.
+2. A count that grows by more than a few per minute on every stem at once
+   while `waitingEvents` stays 0 is the recovery path re-seeking the
+   ensemble, not the network: read the `recovery-started` incidents for the
+   reason (a stalled stem clock, a paused video, a seek that never landed)
+   and investigate that subsystem.
+3. `videoSeeks` growing steadily with `skewMs` never settling means the
+   video's seeks are landing late or behind: the learned lead and the
+   doubling backoff space the corrections (400, 800, 1600, 3200 ms…), so a
+   browser in that state corrects every few seconds, not ten a second. Check
+   the video's `bufferedAheadSec`/`readyState` in the same events for a
+   staging or decode problem.
+4. Inter-stem smear that persists (audible `skewMs` spread beyond ~40 ms
+   with `delayMs` pinned at 1000) means the stems' start stagger exceeded the
+   1 s delay cap; that needs the recovery path (pause/seek/resume) rather
+   than the alignment.
+5. Keep the existing 3-second recovery and 50 ms settled-offset limits.
+   `player/e2e/audio-master-sync.spec.ts` emulates the measured WebKit
+   timings in Chromium and holds the engine to zero seeks of a playing stem
+   and zero `playbackRate` changes during steady playback, start, and
+   pause/resume (a restart re-bases paused stems, which is a seek of a paused
+   element).
 
 ## Random-seek reproduction
 
