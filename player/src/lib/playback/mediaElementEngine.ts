@@ -83,10 +83,13 @@ const RESYNC_BACKOFF_MAX_MS = 5000;
  *  after that is a new event, corrected at once. */
 const RESYNC_HOLD_MS = 2000;
 /** How long a mid-seek stem is excused from stall detection. Past this it is
- *  a stalled stem, and recover() re-seeks the paused ensemble. */
+ *  stalled at once, and recover() re-seeks the paused ensemble. */
 const SEEK_LANDING_TIMEOUT_MS = 1500;
 /** A lead can make up for any landing the stall detector will wait out. */
 const MAX_SEEK_LEAD_SEC = SEEK_LANDING_TIMEOUT_MS / 1000;
+/** No lead this close to the end of a stem: a seek that lands sooner than the
+ *  lead assumed would run the stem out before the video. */
+const RESYNC_TAIL_GUARD_SEC = 1;
 const INCIDENT_LIMIT = 100;
 
 interface StemChannel {
@@ -648,13 +651,18 @@ class MediaElementEngine implements PlaybackEngine {
       const spacingMs = Math.min(RESYNC_SETTLE_MS * 2 ** (this.resyncStreak - 1), RESYNC_BACKOFF_MAX_MS);
       if (now - this.lastResyncAt < spacingMs) return false;
     }
-    const target = video.currentTime + this.seekLeadSec;
+    const stemEnd = Math.min(
+      ...Array.from(this.channels.values()).map((c) => (Number.isFinite(c.el.duration) ? c.el.duration : Infinity)),
+    );
+    const leadSec =
+      video.currentTime + this.seekLeadSec + RESYNC_TAIL_GUARD_SEC < stemEnd ? this.seekLeadSec : 0;
+    const target = video.currentTime + leadSec;
     for (const c of this.channels.values()) {
       console.debug(`Syncing ${c.id}: offset was ${(c.el.currentTime - video.currentTime).toFixed(3)}s`);
-      c.el.currentTime = Number.isFinite(c.el.duration) ? Math.min(target, c.el.duration) : target;
+      c.el.currentTime = target;
       c.hardSeeks += 1;
     }
-    this.resyncInFlight = { leadSec: this.seekLeadSec, landedAt: null };
+    this.resyncInFlight = { leadSec, landedAt: null };
     this.lastResyncAt = now;
     this.resyncStreak += 1;
     return true;
@@ -846,6 +854,10 @@ class MediaElementEngine implements PlaybackEngine {
       // A landing seek holds currentTime at its target. That is not a stalled
       // decoder, and recovering from it would seek on top of the seek.
       const landing = this.seekLanding(c, now);
+      // Past its landing window a mid-seek stem is stalled without further
+      // waiting: the lead cannot make up for a landing that long, so the
+      // paused re-seek in recover() is the only correction left.
+      const overdue = c.el.seeking && !landing;
       const stalledFor = advanced || landing ? 0 : (this.stemNoProgressMs.get(c.id) ?? 0) + elapsed;
       this.lastStemTimes.set(c.id, c.el.currentTime);
       this.stemNoProgressMs.set(c.id, stalledFor);
@@ -853,7 +865,7 @@ class MediaElementEngine implements PlaybackEngine {
         this.healthStatus = 'failed';
         return;
       }
-      if ((c.el.paused || stalledFor >= CLOCK_STALL_MS) && videoAdvanced) {
+      if ((c.el.paused || overdue || stalledFor >= CLOCK_STALL_MS) && videoAdvanced) {
         if (this.healthStatus !== 'recovering') {
           this.recordIncident(
             'stem-clock-stalled',

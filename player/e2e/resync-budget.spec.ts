@@ -31,10 +31,11 @@ import { expect, test, type Page } from '@playwright/test';
 // Runs fully offline against the local dev server (same harness style as
 // manifest-trim.spec.ts and space-shortcut.spec.ts).
 
-type StemState = { skewMs: number | null; hardSeeks: number };
+type StemState = { skewMs: number | null; hardSeeks: number; paused: boolean };
 type PlaybackMetrics = {
   stems: Record<string, StemState>;
   health: { status: string; recoveryAttempts: number };
+  incidents: Array<{ code: string }>;
 };
 
 type SeekProbeOptions = {
@@ -42,12 +43,18 @@ type SeekProbeOptions = {
   /** When set, every late seek lands this far behind the video wherever it
    *  was aimed, so no lead can make a correction hold. */
   landBehindVideoSec: number | null;
+  /** Seeks on a paused stem land late too (default: only on a playing one). */
+  latePausedSeeks?: boolean;
+  /** Stem length when it should be shorter than the 30 s video. */
+  stemSeconds?: number;
 };
 
 declare global {
   interface Window {
     __shizzlePlaybackHealth: { getMetrics(): PlaybackMetrics };
     __e2eSeekProbe: {
+      /** How late a seek lands; a spec may change it while the track plays. */
+      latencyMs: number;
       /** Seeks issued on a playing stem whose previous seek had not landed yet. */
       stackedSeeks: number;
       /** performance.now() of each late seek issued on the first stem. */
@@ -114,8 +121,8 @@ function maxOffsetMs(m: PlaybackMetrics): number {
 
 /** Boots the app with late-landing stem seeks and starts the probe track. */
 async function playWithLateSeeks(page: Page, options: SeekProbeOptions): Promise<void> {
-  const wav = wavBytes(TRACK_DURATION_SECONDS);
-  await page.addInitScript(({ latencyMs, landBehindVideoSec }) => {
+  const wav = wavBytes(options.stemSeconds ?? TRACK_DURATION_SECONDS);
+  await page.addInitScript(({ latencyMs, landBehindVideoSec, latePausedSeeks }) => {
     localStorage.setItem('shizzle_token', 'e2e-token');
 
     const proto = HTMLMediaElement.prototype;
@@ -125,6 +132,7 @@ async function playWithLateSeeks(page: Page, options: SeekProbeOptions): Promise
     const pending = new Map<HTMLMediaElement, { target: number; timer: number }>();
     const stems: HTMLAudioElement[] = [];
     const probe = {
+      latencyMs,
       stackedSeeks: 0,
       correctionTimes: [] as number[],
       knockStemsBehind(seconds: number): number {
@@ -153,14 +161,16 @@ async function playWithLateSeeks(page: Page, options: SeekProbeOptions): Promise
           window.clearTimeout(prior.timer);
           pending.delete(this);
         }
-        // Only seeks on a playing stem land late; the video master and seeks
-        // on a paused stem keep the browser's own behavior.
-        if (!(this instanceof HTMLAudioElement) || this.paused) {
+        // Only stem seeks land late, and unless the case says otherwise only
+        // on a playing stem; the video master keeps the browser's behavior.
+        if (!(this instanceof HTMLAudioElement) || (this.paused && !latePausedSeeks)) {
           currentTime.set!.call(this, value);
           return;
         }
-        if (prior || (seeking.get!.call(this) as boolean)) probe.stackedSeeks += 1;
-        if (this === stems[0]) probe.correctionTimes.push(performance.now());
+        if (!this.paused) {
+          if (prior || (seeking.get!.call(this) as boolean)) probe.stackedSeeks += 1;
+          if (this === stems[0]) probe.correctionTimes.push(performance.now());
+        }
         const timer = window.setTimeout(() => {
           pending.delete(this);
           const video = document.querySelector('video');
@@ -169,7 +179,7 @@ async function playWithLateSeeks(page: Page, options: SeekProbeOptions): Promise
               ? Math.max(0, video.currentTime - landBehindVideoSec)
               : value;
           currentTime.set!.call(this, landAt);
-        }, latencyMs);
+        }, probe.latencyMs);
         pending.set(this, { target: value, timer });
       },
     });
@@ -348,10 +358,12 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     page,
   }) => {
     test.setTimeout(120_000);
-    // Longer than the 1500 ms landing window plus the 1000 ms stall threshold:
-    // no while-playing correction may be issued on top of it, and the stall
-    // recovery must not restart it while playing either.
-    await playWithLateSeeks(page, { latencyMs: 3500, landBehindVideoSec: null });
+    // Just longer than the 1500 ms landing window, which is also the largest
+    // lead: no while-playing correction can make up for it or may be issued
+    // on top of it, and the stall recovery must not restart it while playing.
+    // In this case a seek on a paused stem lands at once, so the paused
+    // re-seek succeeds.
+    await playWithLateSeeks(page, { latencyMs: 1800, landBehindVideoSec: null });
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
     await expect
@@ -372,6 +384,70 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(after.health.recoveryAttempts).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
     expect(maxHardSeeks(after)).toBeLessThanOrEqual(4);
+  });
+
+  test('a stem that cannot finish the paused re-seek stops playback instead of looping', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    // Paused seeks land late too, later than recover() waits for readiness.
+    await playWithLateSeeks(page, { latencyMs: 3500, landBehindVideoSec: null, latePausedSeeks: true });
+    expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
+
+    // The failed recovery hands control back to the user, as a stalled video does.
+    await expect(page.getByRole('button', { name: 'Play' })).toBeVisible({ timeout: 12_000 });
+    await page.waitForTimeout(3000);
+    const after = await metrics(page);
+
+    expect(after.incidents.map((incident) => incident.code)).toContain('recovery-failed');
+    expect(after.health.recoveryAttempts).toBe(1);
+    expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
+    expect(maxHardSeeks(after)).toBeLessThanOrEqual(3);
+    await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
+  });
+
+  test('a lead learned from slow seeks does not run the stems out near the end of the track', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const stemSeconds = 16;
+    await playWithLateSeeks(page, { latencyMs: 1400, landBehindVideoSec: null, stemSeconds });
+    expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
+
+    // Learn a lead of about 1.4 s, then let sync hold so the next loss of
+    // sync is corrected at once.
+    await expect
+      .poll(
+        async () => {
+          const m = await metrics(page);
+          return maxHardSeeks(m) >= 2 && maxOffsetMs(m) <= SETTLED_OFFSET_MS && m.health.status === 'healthy';
+        },
+        { timeout: 10_000, intervals: [200] },
+      )
+      .toBe(true);
+    // From here seeks land at once, so a lead of 1.4 s is 1.4 s too much.
+    await page.evaluate(() => {
+      window.__e2eSeekProbe.latencyMs = 0;
+    });
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 20_000, intervals: [100] })
+      .toBeGreaterThanOrEqual(stemSeconds - 1.7);
+    const before = await metrics(page);
+    expect(before.health.status).toBe('healthy');
+    expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
+
+    // Aimed 1.4 s ahead, the correction would put the stems within 0.3 s of
+    // their end and they would run out a second before the video gets there.
+    for (let sample = 0; sample < 8; sample += 1) {
+      await page.waitForTimeout(100);
+      const m = await metrics(page);
+      const video = await videoState(page);
+      if (video.time >= stemSeconds - 0.3) break;
+      expect(Object.values(m.stems).filter((stem) => stem.paused), `video at ${video.time}`).toHaveLength(0);
+    }
+    const after = await metrics(page);
+    expect(maxHardSeeks(after)).toBeGreaterThan(maxHardSeeks(before));
+    expect(after.health.recoveryAttempts).toBe(0);
   });
 
   test('corrections that never hold are spaced out by a doubling backoff', async ({ page }) => {
