@@ -1,8 +1,8 @@
 /**
- * Media-element PlaybackEngine — desktop reference implementation.
+ * Media-element PlaybackEngine with audio-master alignment.
  *
  * One HTMLAudioElement per stem, each routed:
- *   source -> stem GainNode -> master GainNode -> limiter -> destination
+ *   source -> DelayNode -> stem GainNode -> master GainNode -> limiter -> destination
  *
  * - Stem gains are dB end-to-end and split into two terms per channel: the
  *   manifest `default_gain_db` trim (captured at load, issue #25) and the
@@ -13,8 +13,18 @@
  *   decoded AAC stems overshoot ~+1 dBFS at unity (spike 0.4); the
  *   DynamicsCompressorNode is configured as a conservative transparent
  *   limiter that catches only summing overshoot.
- * - Drift/stall handling is the tiered policy from spike 0.1 (driftPolicy.ts),
- *   evaluated on a 1 s cadence against the attached video's clock.
+ * - Synchronization is audio-master alignment. The stems are the audible
+ *   clock and are never seeked or rate-changed while playing: on WebKit
+ *   (every iPad browser) a seek or a playbackRate change on a playing stem
+ *   freezes its clock for about a third of a second, while a stem left alone
+ *   holds a constant offset to the millisecond (iPad probe, 2026-10-02:
+ *   correcting a playing stem was itself the dropout; ten corrections a
+ *   second produced continuous cutouts). Instead each stem's DelayNode
+ *   holds back how far its clock runs ahead of the latest-running stem, so
+ *   all stems sound together without touching them, and the audio-less
+ *   video — whose seeks land quickly even on WebKit — is moved to the
+ *   stems' audible position. A stem's audible position is
+ *   `el.currentTime - delaySec`; every sync comparison uses it.
  */
 
 import type { Stem, StemId, StemsManifest } from '@/types/karaoke';
@@ -33,7 +43,6 @@ import {
   STALL_TICKS_THRESHOLD,
   SYNC_INTERVAL_MS,
   VIDEO_ADVANCE_EPSILON_SEC,
-  evaluateDrift,
 } from './driftPolicy';
 
 /** Fixed headroom under the user master gain (AAC overshoot, spike 0.4). */
@@ -60,23 +69,17 @@ const CLOCK_PROGRESS_EPSILON_SEC = 0.03;
 const CLOCK_STALL_MS = 1000;
 const RECOVERY_STEM_READY_TIMEOUT_MS = 1500;
 const MASTER_SEEK_HEAD_START_MS = 200;
-/** Audible stem-to-stem separation is never hidden by a good average. */
-const MAX_INTER_STEM_SKEW_SEC = 0.04;
 const RENDER_SILENCE_DBFS = -90;
 // A short digital-silence passage is valid music. Five seconds is long enough
 // to catch a dead Web Audio graph without "repairing" ordinary rests.
 const RENDER_SILENCE_MS = 5000;
 const RECOVERY_COOLDOWN_MS = 1000;
-// While-playing resync budget. A hard seek is audible, and on WebKit (every
-// iPad browser) a seek on a playing stem lands later than one watchdog tick
-// and behind the master by however long it took. Re-judging sync before that
-// seek had landed re-seeked all six stems about ten times a second for whole
-// sessions (production playback telemetry, 2026-10-01). Sync is therefore not
-// judged, and no correction issued, while any stem is mid-seek, nor until a
-// while-playing correction has settled; corrections back off while sync does
-// not hold, and each aims ahead of the master by what the previous one was
-// measured to lose while landing. Seeks issued by recover() get the mid-seek
-// wait only.
+// Alignment video-seek budget. Moving the video is the only while-playing
+// correction, and it is silent and cheap, but a seek that does not hold must
+// still not be repeated every watchdog tick: corrections are not judged, and
+// none issued, while the video seek is landing or before it has settled; they
+// back off while sync does not hold, and each aims ahead of the stems by what
+// the previous one was measured to lose while landing.
 const RESYNC_SETTLE_MS = 400;
 const RESYNC_BACKOFF_MAX_MS = 5000;
 /** Sync observed for this long after a correction means it held; losing sync
@@ -85,19 +88,44 @@ const RESYNC_HOLD_MS = 2000;
 /** How long a mid-seek stem is excused from stall detection. Past this it is
  *  stalled at once, and recover() re-seeks the paused ensemble. */
 const SEEK_LANDING_TIMEOUT_MS = 1500;
-/** A lead can make up for any landing the stall detector will wait out. The
- *  watchdog only sees the window end on a tick, so a landing up to two ticks
- *  past it can still escape recovery and must be within reach of the lead. */
-const MAX_SEEK_LEAD_SEC = (SEEK_LANDING_TIMEOUT_MS + 2 * WATCHDOG_INTERVAL_MS) / 1000;
-/** No lead this close to the end of a stem: a seek that lands sooner than the
- *  lead assumed would run the stem out before the video. */
-const RESYNC_TAIL_GUARD_SEC = 1;
+/** A video-seek lead can make up for any landing the video-stall rule will
+ *  wait out. The watchdog only sees the window end on a tick, so a landing up
+ *  to two ticks past it can still escape recovery and must be within reach of
+ *  the lead. */
+const MAX_VIDEO_SEEK_LEAD_SEC = (CLOCK_STALL_MS + 2 * WATCHDOG_INTERVAL_MS) / 1000;
+/** After a start, user seek or recovery, stem clocks freeze briefly before
+ *  running steadily (iPad probe, 2026-10-02: a start runs, freezes ~300 ms,
+ *  then holds; each stem starts ~16 ms after the previous one). Offsets are
+ *  not trusted until this much wall time has passed. */
+const ALIGN_SETTLE_MS = 1200;
+/** A stem's offset is only meaningful once every stem clock has run at
+ *  real-time speed over this window: a freezing stem's offset is still
+ *  moving. */
+const ALIGN_STABLE_WINDOW_MS = 500;
+const ALIGN_STABLE_TOLERANCE_SEC = 0.02;
+/** Longest delay a DelayNode may apply to line the stems up. */
+const MAX_STEM_DELAY_SEC = 1;
+/** Delay retargeting time constant: inaudible as a click, quick to settle. */
+const DELAY_SMOOTHING_SEC = 0.03;
+/** Retarget a delay only when the wanted value has moved this far; keeps a
+ *  steady ensemble from nudging delays every watchdog tick. */
+const DELAY_DEADBAND_SEC = 0.01;
+/** Events from the video are ignored for at most this long after the
+ *  alignment sought it: a seek that never lands must not mask a genuine
+ *  video stall from the waiting/playing sensors (the watchdog's own
+ *  no-progress rule still fires regardless). */
+const VIDEO_SEEK_GRACE_MS = 2500;
 const INCIDENT_LIMIT = 100;
 
 interface StemChannel {
   id: StemId;
   el: HTMLAudioElement;
   source: MediaElementAudioSourceNode;
+  /** Holds this stem's clock back to the latest-running stem (alignment). */
+  delay: DelayNode;
+  /** Current delay in seconds; the stem's audible position is
+   *  el.currentTime - delaySec. */
+  delaySec: number;
   gain: GainNode;
   analyser: AnalyserNode;
   analyserData: Float32Array<ArrayBuffer>;
@@ -156,15 +184,26 @@ class MediaElementEngine implements PlaybackEngine {
   private videoBufferingForRecovery = false;
   private pendingSeekTarget: number | null = null;
   private stemPrefetchTimer: number | null = null;
-  /** How far a playing stem lands behind the master after a hard seek, as last measured. */
-  private seekLeadSec = 0;
+  /** performance.now() before which stem offsets are not trusted (a start,
+   *  user seek or recovery recently froze the clocks). */
+  private alignReadyAtMs = 0;
+  /** Recent stem clock samples for the real-time stability window. */
+  private alignHistory: Array<{ atMs: number; stemTimes: number[] }> = [];
+  /** How far a playing video lands behind its aim, as last measured. */
+  private videoLeadSec = 0;
+  /** The last alignment video seek, until its landing has been measured. */
+  private videoFlight: { leadSec: number; landedAtMs: number | null } | null = null;
+  /** performance.now() when the alignment last sought the video, else null.
+   *  While that seek is in flight, its own waiting/playing events are not
+   *  buffering incidents. */
+  private videoAlignSeekSinceMs: number | null = null;
+  /** Alignment seeks of the video since load (metrics/telemetry). */
+  private videoSeeks = 0;
   private lastResyncAt = 0;
   /** Corrections issued since sync last held for RESYNC_HOLD_MS. */
   private resyncStreak = 0;
   /** performance.now() when sync was first observed since the last correction. */
   private syncHeldSince: number | null = null;
-  /** The last correction, until its landing has been measured. */
-  private resyncInFlight: { leadSec: number; landedAt: number | null } | null = null;
   private incidentSequence = 0;
   private incidents: PlaybackIncident[] = [];
 
@@ -219,6 +258,7 @@ class MediaElementEngine implements PlaybackEngine {
       el.src = resolveMediaUrl(baseUrl, stem.file);
 
       const source = this.ctx!.createMediaElementSource(el);
+      const delay = this.ctx!.createDelay(MAX_STEM_DELAY_SEC);
       const gain = this.ctx!.createGain();
       const analyser = this.ctx!.createAnalyser();
       analyser.fftSize = 512;
@@ -232,7 +272,8 @@ class MediaElementEngine implements PlaybackEngine {
       const trimDb = stem.default_gain_db ?? 0;
       gain.gain.value = dbToLinear(trimDb);
 
-      source.connect(gain);
+      source.connect(delay);
+      delay.connect(gain);
       gain.connect(analyser);
       analyser.connect(this.masterGain!);
 
@@ -240,6 +281,8 @@ class MediaElementEngine implements PlaybackEngine {
         id: stem.id,
         el,
         source,
+        delay,
+        delaySec: 0,
         gain,
         analyser,
         analyserData,
@@ -390,7 +433,6 @@ class MediaElementEngine implements PlaybackEngine {
     this.stopWatchdog();
     for (const c of this.channels.values()) {
       c.el.pause();
-      c.el.playbackRate = 1;
     }
   }
 
@@ -414,14 +456,18 @@ class MediaElementEngine implements PlaybackEngine {
         this.stemPrefetchTimer = null;
         if (!this.desiredPlaying || this.pendingSeekTarget !== t) return;
         for (const c of this.channels.values()) {
-          if (Math.abs(c.el.currentTime - t) < HARD_DRIFT_SEC) continue;
-          c.el.currentTime = t;
+          // The target is where the stem must land audibly; its element time
+          // must be the target plus the delay that is still holding it back.
+          if (Math.abs(c.el.currentTime - c.delaySec - t) < HARD_DRIFT_SEC) continue;
+          c.el.currentTime = t + c.delaySec;
           c.hardSeeks += 1;
         }
       }, MASTER_SEEK_HEAD_START_MS);
     } else {
       this.pendingSeekTarget = null;
-      for (const c of this.channels.values()) c.el.currentTime = t;
+      for (const c of this.channels.values()) {
+        c.el.currentTime = t + c.delaySec;
+      }
     }
     this.resetWatchdogBaselines();
   }
@@ -476,12 +522,15 @@ class MediaElementEngine implements PlaybackEngine {
       // rendered node gain is dbToLinear(c.trimDb + c.gainDb) otherwise.
       const silenced = c.muted || (anySoloed && !c.soloed);
       stems[c.id] = {
-        skewMs: vt === null ? null : Math.round((c.el.currentTime - vt) * 1000),
+        // Audible offset: the element clock minus the delay currently holding
+        // this stem back, against the video clock.
+        skewMs: vt === null ? null : Math.round((c.el.currentTime - c.delaySec - vt) * 1000),
         readyState: c.el.readyState,
         waitingEvents: c.waitingEvents,
         stalledEvents: c.stalledEvents,
         playbackRate: c.el.playbackRate,
         hardSeeks: c.hardSeeks,
+        delayMs: Math.round(c.delaySec * 1000),
         gainLinear: silenced ? 0 : dbToLinear(c.gainDb),
         trimDb: c.trimDb,
         signalRmsDbfs: c.rmsDbfs,
@@ -501,6 +550,7 @@ class MediaElementEngine implements PlaybackEngine {
       stems,
       nudgeTicks: this.nudgeTicks,
       stallBailouts: this.stallBailouts,
+      videoSeeks: this.videoSeeks,
       masterGainDb: this.masterGainDb,
       masterHeadroomDb: MASTER_HEADROOM_DB,
       limiter: {
@@ -571,16 +621,25 @@ class MediaElementEngine implements PlaybackEngine {
     }
   }
 
+  /** A stem's audible position: its element clock minus the delay currently
+   *  holding it back. Every sync comparison uses this, never the raw clock,
+   *  so an aligned ensemble never looks split by its own delays. */
+  private audibleTime(c: StemChannel): number {
+    return c.el.currentTime - c.delaySec;
+  }
+
   private hardSyncToVideo(videoTime: number, thresholdSec: number): void {
     for (const c of this.channels.values()) {
-      const drift = Math.abs(c.el.currentTime - videoTime);
+      const drift = Math.abs(this.audibleTime(c) - videoTime);
       if (drift > thresholdSec) {
         console.debug(`Syncing ${c.id}: drift was ${drift.toFixed(3)}s`);
-        c.el.currentTime = videoTime;
+        // Seek to the target plus this stem's delay so the audible position
+        // lands on the target.
+        c.el.currentTime = videoTime + c.delaySec;
         c.hardSeeks += 1;
         // This seek moves the ensemble too, so a pending landing measurement
         // would credit its result to the wrong correction.
-        this.resyncInFlight = null;
+        this.videoFlight = null;
       }
     }
   }
@@ -600,48 +659,94 @@ class MediaElementEngine implements PlaybackEngine {
   }
 
   /**
-   * True while any stem is mid-seek. Its reported offset from the master says
-   * nothing about what is audible, and seeking it again would only restart
-   * the seek. A seek that never lands is the stall detector's to handle.
+   * Start waiting again before stem offsets are trusted: a start, user seek
+   * or recovery recently froze the clocks. The learned video lead is kept: it
+   * describes how this browser lands video seeks on this element, which none
+   * of those events change.
    */
-  private anyStemSeeking(): boolean {
-    for (const c of this.channels.values()) {
-      if (c.el.seeking) return true;
-    }
-    return false;
+  private restartAlignment(): void {
+    this.alignReadyAtMs = performance.now() + ALIGN_SETTLE_MS;
+    this.alignHistory = [];
+    this.videoFlight = null;
+    this.videoAlignSeekSinceMs = null;
   }
 
   /**
-   * False while the last correction is still settling, when stem offsets must
-   * not be judged. On the first call after its settle window, measures where
-   * that correction left the ensemble: the lead it was aimed with minus what
-   * is left over is what its seeks lost while landing, and the next
-   * correction aims ahead by that. The median keeps one straying stem from
-   * steering all six. Call only when no stem is mid-seek.
+   * True while the alignment's own video seek is in flight (or has failed to
+   * land within the grace window). Its waiting/playing events are the seek
+   * itself, not a buffering incident; a genuine stall that outlives the
+   * window — or stops the clock — is still caught by the watchdog's own
+   * no-progress rule.
    */
-  private resyncSettled(video: HTMLVideoElement, now: number): boolean {
-    const flight = this.resyncInFlight;
-    if (!flight) return true;
-    flight.landedAt ??= now;
-    if (now - flight.landedAt < RESYNC_SETTLE_MS) return false;
-    const offsets = Array.from(this.channels.values())
-      .map((c) => c.el.currentTime - video.currentTime)
-      .sort((a, b) => a - b);
-    this.resyncInFlight = null;
-    if (offsets.length === 0) return true;
-    const residual =
-      (offsets[Math.floor((offsets.length - 1) / 2)] + offsets[Math.floor(offsets.length / 2)]) / 2;
-    this.seekLeadSec = Math.max(0, Math.min(MAX_SEEK_LEAD_SEC, flight.leadSec - residual));
+  private alignmentVideoSeekActive(): boolean {
+    const since = this.videoAlignSeekSinceMs;
+    if (since === null) return false;
+    if (!this.video || !this.video.seeking || performance.now() - since >= VIDEO_SEEK_GRACE_MS) {
+      this.videoAlignSeekSinceMs = null;
+      return false;
+    }
     return true;
   }
 
   /**
-   * Hard-correct the whole playing ensemble to the video master, within the
-   * resync budget. Callers have already seen the stems out of sync with no
-   * stem mid-seek and the previous correction settled. Returns false when the
-   * budget does not allow another correction yet.
+   * One audio-master alignment step, on the watchdog cadence. Lines the stems
+   * up with their DelayNodes and moves the silent video to their audible
+   * position; never seeks or rate-changes a playing stem. Returns true when
+   * stems and video are in sync.
    */
-  private resyncPlayingStems(video: HTMLVideoElement, now: number): boolean {
+  private alignTick(video: HTMLVideoElement, now: number): boolean {
+    const channels = Array.from(this.channels.values());
+    if (channels.length === 0) return true;
+    const stemTimes = channels.map((c) => c.el.currentTime);
+    this.alignHistory.push({ atMs: now, stemTimes });
+    while (this.alignHistory.length > 0 && now - this.alignHistory[0].atMs > 2 * ALIGN_STABLE_WINDOW_MS) {
+      this.alignHistory.shift();
+    }
+    if (now < this.alignReadyAtMs || channels.some((c) => c.el.seeking)) return false;
+    // Every stem clock must have run at real-time speed over the window: a
+    // freezing stem's offset is still moving and says nothing yet.
+    const then = this.alignHistory.find((h) => now - h.atMs <= ALIGN_STABLE_WINDOW_MS + 60);
+    if (!then || now - then.atMs < ALIGN_STABLE_WINDOW_MS - 150) return false;
+    const wall = (now - then.atMs) / 1000;
+    if (
+      stemTimes.some((time, i) => Math.abs(time - then.stemTimes[i] - wall) > ALIGN_STABLE_TOLERANCE_SEC)
+    ) {
+      return false;
+    }
+
+    // Stems: delay each one by how far its clock runs ahead of the
+    // latest-running stem. The latest one keeps delay 0.
+    const latest = Math.min(...stemTimes);
+    let delaysMoved = false;
+    channels.forEach((c, i) => {
+      const wanted = Math.min(MAX_STEM_DELAY_SEC, Math.max(0, stemTimes[i] - latest));
+      if (Math.abs(wanted - c.delaySec) <= DELAY_DEADBAND_SEC) return;
+      console.debug(`Delaying ${c.id} by ${(wanted * 1000).toFixed(0)} ms`);
+      c.delaySec = wanted;
+      c.delay.delayTime.setTargetAtTime(wanted, this.ctx!.currentTime, DELAY_SMOOTHING_SEC);
+      delaysMoved = true;
+    });
+    if (delaysMoved) return false;
+
+    // Video: move it to the stems' audible position (they all share the
+    // latest stem's time now), aimed ahead by what the previous seek was
+    // measured to lose while landing.
+    if (video.seeking) return false;
+    if (this.videoFlight) {
+      this.videoFlight.landedAtMs ??= now;
+      if (now - this.videoFlight.landedAtMs < RESYNC_SETTLE_MS) return false;
+      const residual = video.currentTime - latest;
+      this.videoLeadSec = Math.max(
+        0,
+        Math.min(MAX_VIDEO_SEEK_LEAD_SEC, this.videoFlight.leadSec - residual),
+      );
+      this.videoFlight = null;
+    }
+    const offset = video.currentTime - latest;
+    // Audible stem-to-stem separation beyond the threshold means the delay
+    // cap was hit; that is not sync either.
+    const audibleSpread = Math.max(...channels.map((c) => this.audibleTime(c))) - latest;
+    if (Math.abs(offset) < HARD_DRIFT_SEC && audibleSpread < HARD_DRIFT_SEC) return true;
     const held = this.syncHeldSince !== null && now - this.syncHeldSince >= RESYNC_HOLD_MS;
     this.syncHeldSince = null;
     if (this.lastResyncAt === 0 || held) {
@@ -650,52 +755,46 @@ class MediaElementEngine implements PlaybackEngine {
       // Sync has not held since the last correction: each further one waits
       // twice as long, so a browser this cannot converge on hears a seek
       // every few seconds, not ten a second.
-      const spacingMs = Math.min(RESYNC_SETTLE_MS * 2 ** (this.resyncStreak - 1), RESYNC_BACKOFF_MAX_MS);
+      const spacingMs = Math.min(
+        RESYNC_SETTLE_MS * 2 ** (this.resyncStreak - 1),
+        RESYNC_BACKOFF_MAX_MS,
+      );
       if (now - this.lastResyncAt < spacingMs) return false;
     }
-    const stemEnd = Math.min(
-      ...Array.from(this.channels.values()).map((c) => (Number.isFinite(c.el.duration) ? c.el.duration : Infinity)),
+    console.debug(
+      `Moving video by ${(-offset * 1000).toFixed(0)} ms (lead ${(this.videoLeadSec * 1000).toFixed(0)} ms)`,
     );
-    const leadSec =
-      video.currentTime + this.seekLeadSec + RESYNC_TAIL_GUARD_SEC < stemEnd ? this.seekLeadSec : 0;
-    const target = video.currentTime + leadSec;
-    for (const c of this.channels.values()) {
-      console.debug(`Syncing ${c.id}: offset was ${(c.el.currentTime - video.currentTime).toFixed(3)}s`);
-      c.el.currentTime = target;
-      c.hardSeeks += 1;
-      // The landing window runs from here, not from the next tick's look.
-      c.seekingSinceMs = now;
-    }
-    this.resyncInFlight = { leadSec, landedAt: null };
+    video.currentTime = latest + this.videoLeadSec;
+    this.videoFlight = { leadSec: this.videoLeadSec, landedAtMs: null };
+    this.videoAlignSeekSinceMs = now;
+    this.videoSeeks += 1;
     this.lastResyncAt = now;
     this.resyncStreak += 1;
-    return true;
+    // The video clock just jumped; re-arm the direct stall sensors so the
+    // seek is not read as the clock failing to advance.
+    this.resetWatchdogBaselines();
+    return false;
   }
 
   /**
-   * Start a fresh budget. The learned lead is kept: it describes how this
-   * browser lands seeks on these elements, which a pause, a user seek or a
-   * recovery does not change. A new track resets it with its elements.
+   * Start a fresh budget. The learned video lead is kept: it describes how
+   * this browser lands video seeks on this element, which a pause, a user
+   * seek or a recovery does not change. A new track resets it with its
+   * elements.
    */
   private resetResyncBudget(): void {
+    this.restartAlignment();
     this.lastResyncAt = 0;
     this.resyncStreak = 0;
     this.syncHeldSince = null;
-    this.resyncInFlight = null;
     // The watchdog may not have been running to see the last seek finish.
     for (const c of this.channels.values()) c.seekingSinceMs = null;
-  }
-
-  private setRateAll(rate: number): void {
-    for (const c of this.channels.values()) {
-      c.el.playbackRate = rate;
-    }
   }
 
   private averageCurrentTime(): number {
     const list = Array.from(this.channels.values());
     if (list.length === 0) return 0;
-    return list.reduce((sum, c) => sum + c.el.currentTime, 0) / list.length;
+    return list.reduce((sum, c) => sum + this.audibleTime(c), 0) / list.length;
   }
 
   private startSyncLoop(): void {
@@ -712,7 +811,9 @@ class MediaElementEngine implements PlaybackEngine {
     }
   }
 
-  /** One evaluation of the tiered drift/stall policy (1 s cadence). */
+  /** One stall-policy evaluation on the 1 s cadence. While-playing sync is
+   *  the alignment step on the watchdog cadence; this loop only watches the
+   *  video clock itself. */
   private syncTick(): void {
     this.sampleLimiter();
     const video = this.video;
@@ -741,35 +842,6 @@ class MediaElementEngine implements PlaybackEngine {
       return;
     }
     this.stalledTicks = 0;
-
-    const now = performance.now();
-    if (this.anyStemSeeking() || !this.resyncSettled(video, now)) return;
-
-    const channels = Array.from(this.channels.values());
-    const times = channels.map((c) => c.el.currentTime);
-    if (Math.max(...times) - Math.min(...times) >= MAX_INTER_STEM_SKEW_SEC) {
-      // The former average-clock policy could hide equal-and-opposite drift.
-      // Correct the whole audible ensemble together at the video master.
-      if (this.resyncPlayingStems(video, now)) this.setRateAll(1);
-      return;
-    }
-
-    let nudged = false;
-    let beyondNudge = false;
-    for (const c of channels) {
-      const action = evaluateDrift(c.el.currentTime - vt);
-      if (action.type === 'none') {
-        c.el.playbackRate = 1;
-      } else if (action.type === 'nudge') {
-        c.el.playbackRate = action.rate;
-        nudged = true;
-      } else {
-        c.el.playbackRate = 1;
-        beyondNudge = true;
-      }
-    }
-    if (beyondNudge && this.resyncPlayingStems(video, now)) this.setRateAll(1);
-    if (nudged) this.nudgeTicks += 1;
   }
 
   private sampleLimiter(): void {
@@ -887,23 +959,10 @@ class MediaElementEngine implements PlaybackEngine {
       return;
     }
     if (video && videoAdvanced) {
-      if (this.anyStemSeeking() || !this.resyncSettled(video, now)) return;
-      const stemTimes = Array.from(this.channels.values()).map((c) => c.el.currentTime);
-      const interStemSkew = Math.max(...stemTimes) - Math.min(...stemTimes);
-      const maxVideoOffset = Math.max(...stemTimes.map((time) => Math.abs(time - video.currentTime)));
-      if (
-        interStemSkew >= MAX_INTER_STEM_SKEW_SEC ||
-        maxVideoOffset >= HARD_DRIFT_SEC
-      ) {
-        // Health includes synchronization. Recovery can resolve each play()
-        // while decoders begin advancing on different samples; correct that
-        // without waiting for the one-second drift loop, but only within
-        // the resync budget.
-        this.healthStatus = 'starting';
-        if (this.resyncPlayingStems(video, now)) {
-          this.setRateAll(1);
-          this.resetWatchdogBaselines();
-        }
+      if (!this.alignTick(video, now)) {
+        // Health includes synchronization; while the alignment has not yet
+        // lined the stems up and moved the video to them, it has not settled.
+        if (this.healthStatus === 'healthy') this.healthStatus = 'starting';
         return;
       }
       this.syncHeldSince ??= now;
@@ -983,8 +1042,10 @@ class MediaElementEngine implements PlaybackEngine {
         this.video!.pause();
         for (const c of this.channels.values()) {
           c.el.pause();
-          if (Math.abs(c.el.currentTime - target) >= HARD_DRIFT_SEC) {
-            c.el.currentTime = target;
+          // Audible position against the target; the seek aims the element
+          // at the target plus the delay still holding this stem back.
+          if (Math.abs(this.audibleTime(c) - target) >= HARD_DRIFT_SEC) {
+            c.el.currentTime = target + c.delaySec;
             c.hardSeeks += 1;
           }
         }
@@ -1119,6 +1180,9 @@ class MediaElementEngine implements PlaybackEngine {
 
   private readonly handleVideoWaiting = (): void => {
     if (!this.desiredPlaying) return;
+    // The alignment's own video seek is not a buffering incident: answering
+    // it would pause every stem for a correction the engine just made.
+    if (this.alignmentVideoSeekActive()) return;
     this.recordIncident('video-buffering', `readyState=${this.video?.readyState ?? 'unknown'}`);
     this.healthStatus = 'recovering';
     // Hold the audible ensemble while leaving the master video's play/fetch
@@ -1140,6 +1204,8 @@ class MediaElementEngine implements PlaybackEngine {
   private readonly handleVideoPlaying = (): void => {
     if (!this.desiredPlaying) return;
     if (this.recoveryInFlight) return;
+    // The alignment's own video seek landing is not a buffering recovery.
+    if (this.alignmentVideoSeekActive()) return;
     if (this.videoBufferingForRecovery) {
       if (this.video && !this.videoReachedPendingSeek(this.video)) return;
       this.videoBufferingForRecovery = false;
@@ -1151,7 +1217,9 @@ class MediaElementEngine implements PlaybackEngine {
       void this.recover('video-buffering');
       return;
     }
-    if (this.video) this.hardSyncToVideo(this.video.currentTime, HARD_DRIFT_SEC);
+    // No hard sync here: a playing stem is never seeked. If the video has
+    // drifted from the stems' audible position, the alignment step moves
+    // the video on its next watchdog tick.
   };
 
   private readonly handleVideoCanPlay = (): void => {
@@ -1207,7 +1275,8 @@ class MediaElementEngine implements PlaybackEngine {
     }
     this.lastRecoveryAt = 0;
     this.resetResyncBudget();
-    this.seekLeadSec = 0;
+    this.videoLeadSec = 0;
+    this.videoSeeks = 0;
     this.incidentSequence = 0;
     this.incidents = [];
   }
@@ -1228,6 +1297,7 @@ class MediaElementEngine implements PlaybackEngine {
       c.el.pause();
       c.el.src = '';
       c.source.disconnect();
+      c.delay.disconnect();
       c.gain.disconnect();
       c.analyser.disconnect();
     }
