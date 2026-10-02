@@ -77,7 +77,7 @@ control requests from media transfers and show completion markers.
 |---|---|
 | RunPod to VPS | [`lossless-stem-v1`](interfaces/lossless-stem-v1/spec.md): six aligned stereo 44.1 kHz float32 WAV files, hashes and provenance, `handoff.json` last. Separator role `other` becomes `shizzle`. |
 | VPS to browser | [`shizzle-browser-v1`](interfaces/shizzle-browser-v1/spec.md): six AAC-LC/M4A stems, audio-less H.264 video, immutable generation, `manifest.json` last. New stems target 256 kb/s at 44.1 kHz; generation average is at most 2.5 Mb/s. |
-| Playback | Six independent audio elements feed Web Audio gains and a master compressor. Each stem is synchronized to the video clock. After stem readiness, video is staged into one revocable Blob capped at 128 MiB. |
+| Playback | Six independent audio elements feed Web Audio gains and a master compressor. Stems are aligned to the latest-running one with per-stem delays, and the silent video is moved to the stems' audible position. After stem readiness, video is staged into one revocable Blob capped at 128 MiB. |
 
 The lossless intake measures one common attenuation and records it as each
 stem's default playback gain; it does not bake that gain into the AAC bytes.

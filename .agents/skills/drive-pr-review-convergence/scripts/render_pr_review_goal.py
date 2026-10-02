@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+DEFAULT_RETIRED_REVIEWERS = ("greptile",)
+
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = ROOT / "assets" / "pr-review-convergence"
 RUNTIME_FILES = {
@@ -45,9 +47,14 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit("--pr-url must end in a numeric pull-request number")
     if not args.required_check:
         raise SystemExit("provide at least one --required-check")
-    if not args.reviewer:
-        raise SystemExit("provide at least one --reviewer")
-    if args.primary_reviewer not in args.reviewer:
+    retired = retired_reviewers(args)
+    selected = [reviewer for reviewer in [args.primary_reviewer, *args.reviewer] if reviewer.casefold() in retired]
+    if selected:
+        raise SystemExit(
+            f"{', '.join(sorted(set(selected)))}: retired for this installation; use independent review "
+            "and available advisory reviewers (override with --retired-reviewer none)"
+        )
+    if args.primary_reviewer != "independent" and args.primary_reviewer not in args.reviewer:
         raise SystemExit("--primary-reviewer must also be supplied as --reviewer")
     if not 0 <= args.minimum_primary_score <= 5:
         raise SystemExit("--minimum-primary-score must be between 0 and 5")
@@ -70,6 +77,17 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit("--max-iterations must be positive")
     if args.quiet_window_minutes < 1:
         raise SystemExit("--quiet-window-minutes must be positive")
+
+
+def retired_reviewers(args: argparse.Namespace) -> set[str]:
+    """Reviewer names this installation refuses to select.
+
+    The default is the installing project's policy (Shizzle retired Greptile on
+    2026-09-24). Pass ``--retired-reviewer none`` when rendering for a
+    repository that still uses every listed reviewer.
+    """
+    names = args.retired_reviewer if args.retired_reviewer is not None else list(DEFAULT_RETIRED_REVIEWERS)
+    return {name.casefold() for name in names if name.casefold() != "none"}
 
 
 def render(args: argparse.Namespace) -> list[Path]:
@@ -99,6 +117,7 @@ def render(args: argparse.Namespace) -> list[Path]:
             [reviewer for reviewer in args.reviewer if reviewer != args.primary_reviewer]
         )
         or "none",
+        "{{RETIRED_REVIEWERS_JSON}}": json.dumps(sorted(retired_reviewers(args))),
         "{{ADVISORY_REVIEWERS_JSON}}": json.dumps(
             [reviewer for reviewer in args.reviewer if reviewer != args.primary_reviewer]
         ),
@@ -167,8 +186,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-branch", required=True)
     parser.add_argument("--required-check", action="append", default=[])
     parser.add_argument("--reviewer", action="append", default=[])
-    parser.add_argument("--primary-reviewer", default="greptile")
-    parser.add_argument("--minimum-primary-score", type=int, default=4)
+    parser.add_argument("--primary-reviewer", default="independent")
+    parser.add_argument(
+        "--retired-reviewer",
+        action="append",
+        default=None,
+        help="reviewer name this package must never select or await; repeatable; "
+        f"default {', '.join(DEFAULT_RETIRED_REVIEWERS)}; 'none' clears the list",
+    )
+    parser.add_argument("--minimum-primary-score", type=int, default=0)
     parser.add_argument("--validation", action="append", default=[])
     parser.add_argument("--setup-command", action="append", default=[])
     parser.add_argument("--max-iterations", type=int, default=2)

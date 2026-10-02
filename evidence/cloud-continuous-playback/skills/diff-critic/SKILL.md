@@ -5,6 +5,10 @@ description: Read-only adversarial review of Shizzle's current uncommitted playb
 
 # Cloud Playback Diff Critic
 
+Historical role from the 2026-08-05 [orchestration receipt](../../orchestration-receipt.md),
+not a claim about the current worktree. Use [HANDOFF](../../../../docs/HANDOFF.md)
+for current state.
+
 ## Role
 
 Review the current uncommitted diff for correctness and regression risk against `evidence/cloud-continuous-playback/goal.md` and `interfaces/shizzle-browser-v1/spec.md`. Challenge the implementation; do not redesign the whole project.

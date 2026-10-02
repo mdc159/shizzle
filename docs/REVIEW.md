@@ -46,6 +46,14 @@ Review these issues before choosing implementation batches. In particular, do
 not rerun the importer or generation migration against production until their
 data-integrity issues are resolved.
 
+Status as of 2026-10-02: every P1 above is closed (#19 by PR #42, #25 by #43,
+#32 by #41, #33 by #40, #34 by #39), as are #20, #21 and #26 (PR #56) and #22
+and #28 (closed in triage).
+The importer and migration guidance in the previous paragraph is therefore
+satisfied by the merged fixes. Still open from this review: #23, #24, #27, #29,
+#30, #31, #35, #36, #37. Check GitHub for the live state before acting on any
+row; this table records the review as written.
+
 ## Verification
 
 | Check | Result in this review |

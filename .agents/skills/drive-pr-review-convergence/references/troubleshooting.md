@@ -59,10 +59,11 @@ idempotently.
 Record the provider result and continue. Do not wait or repeatedly trigger.
 Only required CI and the configured primary final review gate readiness.
 
-## Greptile has a score but reviewed an older commit
+## Retired Greptile has an old review
 
-Not a final review. Wait for or manually trigger one review on the tested final
-candidate, then confirm its reviewed head and findings.
+Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply.
+
+Complete the independent review of the current head and continue.
 
 ## The PR is green but a review says do not merge
 

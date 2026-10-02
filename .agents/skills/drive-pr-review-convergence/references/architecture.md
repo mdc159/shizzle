@@ -2,13 +2,13 @@
 
 ## Components
 
-1. `tools/render_pr_review_goal.py` validates PR-specific inputs and emits a
+1. `scripts/render_pr_review_goal.py` (relative to the skill) validates PR-specific inputs and emits a
    closed package with no unresolved placeholders.
 2. `tools/e2b_pr_template.py` builds a versioned Linux E2B template with Node
    22, Git, uv, jq, rsync, shellcheck, curl, and basic transport tools.
 3. `tools/e2b_pr_sandbox.py` owns sandbox lifecycle, exact-head checkout,
    candidate replay, execution, pause/resume, bundle harvest, and guarded push.
-4. `templates/pr-review-convergence/` defines the human and machine acceptance
+4. `assets/pr-review-convergence/` (relative to the skill) defines the human and machine acceptance
    contract rendered for one PR.
 5. The installable skill tells an agent how to use those deterministic assets
    without loading the full documentation into every context window.
@@ -35,7 +35,7 @@ candidate.
 ```text
 remote head SHA
   -> credential-free E2B clone
-  -> exact detached source identity
+  -> temporary branch at the exact recorded head
   -> one host staging worktree beneath .sandbox/e2b/staging
   -> binary-safe candidate diff
   -> writer and optional readers
