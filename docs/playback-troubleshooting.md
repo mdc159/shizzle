@@ -125,6 +125,16 @@ delayMs/1000`), aimed ahead by the lead its previous seek was measured to
 lose, inside a settle/backoff/hold budget. Stem seeks remain only in the
 user-seek and recovery paths, which seek the paused ensemble.
 
+Start behaviour: a browser whose stems start together is left untouched —
+no delay, no gate, audio from the first sample. A device whose starts
+proved staggered remembers the delays it needed (`localStorage`) and
+applies them before playback begins; when playback restarts at least
+2.5 s in (resume, scrub) it rolls in from 2 s earlier with the output
+silent and fades in over 250 ms finishing at the requested position, and
+at the top of a song nothing is silenced. Restarts re-base every stem to
+the same raw position with the remembered delays, so delays never
+accumulate across restarts.
+
 1. Read the session's `playback_events`: every event carries per-stem
    `hardSeeks`, `skewMs` (audible offset), and `delayMs`, plus top-level
    `videoSeeks`. In a healthy session `hardSeeks` stays flat after any user

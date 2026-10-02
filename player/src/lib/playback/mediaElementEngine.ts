@@ -25,6 +25,17 @@
  *   video — whose seeks land quickly even on WebKit — is moved to the
  *   stems' audible position. A stem's audible position is
  *   `el.currentTime - delaySec`; every sync comparison uses it.
+ * - Start behaviour. A browser whose stems start together (desktop
+ *   Chromium: within ~6–12 ms) is left exactly as it is — no delay, no gate,
+ *   audio from the first sample. A device whose starts proved staggered
+ *   remembers the delays it needed (localStorage, per stem order) and
+ *   applies them before playback begins, so the stems are in line from the
+ *   first sample; when playback restarts with enough audio before it
+ *   (resume, scrub), it rolls in from two seconds earlier with the output
+ *   silent and fades in over 250 ms finishing at the requested position, so
+ *   the WebKit start freeze and alignment happen where nothing is audible.
+ *   At the top of a song nothing is silenced: a brief hiccup beats losing
+ *   the first notes.
  */
 
 import type { Stem, StemId, StemsManifest } from '@/types/karaoke';
@@ -40,6 +51,7 @@ import { dbToLinear } from './db';
 import { resolveMediaUrl } from './mediaUrl';
 import {
   HARD_DRIFT_SEC,
+  MAX_INTER_STEM_SKEW_SEC,
   STALL_TICKS_THRESHOLD,
   SYNC_INTERVAL_MS,
   VIDEO_ADVANCE_EPSILON_SEC,
@@ -115,7 +127,40 @@ const DELAY_DEADBAND_SEC = 0.01;
  *  video stall from the waiting/playing sensors (the watchdog's own
  *  no-progress rule still fires regardless). */
 const VIDEO_SEEK_GRACE_MS = 2500;
+/** Resume and scrub start this far before the requested position, silently,
+ *  so the stems' start freeze and alignment are over when it arrives. */
+const PREROLL_SEC = 2;
+/** A position needs at least this much audio before it to roll in from
+ *  earlier; at the top of a song the brief start hiccup is preferred to
+ *  losing the first notes. */
+const ROLLIN_MIN_POSITION_SEC = PREROLL_SEC + 0.5;
+/** The roll-in gate opens by this timeout even if alignment was not
+ *  reached: silence is never held longer than this. */
+const START_GATE_MAX_MS = 3000;
+/** Roll-in fade-in length; it finishes at the requested position, so
+ *  nothing after that position is lost. */
+const START_FADE_SEC = 0.25;
+/** A moved delay needs this long to settle before the fade starts. */
+const DELAY_SETTLE_MS = 150;
+/** localStorage key holding the per-stem start delays this device last
+ *  needed, by stem order. */
+const START_DELAYS_KEY = 'shizzle_stem_start_delays';
 const INCIDENT_LIMIT = 100;
+
+/** The start delays this device last needed, by stem order; empty when
+ *  nothing usable is stored. Storage may be unavailable (private mode,
+ *  quota): the delays are then simply measured again on every start. */
+function rememberedStartDelays(): number[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(START_DELAYS_KEY) ?? '[]');
+    return Array.isArray(parsed) &&
+      parsed.every((value) => typeof value === 'number' && value >= 0 && value <= MAX_STEM_DELAY_SEC)
+      ? (parsed as number[])
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 interface StemChannel {
   id: StemId;
@@ -199,6 +244,13 @@ class MediaElementEngine implements PlaybackEngine {
   private videoAlignSeekSinceMs: number | null = null;
   /** Alignment seeks of the video since load (metrics/telemetry). */
   private videoSeeks = 0;
+  /** True while the roll-in holds the master bus silent. */
+  private outputGated = false;
+  /** Audible position at which the roll-in's fade must finish; null when no
+   *  roll-in is pending (the gate, if any, opens as soon as aligned). */
+  private gateOpenAt: number | null = null;
+  /** Failsafe opener for the roll-in gate. */
+  private gateTimer: number | null = null;
   private lastResyncAt = 0;
   /** Corrections issued since sync last held for RESYNC_HOLD_MS. */
   private resyncStreak = 0;
@@ -276,13 +328,18 @@ class MediaElementEngine implements PlaybackEngine {
       delay.connect(gain);
       gain.connect(analyser);
       analyser.connect(this.masterGain!);
+      // A device whose starts proved staggered remembers the delays it
+      // needed; applying them before playback begins puts the stems in line
+      // from the first sample instead of after the alignment's settle window.
+      const startDelaySec = rememberedStartDelays()[this.channels.size] ?? 0;
+      delay.delayTime.value = startDelaySec;
 
       const channel: StemChannel = {
         id: stem.id,
         el,
         source,
         delay,
-        delaySec: 0,
+        delaySec: startDelaySec,
         gain,
         analyser,
         analyserData,
@@ -382,10 +439,26 @@ class MediaElementEngine implements PlaybackEngine {
     const version = ++this.commandVersion;
     const video = this.video;
     if (video) {
-      // Startup alignment: hard-correct only stems beyond the hard threshold
-      // (identical to the salvaged pre-play syncToVideoTime call).
-      this.hardSyncToVideo(video.currentTime, HARD_DRIFT_SEC);
-      this.lastVideoTime = video.currentTime;
+      if (this.startNeedsAligning() && video.currentTime >= ROLLIN_MIN_POSITION_SEC) {
+        // Resume with room to roll in from: start silently two seconds
+        // earlier, let the stems start, freeze and be aligned during the
+        // preroll, and fade in finishing at the requested position.
+        this.gateOpenAt = video.currentTime;
+        const from = video.currentTime - PREROLL_SEC;
+        this.videoAlignSeekSinceMs = performance.now();
+        video.currentTime = from;
+        this.applyStartPattern(from);
+        this.lastVideoTime = from;
+      } else {
+        this.gateOpenAt = null;
+        if (this.outputGated) this.openOutput();
+        // Startup alignment: put every stem at the same raw position with
+        // the remembered start delays (a paused seek is cheap everywhere,
+        // 21 ms for all six on the iPad), so the delays never accumulate
+        // across restarts.
+        this.applyStartPattern(video.currentTime);
+        this.lastVideoTime = video.currentTime;
+      }
     }
     this.stalledTicks = 0;
     this.resetResyncBudget();
@@ -431,22 +504,50 @@ class MediaElementEngine implements PlaybackEngine {
     this.healthStatus = 'idle';
     this.stopSyncLoop();
     this.stopWatchdog();
+    // A pending roll-in loses its failsafe opener; the resume decides
+    // whether to roll in again or open at once.
+    if (this.gateTimer !== null) {
+      window.clearTimeout(this.gateTimer);
+      this.gateTimer = null;
+    }
     for (const c of this.channels.values()) {
       c.el.pause();
     }
   }
 
   seek(t: number): void {
+    // The app's seek reconciliation (PlayerShell re-issues the store's time
+    // when the video is more than a second from it) hears the roll-in's
+    // two-second rewind as exactly that. A seek to the position a roll-in
+    // is already opening at is that echo, not a user action: re-assert the
+    // preroll position (the echo rewound the video to the target) and keep
+    // rolling.
+    if (this.desiredPlaying && this.gateOpenAt !== null && Math.abs(t - this.gateOpenAt) < 0.05) {
+      if (this.video) this.video.currentTime = this.gateOpenAt - PREROLL_SEC;
+      return;
+    }
     // A user seek starts a new recovery window. Reusing the cooldown from the
     // previous seek can add almost a full second and violate the 3 s settled
     // acceptance gate during rapid scrubbing.
     this.resetRecoveryCooldown();
+    if (this.desiredPlaying && this.startNeedsAligning() && t >= ROLLIN_MIN_POSITION_SEC) {
+      // Scrub with room to roll in from: as the resume path above.
+      this.gateOpenAt = t;
+      t -= PREROLL_SEC;
+      this.videoAlignSeekSinceMs = performance.now();
+      if (this.video) this.video.currentTime = t;
+    } else {
+      this.gateOpenAt = null;
+      // A seek that cannot roll in (top of song, or a device whose stems
+      // start together) must never leave the output silent.
+      if (this.outputGated) this.openOutput();
+    }
     this.resetResyncBudget();
     if (this.desiredPlaying) {
       // The video is the authoritative clock and its target frame gates every
       // audible decoder. Do not launch seven competing Range seeks at once:
-      // let the video fetch/advance first, then recover() hard-seeks all six
-      // stems together at the observed master time.
+      // let the video fetch/advance first, then the paused prefetch re-bases
+      // all six stems together at the observed master time.
       this.healthStatus = 'recovering';
       this.videoBufferingForRecovery = true;
       this.pendingSeekTarget = t;
@@ -455,19 +556,11 @@ class MediaElementEngine implements PlaybackEngine {
       this.stemPrefetchTimer = window.setTimeout(() => {
         this.stemPrefetchTimer = null;
         if (!this.desiredPlaying || this.pendingSeekTarget !== t) return;
-        for (const c of this.channels.values()) {
-          // The target is where the stem must land audibly; its element time
-          // must be the target plus the delay that is still holding it back.
-          if (Math.abs(c.el.currentTime - c.delaySec - t) < HARD_DRIFT_SEC) continue;
-          c.el.currentTime = t + c.delaySec;
-          c.hardSeeks += 1;
-        }
+        this.applyStartPattern(this.video ? this.video.currentTime : t);
       }, MASTER_SEEK_HEAD_START_MS);
     } else {
       this.pendingSeekTarget = null;
-      for (const c of this.channels.values()) {
-        c.el.currentTime = t + c.delaySec;
-      }
+      this.applyStartPattern(t);
     }
     this.resetWatchdogBaselines();
   }
@@ -495,7 +588,9 @@ class MediaElementEngine implements PlaybackEngine {
 
   setMasterGainDb(db: number): void {
     this.masterGainDb = db;
-    if (this.ctx && this.masterGain) {
+    // While the roll-in gate holds the output silent, a volume change must
+    // not open it; the stored level is what the fade-in ramps to.
+    if (this.ctx && this.masterGain && !this.outputGated) {
       this.masterGain.gain.setTargetAtTime(
         dbToLinear(db + MASTER_HEADROOM_DB),
         this.ctx.currentTime,
@@ -659,16 +754,102 @@ class MediaElementEngine implements PlaybackEngine {
   }
 
   /**
+   * True on a device whose stems have started out of line before: a
+   * remembered start delay reached the audible spread threshold.
+   */
+  private startNeedsAligning(): boolean {
+    return rememberedStartDelays().some((delay) => delay >= MAX_INTER_STEM_SKEW_SEC);
+  }
+
+  /**
+   * Re-base a paused ensemble for a restart: every stem at the same raw
+   * position, each DelayNode at this device's remembered start delay (0
+   * where nothing is remembered). The known start stagger is then
+   * pre-compensated — the stems are in line from the first sample — and the
+   * alignment step only trims the difference between this start and the
+   * remembered pattern, so delays never accumulate across restarts. Seeks
+   * issued on paused elements land at once on every browser measured.
+   */
+  private applyStartPattern(position: number): void {
+    const remembered = rememberedStartDelays();
+    let i = 0;
+    for (const c of this.channels.values()) {
+      if (Math.abs(c.el.currentTime - position) >= 0.005) {
+        c.el.currentTime = position;
+        c.hardSeeks += 1;
+      }
+      const delaySec = Math.min(MAX_STEM_DELAY_SEC, remembered[i] ?? 0);
+      i += 1;
+      if (Math.abs(delaySec - c.delaySec) < 0.0005) continue;
+      c.delaySec = delaySec;
+      c.delay.delayTime.value = delaySec;
+    }
+  }
+
+  /** Hold the master bus silent while a roll-in's stems start, freeze and
+   *  get aligned; a failsafe timer opens it regardless after
+   *  START_GATE_MAX_MS. */
+  private gateOutput(): void {
+    if (!this.ctx || !this.masterGain) return;
+    this.outputGated = true;
+    const gain = this.masterGain.gain;
+    gain.cancelScheduledValues(this.ctx.currentTime);
+    gain.setValueAtTime(0, this.ctx.currentTime);
+    if (this.gateTimer !== null) window.clearTimeout(this.gateTimer);
+    this.gateTimer = window.setTimeout(() => this.openOutput(), START_GATE_MAX_MS);
+  }
+
+  /** Open the roll-in gate, now or after delayMs, fading in over
+   *  START_FADE_SEC to the user's level. */
+  private openOutput(delayMs = 0): void {
+    if (!this.outputGated || !this.ctx || !this.masterGain) return;
+    if (delayMs > 0) {
+      if (this.gateTimer !== null) window.clearTimeout(this.gateTimer);
+      this.gateTimer = window.setTimeout(() => this.openOutput(), delayMs);
+      return;
+    }
+    this.outputGated = false;
+    this.gateOpenAt = null;
+    if (this.gateTimer !== null) {
+      window.clearTimeout(this.gateTimer);
+      this.gateTimer = null;
+    }
+    const gain = this.masterGain.gain;
+    const at = this.ctx.currentTime;
+    gain.cancelScheduledValues(at);
+    gain.setValueAtTime(0, at);
+    gain.linearRampToValueAtTime(dbToLinear(this.masterGainDb + MASTER_HEADROOM_DB), at + START_FADE_SEC);
+  }
+
+  /** Drop all roll-in state and restore the user's level at once (track
+   *  change, teardown): the next start must not inherit a silent bus. */
+  private clearOutputGate(): void {
+    if (this.gateTimer !== null) {
+      window.clearTimeout(this.gateTimer);
+      this.gateTimer = null;
+    }
+    this.outputGated = false;
+    this.gateOpenAt = null;
+    if (this.ctx && this.masterGain) {
+      const at = this.ctx.currentTime;
+      this.masterGain.gain.cancelScheduledValues(at);
+      this.masterGain.gain.setValueAtTime(dbToLinear(this.masterGainDb + MASTER_HEADROOM_DB), at);
+    }
+  }
+
+  /**
    * Start waiting again before stem offsets are trusted: a start, user seek
    * or recovery recently froze the clocks. The learned video lead is kept: it
    * describes how this browser lands video seeks on this element, which none
-   * of those events change.
+   * of those events change. A roll-in still pending through a recovery is
+   * re-armed so the recovery cannot leave the output silent.
    */
   private restartAlignment(): void {
     this.alignReadyAtMs = performance.now() + ALIGN_SETTLE_MS;
     this.alignHistory = [];
     this.videoFlight = null;
     this.videoAlignSeekSinceMs = null;
+    if (this.desiredPlaying && this.gateOpenAt !== null) this.gateOutput();
   }
 
   /**
@@ -715,10 +896,17 @@ class MediaElementEngine implements PlaybackEngine {
     }
 
     // Stems: delay each one by how far its clock runs ahead of the
-    // latest-running stem. The latest one keeps delay 0.
+    // latest-running stem. The latest one keeps delay 0. A browser whose
+    // stems started together (desktop Chromium: within ~6-12 ms) is left
+    // exactly as it started — no delay is applied and nothing is stored —
+    // unless a delay is already in use on this device.
     const latest = Math.min(...stemTimes);
+    const aligning =
+      channels.some((c) => c.delaySec > 0) ||
+      Math.max(...stemTimes) - latest >= MAX_INTER_STEM_SKEW_SEC;
     let delaysMoved = false;
     channels.forEach((c, i) => {
+      if (!aligning) return;
       const wanted = Math.min(MAX_STEM_DELAY_SEC, Math.max(0, stemTimes[i] - latest));
       if (Math.abs(wanted - c.delaySec) <= DELAY_DEADBAND_SEC) return;
       console.debug(`Delaying ${c.id} by ${(wanted * 1000).toFixed(0)} ms`);
@@ -726,6 +914,25 @@ class MediaElementEngine implements PlaybackEngine {
       c.delay.delayTime.setTargetAtTime(wanted, this.ctx!.currentTime, DELAY_SMOOTHING_SEC);
       delaysMoved = true;
     });
+    if (delaysMoved) {
+      // Remember what this device needed so the next load applies it before
+      // playback begins; storage being unavailable just means measuring
+      // again next time.
+      try {
+        localStorage.setItem(
+          START_DELAYS_KEY,
+          JSON.stringify(channels.map((c) => Math.round(c.delaySec * 1000) / 1000)),
+        );
+      } catch {
+        // Measured again on the next start.
+      }
+    }
+    // The stems are what is heard: once their delays are in place the output
+    // can fade in, whatever the video still has to do. The fade is scheduled
+    // to finish at the roll-in's requested position.
+    const untilTargetMs =
+      this.gateOpenAt === null ? 0 : (this.gateOpenAt - latest) * 1000 - START_FADE_SEC * 1000;
+    this.openOutput(Math.max(delaysMoved ? DELAY_SETTLE_MS : 0, untilTargetMs));
     if (delaysMoved) return false;
 
     // Video: move it to the stems' audible position (they all share the
@@ -997,7 +1204,11 @@ class MediaElementEngine implements PlaybackEngine {
     this.rmsDbfs = rms > 0 ? 20 * Math.log10(rms) : null;
     this.peakDbfs = peak > 0 ? 20 * Math.log10(peak) : null;
     const outputPresent = this.rmsDbfs !== null && this.rmsDbfs >= RENDER_SILENCE_DBFS;
-    this.silentForMs = this.inputSignalPresent && !outputPresent ? this.silentForMs + elapsedMs : 0;
+    // The roll-in gate silences the bus on purpose; that is not a dead graph.
+    this.silentForMs =
+      this.inputSignalPresent && !outputPresent && !this.outputGated
+        ? this.silentForMs + elapsedMs
+        : 0;
   }
 
   private async recover(reason: PlaybackIncidentCode): Promise<void> {
@@ -1042,13 +1253,10 @@ class MediaElementEngine implements PlaybackEngine {
         this.video!.pause();
         for (const c of this.channels.values()) {
           c.el.pause();
-          // Audible position against the target; the seek aims the element
-          // at the target plus the delay still holding this stem back.
-          if (Math.abs(this.audibleTime(c) - target) >= HARD_DRIFT_SEC) {
-            c.el.currentTime = target + c.delaySec;
-            c.hardSeeks += 1;
-          }
         }
+        // Re-base the paused ensemble with the remembered start delays: the
+        // stems come back in line, so no seek of a playing stem is needed.
+        this.applyStartPattern(target);
         await Promise.all(
           Array.from(this.channels.values()).map((c) => this.waitForSeekReady(c.el)),
         );
@@ -1076,7 +1284,10 @@ class MediaElementEngine implements PlaybackEngine {
           await Promise.all(pausedStems.map((c) => this.waitForSeekReady(c.el)));
         }
       }
-      if (this.video) this.hardSyncToVideo(this.video.currentTime, HARD_DRIFT_SEC);
+      // No hard sync of the resumed ensemble: with the remembered delays
+      // applied at the paused re-seek the stems are back in line, and a
+      // seek issued here would land on playing stems. Any residue is the
+      // alignment's, which moves only the video.
       if (this.video?.paused || Array.from(this.channels.values()).some((c) => c.el.paused)) {
         throw new Error('A media element remained paused after recovery');
       }
@@ -1277,6 +1488,7 @@ class MediaElementEngine implements PlaybackEngine {
     this.resetResyncBudget();
     this.videoLeadSec = 0;
     this.videoSeeks = 0;
+    this.clearOutputGate();
     this.incidentSequence = 0;
     this.incidents = [];
   }

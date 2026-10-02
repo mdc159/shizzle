@@ -61,6 +61,11 @@ type EmulationOptions = {
   videoLandBehindStemsSec: number | null;
   /** Seeks on a paused stem land late too (default: only on a playing one). */
   latePausedSeeks?: boolean;
+  /** false: stems behave natively — no virtual clocks, native seeks — as on
+   *  a browser whose stems start together. */
+  emulateStems?: boolean;
+  /** Pre-seeded remembered start delays (a device's second visit). */
+  storedStartDelays?: number[];
 };
 
 declare global {
@@ -72,10 +77,20 @@ declare global {
       rateChanges: number;
       /** currentTime assignments to audio elements (deferred or immediate). */
       stemSeeks: number;
+      /** currentTime assignments to audio elements that were playing. */
+      playingStemSeeks: number;
       /** performance.now() of each video currentTime assignment. */
       videoSeekTimes: number[];
+      /** Clock rate of driftStemIndex's virtual clock (1 = real time). */
+      driftRate: number;
+      /** Index of the stem whose clock runs at driftRate; -1 for none. */
+      driftStemIndex: number;
       /** Stem ids in engine play order. */
       stemOrder(): string[];
+      /** The remembered start delays currently in localStorage. */
+      storedStartDelays(): number[];
+      /** Current value of the master bus GainNode (first created). */
+      masterGainValue(): number;
     };
   }
 }
@@ -161,12 +176,28 @@ function settled(m: PlaybackMetrics): boolean {
   return maxOffsetMs(m) <= SETTLED_OFFSET_MS && m.health.status === 'healthy';
 }
 
-/** Boots the app with the WebKit emulation and starts the probe track.
- *  Returns performance.now() (page clock) at the Play click. */
-async function playWithEmulation(page: Page, options: EmulationOptions): Promise<number> {
+/** Boots the app with the WebKit emulation and selects the probe track,
+ *  leaving it ready to play (Play enabled, nothing started yet). */
+async function bootTrack(page: Page, options: EmulationOptions): Promise<void> {
   const wav = wavBytes(TRACK_DURATION_SECONDS);
   await page.addInitScript((opts) => {
     localStorage.setItem('shizzle_token', 'e2e-token');
+    if (opts.storedStartDelays) {
+      localStorage.setItem('shizzle_stem_start_delays', JSON.stringify(opts.storedStartDelays));
+    }
+
+    // Master bus capture (manifest-trim style): the engine creates the
+    // master GainNode first, then one per stem.
+    const gains: GainNode[] = [];
+    const audioProto = window.AudioContext?.prototype;
+    if (audioProto) {
+      const originalCreateGain = audioProto.createGain;
+      audioProto.createGain = function patchedCreateGain(this: AudioContext) {
+        const node = originalCreateGain.call(this) as GainNode;
+        gains.push(node);
+        return node;
+      };
+    }
 
     const proto = HTMLMediaElement.prototype;
     const currentTime = Object.getOwnPropertyDescriptor(proto, 'currentTime')!;
@@ -174,6 +205,7 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
     const rate = Object.getOwnPropertyDescriptor(proto, 'playbackRate')!;
     const nativePlay = proto.play;
     const nativePause = proto.pause;
+    const emulateStems = opts.emulateStems !== false;
 
     // Virtual stem clocks: pos (seconds) plus elapsed real time since startAt,
     // frozen before startAt. A pending seek reports its target, as the media
@@ -184,21 +216,37 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
       latencyMs: opts.latencyMs,
       rateChanges: 0,
       stemSeeks: 0,
+      playingStemSeeks: 0,
       videoSeekTimes: [] as number[],
+      driftRate: 1,
+      driftStemIndex: -1,
       stemOrder(): string[] {
         return stems.map((s) => s.name);
+      },
+      storedStartDelays(): number[] {
+        try {
+          const parsed: unknown = JSON.parse(localStorage.getItem('shizzle_stem_start_delays') ?? '[]');
+          return Array.isArray(parsed) ? (parsed as number[]) : [];
+        } catch {
+          return [];
+        }
+      },
+      masterGainValue(): number {
+        return gains.length ? gains[0].gain.value : -1;
       },
     };
     window.__e2eAudioMasterProbe = probe;
 
     function stemOf(el: HTMLMediaElement) {
-      return stems.find((s) => s.el === el) ?? null;
+      return emulateStems ? stems.find((s) => s.el === el) ?? null : null;
     }
     function stemVirtualNow(s: { el: HTMLAudioElement; pos: number; startAt: number | null }): number {
       if (pending.has(s.el)) return pending.get(s.el)!.target;
       if (s.el.paused || s.startAt === null) return s.pos;
       const now = performance.now();
-      return now < s.startAt ? s.pos : s.pos + (now - s.startAt) / 1000;
+      if (now < s.startAt) return s.pos;
+      const clockRate = stems.indexOf(s) === probe.driftStemIndex ? probe.driftRate : 1;
+      return s.pos + ((now - s.startAt) / 1000) * clockRate;
     }
     /** Lowest raw stem clock: the position the engine aligns the video to. */
     function latestStemTime(): number {
@@ -207,7 +255,7 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
 
     proto.play = function patchedPlay(this: HTMLMediaElement) {
       let s = stemOf(this);
-      if (this instanceof HTMLAudioElement && !s) {
+      if (emulateStems && this instanceof HTMLAudioElement && !s) {
         const file = decodeURIComponent(
           new URL(this.currentSrc || this.src || 'about:blank').pathname.split('/').pop() ?? '',
         );
@@ -255,6 +303,13 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
         }
         const s = stemOf(this);
         if (!s) {
+          if (this instanceof HTMLAudioElement) {
+            // Native stems (a browser whose stems start together): no
+            // emulation, only the counters.
+            if (value !== (currentTime.get!.call(this) as number)) probe.stemSeeks += 1;
+            currentTime.set!.call(this, value);
+            return;
+          }
           // The video master: optionally land its seeks late and behind.
           probe.videoSeekTimes.push(performance.now());
           const emulate = opts.videoLatencyMs > 0 || opts.videoLandBehindAimSec !== null || opts.videoLandBehindStemsSec !== null;
@@ -276,6 +331,7 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
           return;
         }
         probe.stemSeeks += 1;
+        if (!this.paused) probe.playingStemSeeks += 1;
         if (this.paused && !opts.latePausedSeeks) {
           // A seek on a paused stem lands at once.
           s.pos = value;
@@ -296,6 +352,9 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
       configurable: true,
       enumerable: seeking.enumerable,
       get(this: HTMLMediaElement) {
+        if (!emulateStems && !(opts.videoLatencyMs > 0)) {
+          return seeking.get!.call(this) as boolean;
+        }
         return pending.has(this) || (seeking.get!.call(this) as boolean);
       },
     });
@@ -388,6 +447,13 @@ async function playWithEmulation(page: Page, options: EmulationOptions): Promise
 
   const play = page.getByRole('button', { name: 'Play' });
   await expect(play).toBeEnabled({ timeout: 20_000 });
+}
+
+/** Boots the probe track (see bootTrack) and starts it.
+ *  Returns performance.now() (page clock) at the Play click. */
+async function playWithEmulation(page: Page, options: EmulationOptions): Promise<number> {
+  await bootTrack(page, options);
+  const play = page.getByRole('button', { name: 'Play' });
   await play.click();
   const playedAt = await page.evaluate(() => performance.now());
   await expect
@@ -595,7 +661,7 @@ test.describe('audio-master alignment (WebKit timing emulation)', () => {
     expect((await videoState(page)).ended).toBe(false);
   });
 
-  test('a user seek while playing and a pause/resume resettle; the pause/resume seeks no stem', async ({
+  test('a user seek while playing and a pause/resume resettle without seeking a playing stem', async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -624,7 +690,7 @@ test.describe('audio-master alignment (WebKit timing emulation)', () => {
       .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
       .toBe(true);
     const atPause = await metrics(page);
-    const seeksAtPause = await probeCount(page, 'stemSeeks');
+    const playingSeeksAtPause = await probeCount(page, 'playingStemSeeks');
 
     // The transport auto-hides its pointer events while playing and idle;
     // a mouse move over the player re-arms the 2.5 s visibility window.
@@ -637,19 +703,431 @@ test.describe('audio-master alignment (WebKit timing emulation)', () => {
     await page.getByRole('button', { name: 'Play' }).click();
     await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible({ timeout: 5_000 });
 
-    // Back in sync within 3 s of the resume, and the pause/resume itself
-    // never seeked a stem: the resume stagger is absorbed by delays plus a
-    // move of the video, exactly like the start stagger.
+    // Back in sync within 3 s of the resume. Paused re-basing seeks are the
+    // design now (they land in 21 ms for all six on the iPad); what must
+    // never happen is a seek of a *playing* stem, and the delays must not
+    // accumulate across the restart.
     await pollSettledRelativeTo(page, resumedAt, SETTLE_DEADLINE_MS);
     const m = await metrics(page);
     expect(spreadMs(m)).toBeLessThanOrEqual(10);
+    expect(await probeCount(page, 'playingStemSeeks')).toBe(playingSeeksAtPause);
     STEM_IDS.forEach((id) => {
-      expect(m.stems[id].hardSeeks, `${id} hardSeeks across pause/resume`).toBe(
-        atPause.stems[id].hardSeeks,
-      );
+      expect(Math.abs(m.stems[id].delayMs - atPause.stems[id].delayMs), `${id} delayMs drift`).toBeLessThanOrEqual(15);
     });
-    expect(await probeCount(page, 'stemSeeks')).toBe(seeksAtPause);
     expect(await probeCount(page, 'rateChanges')).toBe(0);
+    // The scrubber agrees with the video once playback is audible again.
+    const scrubber = await page.evaluate(() => ({
+      store: window.__shizzle.store.getState().currentTime,
+      video: document.querySelector('video')!.currentTime,
+    }));
+    expect(Math.abs(scrubber.store - scrubber.video)).toBeLessThanOrEqual(0.5);
+    expect((await videoState(page)).ended).toBe(false);
+  });
+});
+
+/** Master-bus gain and video position sampled together. */
+async function masterAndVideo(page: Page): Promise<{ gain: number; video: number }> {
+  return page.evaluate(() => ({
+    gain: window.__e2eAudioMasterProbe.masterGainValue(),
+    video: document.querySelector('video')!.currentTime,
+  }));
+}
+
+/** The level the master bus holds for a given store volume: the engine's
+ *  fixed -3 dB headroom under the user volume. */
+function levelFor(volume: number): number {
+  return volume * Math.pow(10, -3 / 20);
+}
+
+/** Wakes the auto-hiding transport and pauses; returns the paused video
+ *  position once the UI shows Play. */
+async function pauseAt(page: Page): Promise<number> {
+  await page.mouse.move(200, 200);
+  await page.mouse.move(600, 400);
+  await page.getByRole('button', { name: 'Pause' }).click();
+  await expect(page.getByRole('button', { name: 'Play' })).toBeVisible({ timeout: 5_000 });
+  return (await videoState(page)).time;
+}
+
+/** Wakes the transport and resumes; returns page-clock performance.now(). */
+async function resume(page: Page): Promise<number> {
+  await page.mouse.move(200, 200);
+  await page.mouse.move(600, 400);
+  const at = await page.evaluate(() => performance.now());
+  await page.getByRole('button', { name: 'Play' }).click();
+  await expect(page.getByRole('button', { name: 'Pause' })).toBeVisible({ timeout: 5_000 });
+  return at;
+}
+
+test.describe('start behaviour: remembered delays and the roll-in', () => {
+  test('a browser whose stems start together is left exactly as it is', async ({ page }) => {
+    test.setTimeout(120_000);
+    // No emulation: native stems, native seeks, as on desktop Chromium where
+    // the six stems start within ~6-12 ms of each other.
+    await playWithEmulation(page, {
+      startFreezeMs: 0,
+      startStaggerMs: 0,
+      latencyMs: 0,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+      emulateStems: false,
+    });
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+
+    const before = await masterAndVideo(page);
+    expect(before.gain).toBeGreaterThan(levelFor(1) * 0.9);
+    // Pause then resume continues from the paused position: no delay was
+    // applied, nothing stored, so there is nothing to roll in from. Pause
+    // far enough in that a roll-in would have been legal were the device
+    // misjudged as needing one.
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 15_000, intervals: [200] })
+      .toBeGreaterThan(4);
+    const pausedAt = await pauseAt(page);
+    await page.waitForTimeout(500);
+    const duringPause = await masterAndVideo(page);
+    expect(duringPause.gain).toBeGreaterThan(levelFor(1) * 0.9);
+    await resume(page);
+    await page.waitForTimeout(300);
+    const after = await masterAndVideo(page);
+    expect(after.video).toBeGreaterThanOrEqual(pausedAt - 0.1);
+    expect(after.gain).toBeGreaterThan(levelFor(1) * 0.9);
+    // Nothing was stored for the next visit and no delay is in use.
+    expect(await page.evaluate(() => window.__e2eAudioMasterProbe.storedStartDelays())).toEqual([]);
+    const m = await metrics(page);
+    STEM_IDS.forEach((id) => expect(m.stems[id].delayMs, `${id} delayMs`).toBe(0));
+    expect(await probeCount(page, 'rateChanges')).toBe(0);
+  });
+
+  test('a staggered first visit applies and stores the delays it needed', async ({ page }) => {
+    test.setTimeout(120_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    // Audible at once: the top of a song is never silenced.
+    await expect
+      .poll(async () => (await masterAndVideo(page)).gain, { timeout: 2000, intervals: [100] })
+      .toBeGreaterThan(levelFor(1) * 0.9);
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    const m = await metrics(page);
+    // The delays that lined the stems up are remembered, by stem order.
+    const stored = await page.evaluate(() => window.__e2eAudioMasterProbe.storedStartDelays());
+    expect(stored).toHaveLength(STEM_IDS.length);
+    STEM_IDS.forEach((id, i) => {
+      expect(stored[i], `stored delay ${id}`).toBeCloseTo(m.stems[id].delayMs / 1000, 2);
+    });
+    expect(Math.max(...stored)).toBeGreaterThanOrEqual(0.04);
+  });
+
+  test('a second visit has the remembered delays in place before the first sample', async ({ page }) => {
+    test.setTimeout(120_000);
+    const remembered = [0.08, 0.064, 0.048, 0.032, 0.016, 0];
+    await bootTrack(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+      storedStartDelays: remembered,
+    });
+
+    // Before Play: the delays are already on the DelayNodes, so the stems
+    // are in line from the first sample.
+    await expect
+      .poll(async () => Object.keys((await metrics(page)).stems).length, { timeout: 20_000 })
+      .toBe(STEM_IDS.length);
+    const loaded = await metrics(page);
+    STEM_IDS.forEach((id, i) => {
+      expect(loaded.stems[id].delayMs, `${id} delayMs before play`).toBeCloseTo(remembered[i] * 1000, 0);
+    });
+
+    // Top of song: audible at once despite the stagger.
+    const playedAt = await page.evaluate(() => performance.now());
+    await page.getByRole('button', { name: 'Play' }).click();
+    await expect
+      .poll(async () => (await masterAndVideo(page)).gain, { timeout: 2000, intervals: [100] })
+      .toBeGreaterThan(levelFor(1) * 0.9);
+    void playedAt;
+
+    // The alignment step only trims: the stagger is pre-compensated, so the
+    // delays stay within the deadband of what was remembered.
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    const m = await metrics(page);
+    STEM_IDS.forEach((id, i) => {
+      expect(
+        Math.abs(m.stems[id].delayMs - remembered[i] * 1000),
+        `${id} delayMs drift`,
+      ).toBeLessThanOrEqual(15);
+    });
+    expect(await probeCount(page, 'playingStemSeeks')).toBe(0);
+  });
+
+  test('an aligning device rolls in on resume: silent preroll, fade finishing at the paused position', async ({ page }) => {
+    test.setTimeout(120_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    // First visit: the stagger teaches the device its delays.
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 15_000, intervals: [200] })
+      .toBeGreaterThan(6);
+    const seeksBefore = await probeCount(page, 'playingStemSeeks');
+
+    const pausedAt = await pauseAt(page);
+    expect(pausedAt).toBeGreaterThanOrEqual(5.5);
+    await page.waitForTimeout(1000);
+    await resume(page);
+
+    // The video rolls in with the stems: it restarted about 2 s earlier...
+    await page.waitForTimeout(400);
+    const rolled = await masterAndVideo(page);
+    expect(rolled.video).toBeGreaterThan(pausedAt - 2.7);
+    expect(rolled.video).toBeLessThan(pausedAt - 1.2);
+    // ...the output is silent while it does...
+    let openedEarly = false;
+    for (let i = 0; i < 10; i += 1) {
+      const sample = await masterAndVideo(page);
+      if (sample.video >= pausedAt - 0.3) break;
+      if (sample.gain > 0.01) openedEarly = true;
+      await page.waitForTimeout(150);
+    }
+    expect(openedEarly).toBe(false);
+    // ...and it reaches the user's level by the paused position.
+    let atTarget: { gain: number; video: number } | null = null;
+    for (let i = 0; i < 50; i += 1) {
+      const sample = await masterAndVideo(page);
+      if (sample.video >= pausedAt) {
+        atTarget = sample;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(atTarget, 'output open by the paused position').not.toBeNull();
+    expect(atTarget!.gain).toBeGreaterThan(levelFor(1) * 0.85);
+
+    // Nothing after the requested position was lost and no playing stem was
+    // touched: in sync, healthy, and settled.
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 3000, intervals: [100] })
+      .toBe(true);
+    expect(await probeCount(page, 'playingStemSeeks')).toBe(seeksBefore);
+    expect(await probeCount(page, 'rateChanges')).toBe(0);
+  });
+
+  test('a user seek on an aligning device rolls in; a seek to the top does not silence', async ({ page }) => {
+    test.setTimeout(120_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 15_000, intervals: [200] })
+      .toBeGreaterThan(6);
+    const seeksBefore = await probeCount(page, 'playingStemSeeks');
+    const before = await videoState(page);
+    expect(before.time).toBeGreaterThanOrEqual(5);
+
+    // --- Seek forward through the real transport slider: rolls in ---
+    const seekSlider = page.locator('[aria-label="Seek"] [role="slider"]');
+    await seekSlider.focus();
+    const seekedAt = await page.evaluate(() => performance.now());
+    const target = Math.round(before.time) + 1;
+    await page.keyboard.press('ArrowRight');
+    // The video was rewound about 2 s for the preroll...
+    await page.waitForTimeout(600);
+    const rolled = await masterAndVideo(page);
+    expect(rolled.video).toBeGreaterThan(target - 2.7);
+    expect(rolled.video).toBeLessThan(target - 1.0);
+    expect(rolled.gain).toBeLessThan(0.01);
+    // ...and playback is back, open and settled, within the contract. The
+    // fade finishes at the requested position, so wait for the open level
+    // rather than for the sync poll (which can pass while still gated).
+    await pollSettledRelativeTo(page, seekedAt, SETTLE_DEADLINE_MS + 1000);
+    await expect
+      .poll(
+        async () => {
+          const sample = await masterAndVideo(page);
+          return sample.gain > levelFor(1) * 0.85 && sample.video >= target;
+        },
+        { timeout: 4000, intervals: [100] },
+      )
+      .toBe(true);
+    expect(await probeCount(page, 'playingStemSeeks')).toBe(seeksBefore);
+
+    // --- Seek to the top: nothing to roll in from, no silencing ---
+    const gainBefore = (await masterAndVideo(page)).gain;
+    await seekSlider.focus();
+    await page.keyboard.press('Home');
+    await page.waitForTimeout(1500);
+    const top = await masterAndVideo(page);
+    expect(top.gain).toBeGreaterThan(gainBefore * 0.8);
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 4000, intervals: [100] })
+      .toBe(true);
+    expect(await probeCount(page, 'rateChanges')).toBe(0);
+  });
+
+  test('if alignment cannot be reached the roll-in still opens by its timeout', async ({ page }) => {
+    test.setTimeout(120_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    // Make one stem's clock run 10% fast from here on: it pulls 50 ms ahead
+    // per stability window, past the 20 ms tolerance, so the alignment's
+    // real-time stability check can never pass.
+    await page.evaluate(() => {
+      window.__e2eAudioMasterProbe.driftStemIndex = 2;
+      window.__e2eAudioMasterProbe.driftRate = 1.1;
+    });
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 15_000, intervals: [200] })
+      .toBeGreaterThan(6);
+    const pausedAt = await pauseAt(page);
+    expect(pausedAt).toBeGreaterThanOrEqual(5.5);
+    await page.waitForTimeout(1000);
+    await resume(page);
+
+    // Past the point where an aligned roll-in would have opened (~2.3 s)
+    // the output is still silent...
+    await page.waitForTimeout(2500);
+    const stillGated = await masterAndVideo(page);
+    expect(stillGated.gain).toBeLessThan(0.01);
+    // ...and the failsafe opens it within the 3 s timeout.
+    await expect
+      .poll(async () => (await masterAndVideo(page)).gain, { timeout: 1500, intervals: [100] })
+      .toBeGreaterThan(levelFor(1) * 0.85);
+  });
+
+  test('a volume change while the roll-in is silent does not open it and is honoured after', async ({ page }) => {
+    test.setTimeout(120_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    await expect
+      .poll(async () => (await videoState(page)).time, { timeout: 15_000, intervals: [200] })
+      .toBeGreaterThan(6);
+    const pausedAt = await pauseAt(page);
+    expect(pausedAt).toBeGreaterThanOrEqual(5.5);
+    await page.waitForTimeout(1000);
+    await resume(page);
+    await page.waitForTimeout(600);
+
+    // Half volume while the output is held silent.
+    await page.evaluate(() => window.__shizzle.store.getState().setVolume(0.5));
+    await page.waitForTimeout(400);
+    expect((await masterAndVideo(page)).gain).toBeLessThan(0.01);
+
+    // The fade-in ramps to the new level, not the old one.
+    let atTarget: { gain: number; video: number } | null = null;
+    for (let i = 0; i < 50; i += 1) {
+      const sample = await masterAndVideo(page);
+      if (sample.video >= pausedAt) {
+        atTarget = sample;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+    expect(atTarget, 'output open by the paused position').not.toBeNull();
+    expect(atTarget!.gain).toBeGreaterThan(levelFor(0.5) * 0.8);
+    expect(atTarget!.gain).toBeLessThan(levelFor(0.5) * 1.2);
+  });
+
+  test('ten pause/resume cycles leave the delays where the first cycle put them', async ({ page }) => {
+    test.setTimeout(180_000);
+    await playWithEmulation(page, {
+      startFreezeMs: 300,
+      startStaggerMs: 16,
+      latencyMs: 150,
+      videoLatencyMs: 0,
+      videoLandBehindAimSec: null,
+      videoLandBehindStemsSec: null,
+    });
+
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 5000, intervals: [100] })
+      .toBe(true);
+    const seeksBefore = await probeCount(page, 'playingStemSeeks');
+
+    // First restart establishes the cycle's delay pattern.
+    await page.waitForTimeout(2500);
+    await pauseAt(page);
+    await page.waitForTimeout(400);
+    await resume(page);
+    await expect
+      .poll(async () => settled(await metrics(page)), { timeout: 4000, intervals: [100] })
+      .toBe(true);
+    const afterFirst = await metrics(page);
+    const firstDelays = STEM_IDS.map((id) => afterFirst.stems[id].delayMs);
+
+    for (let cycle = 0; cycle < 9; cycle += 1) {
+      await page.waitForTimeout(2600);
+      await pauseAt(page);
+      await page.waitForTimeout(400);
+      await resume(page);
+      await expect
+        .poll(async () => settled(await metrics(page)), { timeout: 4000, intervals: [100] })
+        .toBe(true);
+    }
+
+    const afterTen = await metrics(page);
+    STEM_IDS.forEach((id, i) => {
+      expect(
+        Math.abs(afterTen.stems[id].delayMs - firstDelays[i]),
+        `${id} delayMs after ten cycles`,
+      ).toBeLessThanOrEqual(10);
+    });
+    expect(await probeCount(page, 'playingStemSeeks')).toBe(seeksBefore);
     expect((await videoState(page)).ended).toBe(false);
   });
 });
