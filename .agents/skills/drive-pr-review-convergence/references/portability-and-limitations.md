@@ -7,7 +7,7 @@
 | Public GitHub repository | Yes | Deterministic `setup.sh` and validation commands |
 | Same-repository PR branch | Yes | Host account must be allowed to push |
 | Fork PR | Read/test yes | Default push rejects fork heads; use contributor workflow |
-| Private repository | No | Reviewed adapter from `private-repositories.md` |
+| Private repository | Host-bundle adapter | Explicit `--source-bundle` and `--source-repo-root`; see `private-repositories.md` |
 | Linux CPU build/test | Yes | Add locked project dependencies in setup |
 | Standard Node/Python/Rust/Go tools | Usually | Add pinned toolchain commands or custom template |
 | Docker Compose rendering | Often | Docker daemon/nested containers are not guaranteed |

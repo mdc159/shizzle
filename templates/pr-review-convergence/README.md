@@ -1,9 +1,9 @@
 # Self-Contained PR Review Convergence Package
 
-This directory is the renderer's source template when it lives under
-`templates/pr-review-convergence/`. Do not run bootstrap there: first run
-`ops/render_pr_review_goal.py`. In the renderer's output directory this same
-README accompanies the generated `tools/` directory and
+This directory is a source template under `templates/pr-review-convergence/`
+or the installed skill's `assets/pr-review-convergence/`. Do not run bootstrap
+there: first run the installed skill's `scripts/render_pr_review_goal.py`.
+In the renderer's output directory this same README accompanies `tools/` and
 `package-manifest.json`, and the commands below are runnable.
 
 This rendered directory is the complete host-side package for driving one
@@ -67,20 +67,21 @@ that can actually execute independently.
 
 ## Render a package for another PR
 
-From the repository that owns `ops/render_pr_review_goal.py`:
+To render another PR, return to the installed skill directory
+(`.agents/skills/drive-pr-review-convergence/` in this repository):
 
 ```powershell
-uv run ops/render_pr_review_goal.py `
+uv run scripts/render_pr_review_goal.py `
   --pr-url https://github.com/OWNER/REPO/pull/123 `
   --repo OWNER/REPO --base-branch main `
   --required-check test --required-check lint `
-  --reviewer greptile --reviewer coderabbit --reviewer cubic `
-  --primary-reviewer greptile --minimum-primary-score 4 `
+  --reviewer coderabbit --reviewer cubic `
+  --primary-reviewer independent --minimum-primary-score 0 `
   --setup-command "uv sync --frozen" `
   --validation "uv run pytest" --validation "uv run ruff check ." `
   --output .pr-review/pr-123
 ```
 
 The renderer refuses a non-empty output directory, validates the PR/repository
-pair, rejects missing checks/reviewers/setup/validation, resolves every
+pair, rejects missing checks/setup/validation, resolves every
 placeholder, copies the runtime tools, and writes the integrity manifest.

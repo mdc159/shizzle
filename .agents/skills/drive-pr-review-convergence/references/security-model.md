@@ -16,7 +16,7 @@ Required host variable:
 
 Optional host-only variables:
 
-- `GREPTILE_API_KEY`: Greptile API/MCP usage, not GitHub App installation.
+- Greptile is retired; no Greptile credential is required or requested.
 - `GH_TOKEN` or `GITHUB_TOKEN`: if used by `gh`, never forwarded to E2B.
 
 Forbidden in rendered packages and sandboxes:
@@ -73,7 +73,7 @@ force-push or automatic merge.
 ## Pre-commit audit
 
 ```powershell
-rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=" .
+rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=" . # Include retired Greptile secrets in the leak scan.
 git check-ignore .sandbox/e2b/probe
 ```
 

@@ -101,7 +101,7 @@ refspec.
 ## 7. Review convergence and cleanup
 
 Follow `plan.md` and `review-policy.json`: batch findings, independently
-reproduce them, wait for required CI, trigger the primary reviewer only on the
+reproduce them, wait for required CI, complete the independent primary review on the
 final candidate, and perform two unchanged quiet-window observations. Advisory
 reviewer quota never blocks the loop. Stop at the repair-batch limit or before
 merge.

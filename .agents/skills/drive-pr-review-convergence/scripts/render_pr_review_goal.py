@@ -45,9 +45,14 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit("--pr-url must end in a numeric pull-request number")
     if not args.required_check:
         raise SystemExit("provide at least one --required-check")
-    if not args.reviewer:
-        raise SystemExit("provide at least one --reviewer")
-    if args.primary_reviewer not in args.reviewer:
+    if any(
+        "greptile" in reviewer.casefold()  # Retired reviewer: reject active selection.
+        for reviewer in [args.primary_reviewer, *args.reviewer]
+    ):
+        raise SystemExit(
+            "Greptile is retired; use independent review and available advisory reviewers"
+        )
+    if args.primary_reviewer != "independent" and args.primary_reviewer not in args.reviewer:
         raise SystemExit("--primary-reviewer must also be supplied as --reviewer")
     if not 0 <= args.minimum_primary_score <= 5:
         raise SystemExit("--minimum-primary-score must be between 0 and 5")
@@ -167,8 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-branch", required=True)
     parser.add_argument("--required-check", action="append", default=[])
     parser.add_argument("--reviewer", action="append", default=[])
-    parser.add_argument("--primary-reviewer", default="greptile")
-    parser.add_argument("--minimum-primary-score", type=int, default=4)
+    parser.add_argument("--primary-reviewer", default="independent")
+    parser.add_argument("--minimum-primary-score", type=int, default=0)
     parser.add_argument("--validation", action="append", default=[])
     parser.add_argument("--setup-command", action="append", default=[])
     parser.add_argument("--max-iterations", type=int, default=2)

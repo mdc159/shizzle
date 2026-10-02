@@ -4,8 +4,8 @@ Use only after releasing the fix for the recorded publication failure. This
 operation retains the original logical job, provider job and reservation. It
 does not submit or cancel a RunPod job and does not retry separation.
 
-Run inside the deployed API container, where settings, job data and the SDK
-credential provider are already available:
+Run inside the deployed API container, where settings, job data and the
+static AWS credentials from the compose `.env` are already available:
 
 ```sh
 python -m shizzle_server.orchestrator.recover_publication \

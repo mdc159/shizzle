@@ -1,6 +1,11 @@
 # Goal: reliable cloud playback for the Shizzle library
 
-Status: complete.
+Status: complete (2026-08-05 acceptance record).
+
+The result and next-work statements below describe that dated run, not current
+production state. See [HANDOFF](../../docs/HANDOFF.md) for current work and
+[playback troubleshooting](../../docs/playback-troubleshooting.md) for the
+subsequent audio-master sync redesign.
 
 ## Goal
 
@@ -43,7 +48,7 @@ the 100% cloud-hosted Shizzle application.
   only after the candidate passes.
 
 The complete commands, measurements, tolerances, and rationale are retained in
-`encoding-profile.md` and `evidence.md`.
+[`shizzle-browser-v1`](../../interfaces/shizzle-browser-v1/spec.md) and `evidence.md`.
 
 ## Forward use
 

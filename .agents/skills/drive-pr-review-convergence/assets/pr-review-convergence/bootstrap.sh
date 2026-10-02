@@ -15,11 +15,6 @@ test -n "${e2b_api_key//[[:space:]]/}" || {
 }
 
 printf 'E2B_API_KEY: present (value not displayed)\n'
-if test -n "${GREPTILE_API_KEY:-}"; then
-  printf 'GREPTILE_API_KEY: present\n'
-else
-  printf 'GREPTILE_API_KEY: not set; optional\n'
-fi
 github_login=$(gh api user --jq .login) || {
   printf 'GitHub CLI authentication failed. Run gh auth login.\n' >&2
   exit 1

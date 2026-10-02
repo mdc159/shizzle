@@ -15,7 +15,7 @@ Known deviations and bugs are tracked in [Review](REVIEW.md).
 | Delivery policy | `library/src/shizzle_server/publish/` | Verifies lossless bytes, derives AAC/video, measures common attenuation, audits, stages and promotes |
 | Media storage | Private S3 | Sources, per-dispatch packages, staged and published generations |
 | Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
-| Browser | `player/src/` | Video-clock playback, six-stem mixing, health sensing, remote and dashboard pages |
+| Browser | `player/src/` | Audio-master-aligned playback, six-stem mixing, health sensing, remote and dashboard pages |
 
 The [README system diagram](../README.md#system-diagram) maps these boundaries.
 `ingest/` is documentation, not a deployed process. The app origin is Caddy on
@@ -202,15 +202,16 @@ sequenceDiagram
     C->>S: Fetch video on cache miss
     Note over B: Create revocable video Blob
     B->>B: User Play starts video and six stem elements
-    Note over B: Measure each stem against video clock, correct drift and recover stalls
+    Note over B: Align stems with per-stem delays, move video to their audible position, recover stalls
     B->>A: Credential-free playback telemetry
 ```
 
 Six independent decoders feed per-stem gains, a master gain with fixed -3 dB
 headroom, a DynamicsCompressor, and post-compressor measurement. Sharing one
 AudioContext does not make their clocks identical. The engine measures each
-stem separately. The video is the master timeline; AAC remains streamed, while
-only one video Blob is retained and revoked on track change.
+stem separately. The stems are the audible master timeline (audio-master
+alignment); AAC remains streamed, while only one video Blob is retained and
+revoked on track change.
 
 `window.__shizzlePlaybackHealth.getMetrics()` exposes read-only health,
 per-stem skew/PCM, output PCM, limiter reduction and bounded incidents. The

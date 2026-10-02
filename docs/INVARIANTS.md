@@ -2,7 +2,7 @@
 
 This file is the single source of review truth for the shizzle repo. Consumers:
 humans doing code review, the AI reviewers (CodeRabbit ingests this file via its
-knowledge base; Greptile and cubic receive mirrored rules — see
+knowledge base; cubic receives mirrored rules — see
 [docs/AUTOMATION.md](AUTOMATION.md)), and fleet builder agents that must not
 regress these properties while refactoring.
 

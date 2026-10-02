@@ -12,25 +12,28 @@ tracks at https://shizzle.systems. Current state and next actions:
 
 ## Ground rules
 
-1. **Invariants are law.** [docs/INVARIANTS.md](docs/INVARIANTS.md) holds 51
+1. **Invariants are law.** [docs/INVARIANTS.md](docs/INVARIANTS.md) holds 52
    numbered contracts (A1–F6). A PR that changes an invariant must update
    that file and its guarding test in the same PR. The AI reviewers cite
    these IDs; so should you.
 2. **Master is protected.** Repository policy is that all work lands by PR
    through four required checks (`library`, `stemsplit`, `player`,
    `postgres-contract`). The current branch rule enforces those checks for
-   administrators but does not itself require pull requests. Greptile,
-   CodeRabbit, and cubic are advisory to branch protection; the convergence
-   workflow below still requires a current-head Greptile review.
+   administrators but does not itself require pull requests. CodeRabbit and
+   cubic are advisory to branch protection. Greptile is retired and must not
+   be triggered, awaited, or used as a readiness blocker.
 3. **Green badges are not readiness.** PR readiness is judged by the
    `drive-pr-review-convergence` workflow — installed at
    `.agents/skills/drive-pr-review-convergence/`, launched via the
    repo-local goal `goals/pr-review-convergence-loop/goal.md`. It builds a
    finding ledger from all reviewer output, independently reviews the diff,
-   and gates on Greptile 5/5 with a quiet window. It stops before merge.
-4. **Merging master deploys production.** Every master merge builds a
-   digest-pinned api image and queues a transactional VPS deploy behind a
-   human-approved environment gate. Understand
+   and gates on required CI, independently validated findings, and a quiet
+   window. It stops before merge.
+4. **Merging master deploys production.** Every master merge that touches
+   anything outside `docs/`, `evidence/`, `goals/`, `.agents/` or `*.md`
+   builds a digest-pinned api image and queues a transactional VPS deploy
+   behind a human-approved environment gate; docs-only merges skip the
+   deploy. Understand
    [docs/AUTOMATION.md](docs/AUTOMATION.md) before touching
    `.github/workflows/` or `deploy/` — it documents the secrets, the
    failure modes, the rollback paths, and the traps already paid for.

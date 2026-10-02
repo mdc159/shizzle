@@ -1,5 +1,9 @@
 # Accepted playback facts
 
+Historical acceptance summary: 2026-08-05, as recorded in [evidence.md](evidence.md).
+Inventory and next-work statements below are not current production status;
+see [HANDOFF](../../docs/HANDOFF.md).
+
 ## Finished scope
 
 - The delivery pipeline begins with `lossless-stem-v1`: six stereo 44.1 kHz

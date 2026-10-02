@@ -1,5 +1,9 @@
 # Spike 0.4 — Blinded stem-codec listening test
 
+Historical procedure for the 2026-08-02 [spike](../RESULTS-0.3-0.4.md), not an
+open codec-selection gate. New browser stems now use AAC-LC 256 kb/s at 44.1 kHz;
+see [the delivery contract](../../../interfaces/shizzle-browser-v1/spec.md).
+
 **What this decides:** which per-stem delivery codec (AAC 256k, AAC 320k, or
 lossless ALAC) the pipeline ships. The stems were encoded per codec, decoded,
 and summed at unity — exactly what the player does — so any artifact you hear

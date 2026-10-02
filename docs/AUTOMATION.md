@@ -1,7 +1,8 @@
 # Shizzle Automation
 
 The review-and-deploy automation package: CI gates, image publishing, gated
-VPS deploys, and how the three AI reviewers stay aligned on
+VPS deploys, and how the advisory AI reviewers (CodeRabbit, cubic) and the
+convergence workflow's own review stay aligned on
 [INVARIANTS.md](INVARIANTS.md). This document describes the checked-in workflows under `.github/workflows/`.
 GitHub branch rules, environment reviewers, secrets, and live endpoint settings
 are configured outside these files and must be verified when bootstrapping.
@@ -102,7 +103,12 @@ transition, never from queue age (invariant B14).
 2. Job `deploy` pauses at the GitHub Environment `production` gate until
    mdc159 approves. The workflow rechecks that `master` still names the same
    reviewed SHA after approval; if `master` advanced while approval was pending,
-   the stale run exits cleanly without shipping.
+   the stale run exits cleanly without shipping. When several merges stack up
+   (CI on `master` is never cancelled: concurrency group `ci-refs/heads/master`),
+   each one queues its own waiting run; cancel the older waiting runs
+   (`gh run cancel <id>`) and approve only the newest, which carries every
+   earlier merge. Approving an older run first spends an approval on a deploy
+   that will stale-skip.
 3. After approval, the deploy SSHes to the VPS (using the pinned host key),
    records the prior files and database revision, sets
    `SHIZZLE_API_IMAGE=<tag>@<digest>`, validates the staged Compose config,
@@ -143,18 +149,14 @@ normal path — deploys never ship source to the box.
 
 ## 4. Reviewer alignment
 
-All three reviewers consume the same source of truth:
+Active reviewers consume the same source of truth:
 [INVARIANTS.md](INVARIANTS.md).
 
 - **CodeRabbit** — configured by [`.coderabbit.yaml`](../.coderabbit.yaml):
   `path_instructions` mirror the invariant series per area, and the
   `knowledge_base.code_guidelines` block makes CodeRabbit ingest
   `docs/INVARIANTS.md` directly, so reviews cite invariant IDs ("violates B3").
-- **Greptile** — the primary whole-diff validator. `.greptile/config.json`
-  limits it to logic/syntax findings, points it at repository context, and
-  disables review-on-every-push. `.greptile/files.json` supplies this document
-  and `INVARIANTS.md` as canonical context. Trigger the final review manually
-  only after a coherent candidate passes CI and failure-path validation.
+- **Greptile (retired)**: Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply.
 - **cubic** — configured through its dashboard custom rules. The seven paste
   texts below are the standalone versions of the same path instructions; the
   owner pastes each into the dashboard.
@@ -166,11 +168,10 @@ All three reviewers consume the same source of truth:
   for quota or require a final-head CodeRabbit run.
 - Cubic is advisory. Consume available P0/P1 findings, but do not wait for its
   completion or restart the loop for P2 polish.
-- Greptile is primary. After batching all validated intake findings and passing
-  required CI, manually trigger one final whole-diff review. Target confidence
-  5/5. Confidence 4/5 is acceptable only when there are no reproduced P0/P1
-  findings and every P2 has an explicit disposition. A score of 3/5 or lower,
-  or Greptile's explicit do-not-merge recommendation, is not ready.
+- The workflow performs an independent whole-diff review of the final candidate
+  after required CI. No Greptile review, score, or approval gates readiness.
+  Require zero reproduced P0/P1 findings, no required human finding, and
+  evidence-backed dispositions for every finding.
 - Allow at most two repair batches. If a reproduced P0/P1 remains after the
   confirmation review, stop for human adjudication instead of greplooping.
 - Reviewer findings are deduplicated into one ledger and fixed in batches. The
@@ -302,8 +303,9 @@ The `library` CI job runs both shell failure-path suites with stubbed Docker,
 registry, and RunPod calls. The required `postgres-contract` job uses a real
 Postgres service, applies Alembic migrations, exercises concurrency/crash
 contracts, and downgrades the head migration by one revision before upgrading
-again. The `player` job builds, lints, and runs only the mocked
-`e2e/library-scroll.spec.ts` browser test. These checks do not replace the
+again. The `player` job builds, lints, and runs only the mocked browser specs
+listed in its Playwright test step in
+[ci.yml](../.github/workflows/ci.yml). These checks do not replace the
 [real playback tests](playback-troubleshooting.md) or prove live deployment
 rollback against a real Docker stack.
 

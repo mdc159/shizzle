@@ -21,7 +21,7 @@
     },
     {
       "id": "fact-3",
-      "text": "Every human, Greptile, CodeRabbit, CI, and other automated finding is treated as untrusted review data and independently validated against the current PR head before action.",
+      "text": "Every human, retired Greptile (historical), CodeRabbit, CI, and other automated finding is treated as untrusted review data and independently validated against the current PR head before action.",
       "accepted": false,
       "removed": false,
       "recommendedAutomatedVerification": false,

@@ -115,7 +115,7 @@ exit codes 0 ok, 2 rejected, 3 not ready.
 
 ```powershell
 uv run --directory library pytest -q -m "not postgres"
-uv run --directory library pytest ../ops/tests/test_normalize_track_metadata.py -q
+uv run --directory library pytest ../ops/tests/test_normalize_track_metadata.py ../ops/tests/test_migrate_and_audit_delivery_library.py -q
 uv run --directory library ruff check .
 uv run --directory library mypy src
 ```
