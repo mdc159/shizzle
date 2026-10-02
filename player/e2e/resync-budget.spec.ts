@@ -48,7 +48,7 @@ declare global {
   interface Window {
     __shizzlePlaybackHealth: { getMetrics(): PlaybackMetrics };
     __e2eSeekProbe: {
-      /** Seeks issued on a stem whose previous seek had not landed yet. */
+      /** Seeks issued on a playing stem whose previous seek had not landed yet. */
       stackedSeeks: number;
       /** performance.now() of each late seek issued on the first stem. */
       correctionTimes: number[];
@@ -147,15 +147,19 @@ async function playWithLateSeeks(page: Page, options: SeekProbeOptions): Promise
         return pending.get(this)?.target ?? currentTime.get!.call(this);
       },
       set(this: HTMLMediaElement, value: number) {
-        // Only seeks on a playing stem land late; the video master and the
-        // paused startup alignment keep the browser's own behavior.
+        // A new seek supersedes one that has not landed.
+        const prior = pending.get(this);
+        if (prior) {
+          window.clearTimeout(prior.timer);
+          pending.delete(this);
+        }
+        // Only seeks on a playing stem land late; the video master and seeks
+        // on a paused stem keep the browser's own behavior.
         if (!(this instanceof HTMLAudioElement) || this.paused) {
           currentTime.set!.call(this, value);
           return;
         }
-        const prior = pending.get(this);
         if (prior || (seeking.get!.call(this) as boolean)) probe.stackedSeeks += 1;
-        if (prior) window.clearTimeout(prior.timer);
         if (this === stems[0]) probe.correctionTimes.push(performance.now());
         const timer = window.setTimeout(() => {
           pending.delete(this);
@@ -308,32 +312,65 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(after.health.status).toBe('healthy');
   });
 
-  test('a seek that takes longer than the stall threshold to land is not treated as a stalled stem', async ({
+  test('a seek that takes longer than the stall threshold to land is waited out and compensated', async ({
     page,
   }) => {
     test.setTimeout(120_000);
     // Longer than the 1000 ms stem-stall threshold, shorter than the 1500 ms
-    // landing timeout: while it lands, the stem's clock sits at the target.
+    // landing window: while it lands, the stem's clock sits at the target.
     await playWithLateSeeks(page, { latencyMs: 1200, landBehindVideoSec: null });
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
-    const observeMs = 6000;
-    const start = await videoState(page);
-    await page.waitForTimeout(observeMs);
+    // One correction to measure the 1.2 s landing, one aimed ahead by it:
+    // about 3.5 s. A lead capped below the landing time never gets here.
+    await expect
+      .poll(
+        async () => {
+          const m = await metrics(page);
+          return maxOffsetMs(m) <= SETTLED_OFFSET_MS && m.health.status === 'healthy';
+        },
+        { timeout: 10_000, intervals: [200] },
+      )
+      .toBe(true);
     const after = await metrics(page);
-    const end = await videoState(page);
 
-    expect(end.ended).toBe(false);
-    expect(end.time - start.time).toBeGreaterThan((observeMs / 1000) * 0.8);
-    // At least one correction was issued and had to land, so the stall
-    // detector was exercised.
-    expect(maxHardSeeks(after)).toBeGreaterThanOrEqual(1);
+    expect((await videoState(page)).ended).toBe(false);
+    expect(maxHardSeeks(after)).toBeGreaterThanOrEqual(2);
+    expect(maxHardSeeks(after)).toBeLessThanOrEqual(5);
     // Recovering from a landing seek would hard-seek on top of it and reset
-    // the budget; before this was exempted the engine recovered about once a
-    // second here.
+    // the budget; before landing seeks were excused from stall detection the
+    // engine recovered about once a second here.
     expect(after.health.recoveryAttempts).toBe(0);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
-    // Landing (1.2 s) plus settle (0.4 s) allows at most four in the window.
+  });
+
+  test('a seek still pending after its landing window is re-seeked with the ensemble paused', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    // Longer than the 1500 ms landing window plus the 1000 ms stall threshold:
+    // no while-playing correction may be issued on top of it, and the stall
+    // recovery must not restart it while playing either.
+    await playWithLateSeeks(page, { latencyMs: 3500, landBehindVideoSec: null });
+    expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
+
+    await expect
+      .poll(
+        async () => {
+          const m = await metrics(page);
+          return m.health.recoveryAttempts >= 1 && maxOffsetMs(m) <= SETTLED_OFFSET_MS && m.health.status === 'healthy';
+        },
+        { timeout: 12_000, intervals: [200] },
+      )
+      .toBe(true);
+    // And it does not come back: no further recoveries or seeks follow.
+    await page.waitForTimeout(3000);
+    const after = await metrics(page);
+
+    expect((await videoState(page)).ended).toBe(false);
+    expect(after.health.status).toBe('healthy');
+    expect(after.health.recoveryAttempts).toBeLessThanOrEqual(2);
+    expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
     expect(maxHardSeeks(after)).toBeLessThanOrEqual(4);
   });
 
@@ -359,10 +396,11 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect((await videoState(page)).ended).toBe(false);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
     // Spacing after the nth correction is at least 400 ms * 2^(n-1), and a
-    // correction is issued on the first watchdog tick that allows it. The
-    // first interval is bounded below by landing plus settle (550 ms).
+    // correction is issued soon after the budget allows it (the upper bound
+    // is loose: it only shows the engine does not stop correcting). The first
+    // interval is bounded below by landing plus settle (550 ms).
     const minimumMs = [400, 800, 1600, 3200];
-    const slackMs = 700;
+    const slackMs = 1500;
     intervals.forEach((interval, index) => {
       expect(interval, `interval ${index + 1}`).toBeGreaterThanOrEqual(minimumMs[index] - 20);
       expect(interval, `interval ${index + 1}`).toBeLessThanOrEqual(Math.max(minimumMs[index], 550) + slackMs);

@@ -72,18 +72,21 @@ const RECOVERY_COOLDOWN_MS = 1000;
 // and behind the master by however long it took. Re-judging sync before that
 // seek had landed re-seeked all six stems about ten times a second for whole
 // sessions (production playback telemetry, 2026-10-01). Sync is therefore not
-// judged while any stem seek is landing, nor until a while-playing correction
-// has settled; corrections back off while sync does not hold, and each aims
-// ahead of the master by what the previous one was measured to lose while
-// landing. Seeks issued by recover() get the landing wait only.
+// judged, and no correction issued, while any stem is mid-seek, nor until a
+// while-playing correction has settled; corrections back off while sync does
+// not hold, and each aims ahead of the master by what the previous one was
+// measured to lose while landing. Seeks issued by recover() get the mid-seek
+// wait only.
 const RESYNC_SETTLE_MS = 400;
 const RESYNC_BACKOFF_MAX_MS = 5000;
 /** Sync observed for this long after a correction means it held; losing sync
  *  after that is a new event, corrected at once. */
 const RESYNC_HOLD_MS = 2000;
-/** A stem that still reports `seeking` after this long is judged as it stands. */
+/** How long a mid-seek stem is excused from stall detection. Past this it is
+ *  a stalled stem, and recover() re-seeks the paused ensemble. */
 const SEEK_LANDING_TIMEOUT_MS = 1500;
-const MAX_SEEK_LEAD_SEC = 0.5;
+/** A lead can make up for any landing the stall detector will wait out. */
+const MAX_SEEK_LEAD_SEC = SEEK_LANDING_TIMEOUT_MS / 1000;
 const INCIDENT_LIMIT = 100;
 
 interface StemChannel {
@@ -578,9 +581,9 @@ class MediaElementEngine implements PlaybackEngine {
   }
 
   /**
-   * True while this stem's seek is still landing. Until `seeked`, a media
-   * element reports the seek target as currentTime, so its clock neither
-   * advances nor says anything about what is audible.
+   * True while this stem's seek is mid-flight and still inside its landing
+   * window. Until `seeked`, a media element reports the seek target as
+   * currentTime, so a frozen clock is expected and is not a stall.
    */
   private seekLanding(c: StemChannel, now: number): boolean {
     if (!c.el.seeking) {
@@ -591,12 +594,16 @@ class MediaElementEngine implements PlaybackEngine {
     return now - c.seekingSinceMs < SEEK_LANDING_TIMEOUT_MS;
   }
 
-  private stemSeekLanding(now: number): boolean {
-    let landing = false;
+  /**
+   * True while any stem is mid-seek. Its reported offset from the master says
+   * nothing about what is audible, and seeking it again would only restart
+   * the seek. A seek that never lands is the stall detector's to handle.
+   */
+  private anyStemSeeking(): boolean {
     for (const c of this.channels.values()) {
-      if (this.seekLanding(c, now)) landing = true;
+      if (c.el.seeking) return true;
     }
-    return landing;
+    return false;
   }
 
   /**
@@ -605,7 +612,7 @@ class MediaElementEngine implements PlaybackEngine {
    * that correction left the ensemble: the lead it was aimed with minus what
    * is left over is what its seeks lost while landing, and the next
    * correction aims ahead by that. The median keeps one straying stem from
-   * steering all six. Call only when no stem seek is landing.
+   * steering all six. Call only when no stem is mid-seek.
    */
   private resyncSettled(video: HTMLVideoElement, now: number): boolean {
     const flight = this.resyncInFlight;
@@ -626,7 +633,7 @@ class MediaElementEngine implements PlaybackEngine {
   /**
    * Hard-correct the whole playing ensemble to the video master, within the
    * resync budget. Callers have already seen the stems out of sync with no
-   * seek landing and the previous correction settled. Returns false when the
+   * stem mid-seek and the previous correction settled. Returns false when the
    * budget does not allow another correction yet.
    */
   private resyncPlayingStems(video: HTMLVideoElement, now: number): boolean {
@@ -724,7 +731,7 @@ class MediaElementEngine implements PlaybackEngine {
     this.stalledTicks = 0;
 
     const now = performance.now();
-    if (this.stemSeekLanding(now) || !this.resyncSettled(video, now)) return;
+    if (this.anyStemSeeking() || !this.resyncSettled(video, now)) return;
 
     const channels = Array.from(this.channels.values());
     const times = channels.map((c) => c.el.currentTime);
@@ -864,7 +871,7 @@ class MediaElementEngine implements PlaybackEngine {
       return;
     }
     if (video && videoAdvanced) {
-      if (this.stemSeekLanding(now) || !this.resyncSettled(video, now)) return;
+      if (this.anyStemSeeking() || !this.resyncSettled(video, now)) return;
       const stemTimes = Array.from(this.channels.values()).map((c) => c.el.currentTime);
       const interStemSkew = Math.max(...stemTimes) - Math.min(...stemTimes);
       const maxVideoOffset = Math.max(...stemTimes.map((time) => Math.abs(time - video.currentTime)));
@@ -940,7 +947,15 @@ class MediaElementEngine implements PlaybackEngine {
     this.stopSyncLoop();
     const version = ++this.commandVersion;
     try {
-      const coordinatedSeek = reason === 'video-buffering' && this.video && this.lastHealthyAtMs !== null;
+      // A stem still mid-seek past its landing window cannot be corrected
+      // while playing: another seek would restart it and it would land late
+      // again. Hold the whole ensemble and re-seek it paused, as for a
+      // buffering video; a stem that cannot become ready fails the recovery.
+      const stemMidSeek =
+        reason === 'stem-clock-stalled' && Array.from(this.channels.values()).some((c) => c.el.seeking);
+      const coordinatedSeek = Boolean(
+        this.video && ((reason === 'video-buffering' && this.lastHealthyAtMs !== null) || stemMidSeek),
+      );
       const target = coordinatedSeek
         ? this.video!.currentTime
         : this.pendingSeekTarget ?? this.video?.currentTime ?? this.averageCurrentTime();
