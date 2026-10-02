@@ -44,7 +44,7 @@ prove a deployment has those prerequisites.
   activation, playback sessions/events, and orchestrator heartbeats.
 - `src/shizzle_server/orchestrator/` — leases, stage transitions, retry/park
   behavior, RunPod polling/reconciliation, and cloud publication integration.
-- `src/shizzle_server/publish/` — lossless intake, delivery policy, media/audio
+- `src/shizzle_server/publish/` — lossless intake, drop-box import, delivery policy, media/audio
   audits, immutable S3 promotion, and generation migration tooling.
 - `alembic/` — Postgres schema migrations. The current linear chain ends at
   `0005_job_artist`; production migrations belong to the deploy transaction.
@@ -93,6 +93,23 @@ transaction migrates Postgres before starting the release. The orchestrator
 also never migrates production. `/api/health` reports database connectivity
 and recent orchestrator heartbeat; it does not certify RunPod capacity,
 delivery configuration, or successful end-to-end ingestion.
+
+## Ingesting a dropped package
+
+A producer with an already-finished `shizzle-browser-v1` package drops it
+under `imports/{source_ref}/` (client contract:
+[contributing completed media](../docs/contributing-completed-media.md)).
+Ingest on the VPS — the api image has ffmpeg/ffprobe and the same `.env` as
+the orchestrator:
+
+```bash
+cd /opt/shizzle/prod && docker compose -f compose.prod.yml exec api python -m shizzle_server.publish.browser_import --source-ref <ref>
+```
+
+The ingest validates the drop with the existing publisher/audit code,
+publishes immutably, and registers the track (invariant C8) — no
+re-separation, source download, or re-encode. `--dry-run` validates only;
+exit codes 0 ok, 2 rejected, 3 not ready.
 
 ## Validation and retained testing
 

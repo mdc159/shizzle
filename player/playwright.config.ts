@@ -9,6 +9,8 @@ export default defineConfig({
   use: {
     baseURL: productionBaseUrl || 'http://localhost:5173',
     headless: process.env.SHIZZLE_E2E_HEADLESS === '1',
+    // Isolated VM twins (deploy/vps/vm-test) serve a self-signed certificate.
+    ignoreHTTPSErrors: process.env.SHIZZLE_E2E_IGNORE_HTTPS_ERRORS === '1',
     video: 'off',
     launchOptions: {
       args: [

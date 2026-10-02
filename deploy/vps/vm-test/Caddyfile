@@ -11,6 +11,14 @@
 	handle /api/* {
 		reverse_proxy api:8001
 	}
+	# Same-origin media path. Production forwards /cdn to CloudFront; the twin
+	# serves it from the in-VM MinIO bucket instead. handle_path strips the
+	# prefix at match time (Caddy runs `rewrite` before `uri`, so `handle` +
+	# `uri strip_prefix` forwards the wrong key).
+	handle_path /cdn/* {
+		rewrite * /karaoke-pimpshizzle{uri}
+		reverse_proxy minio:9000
+	}
 	handle /ws/* {
 		reverse_proxy api:8001
 	}

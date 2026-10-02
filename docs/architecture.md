@@ -82,6 +82,43 @@ also start before submission confirmation reaches Postgres. Completion is detect
 S3 reconciliation, not an inbound callback. The receipt can recover an accepted
 job whose submission response or database confirmation was lost.
 
+## Drop-box import
+
+A producer that has already finished a complete `shizzle-browser-v1`
+package (six AAC stems, silent video, v3 manifest — for example the Mac
+pipeline) drops it under `imports/{source_ref}/` and the VPS ingests it with
+no re-separation, no source download and no re-encode. Client contract:
+[contributing completed media](contributing-completed-media.md).
+
+```mermaid
+sequenceDiagram
+    participant M as Producer (Mac)
+    participant S as Private S3
+    participant I as VPS ingest
+    participant D as Postgres
+    participant P as /api/library
+    M->>S: upload stems/ + video.mp4
+    M->>S: upload manifest.json LAST (drop complete)
+    I->>S: head imports/{ref}/manifest.json
+    Note over I: not ready until the manifest exists (A1/C2 rule)
+    I->>S: read manifest, list prefix, download seven media objects
+    Note over I: sha256 re-proof, delivery audit, spread/bitrate/stem gates (C8)
+    I->>S: server-side copy into tracks/{id}/{gen}/staging/, manifest last
+    I->>S: Publisher verify staging, promote to tracks/{id}/{gen}/ (C1-C3)
+    I->>D: upsert_imported row (deterministic uuid5 id, C4/C5)
+    I->>S: delete staging + dropped media, write imports/{ref}/result.json
+    P->>D: list/read the registered track
+```
+
+Sources: `publish/browser_import.py`, `publish/publisher.py`,
+`publish/media_audit.py`, `db/repository.py`, and
+`ops/drop_browser_package.py`.
+
+Reruns converge: staging copies are idempotent, publish no-ops on an existing
+generation manifest, and an existing generation counts as a completed retry
+only when its published manifest hash equals the dropped manifest's hash —
+otherwise the drop is refused as `TRACK_CONFLICT` without touching the row.
+
 ## Job state and recovery
 
 ```mermaid
