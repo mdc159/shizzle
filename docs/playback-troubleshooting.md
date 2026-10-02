@@ -108,7 +108,8 @@ Use when audio cuts in and out for a whole session although every stem is
 buffered and no stem reports `waiting`, or when audio and picture do not
 line up.
 
-The engine never seeks or rate-changes a playing stem. On WebKit — every
+The engine's sync loop never seeks or rate-changes a playing stem (the
+stall recovery paths inherited from before may still seek stems). On WebKit — every
 iPad browser — either operation freezes the stem's clock for about a third
 of a second, while a stem left alone holds a constant offset to the
 millisecond (iPad probe, 2026-10-02: a seek on a playing stem lands ~350 ms
@@ -135,7 +136,8 @@ at the top of a song nothing is silenced. Restarts re-base every stem to
 the same raw position with the remembered delays, so delays never
 accumulate across restarts.
 
-1. Read the session's `playback_events`: every event carries per-stem
+1. Read the session's `playback_events`: heartbeats, incidents and pause
+   events carry per-stem
    `hardSeeks`, `skewMs` (audible offset), and `delayMs`, plus top-level
    `videoSeeks`. In a healthy session `hardSeeks` stays flat after any user
    seeks, `skewMs` settles within 50 ms, and the alignment shows itself only
@@ -158,8 +160,10 @@ accumulate across restarts.
    than the alignment.
 5. Keep the existing 3-second recovery and 50 ms settled-offset limits.
    `player/e2e/audio-master-sync.spec.ts` emulates the measured WebKit
-   timings in Chromium and holds the engine to zero stem seeks and zero
-   `playbackRate` changes during steady playback, start, and pause/resume.
+   timings in Chromium and holds the engine to zero seeks of a playing stem
+   and zero `playbackRate` changes during steady playback, start, and
+   pause/resume (a restart re-bases paused stems, which is a seek of a paused
+   element).
 
 ## Random-seek reproduction
 

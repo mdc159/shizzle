@@ -154,10 +154,11 @@ const INCIDENT_LIMIT = 100;
 /** The start delays this device last needed, by stem order; empty when
  *  nothing usable is stored. Storage may be unavailable (private mode,
  *  quota): the delays are then simply measured again on every start. */
-function rememberedStartDelays(): number[] {
+function rememberedStartDelays(stemCount: number): number[] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(START_DELAYS_KEY) ?? '[]');
     return Array.isArray(parsed) &&
+      parsed.length === stemCount &&
       parsed.every((value) => typeof value === 'number' && value >= 0 && value <= MAX_STEM_DELAY_SEC)
       ? (parsed as number[])
       : [];
@@ -255,6 +256,7 @@ class MediaElementEngine implements PlaybackEngine {
   private gateOpenAt: number | null = null;
   /** Failsafe opener for the roll-in gate. */
   private gateTimer: number | null = null;
+  private gateFailsafeTimer: number | null = null;
   private lastResyncAt = 0;
   /** Corrections issued since sync last held for RESYNC_HOLD_MS. */
   private resyncStreak = 0;
@@ -335,7 +337,7 @@ class MediaElementEngine implements PlaybackEngine {
       // A device whose starts proved staggered remembers the delays it
       // needed; applying them before playback begins puts the stems in line
       // from the first sample instead of after the alignment's settle window.
-      const startDelaySec = rememberedStartDelays()[this.channels.size] ?? 0;
+      const startDelaySec = rememberedStartDelays(manifest.stems.length)[this.channels.size] ?? 0;
       delay.delayTime.value = startDelaySec;
 
       const channel: StemChannel = {
@@ -762,7 +764,7 @@ class MediaElementEngine implements PlaybackEngine {
    * remembered start delay reached the audible spread threshold.
    */
   private startNeedsAligning(): boolean {
-    return rememberedStartDelays().some((delay) => delay >= MAX_INTER_STEM_SKEW_SEC);
+    return rememberedStartDelays(this.channels.size).some((delay) => delay >= MAX_INTER_STEM_SKEW_SEC);
   }
 
   /**
@@ -775,10 +777,14 @@ class MediaElementEngine implements PlaybackEngine {
    * issued on paused elements land at once on every browser measured.
    */
   private applyStartPattern(position: number): void {
-    const remembered = rememberedStartDelays();
+    const remembered = rememberedStartDelays(this.channels.size);
+    // A browser that has never needed aligning is re-based only as the old
+    // startup alignment did, beyond the hard threshold; an aligning device
+    // is put exactly on the pattern.
+    const rebaseThresholdSec = this.startNeedsAligning() ? 0.005 : HARD_DRIFT_SEC;
     let i = 0;
     for (const c of this.channels.values()) {
-      if (Math.abs(c.el.currentTime - position) >= 0.005) {
+      if (Math.abs(c.el.currentTime - position) >= rebaseThresholdSec) {
         c.el.currentTime = position;
         c.hardSeeks += 1;
       }
@@ -800,7 +806,11 @@ class MediaElementEngine implements PlaybackEngine {
     gain.cancelScheduledValues(this.ctx.currentTime);
     gain.setValueAtTime(0, this.ctx.currentTime);
     if (this.gateTimer !== null) window.clearTimeout(this.gateTimer);
-    this.gateTimer = window.setTimeout(() => this.openOutput(), START_GATE_MAX_MS);
+    this.gateTimer = null;
+    // The failsafe is a deadline of its own: scheduling the fade must never
+    // push it back.
+    if (this.gateFailsafeTimer !== null) window.clearTimeout(this.gateFailsafeTimer);
+    this.gateFailsafeTimer = window.setTimeout(() => this.openOutput(), START_GATE_MAX_MS);
   }
 
   /** Open the roll-in gate, now or after delayMs, fading in over
@@ -814,10 +824,7 @@ class MediaElementEngine implements PlaybackEngine {
     }
     this.outputGated = false;
     this.gateOpenAt = null;
-    if (this.gateTimer !== null) {
-      window.clearTimeout(this.gateTimer);
-      this.gateTimer = null;
-    }
+    this.clearGateTimers();
     const gain = this.masterGain.gain;
     const at = this.ctx.currentTime;
     gain.cancelScheduledValues(at);
@@ -825,13 +832,21 @@ class MediaElementEngine implements PlaybackEngine {
     gain.linearRampToValueAtTime(dbToLinear(this.masterGainDb + MASTER_HEADROOM_DB), at + START_FADE_SEC);
   }
 
-  /** Drop all roll-in state and restore the user's level at once (track
-   *  change, teardown): the next start must not inherit a silent bus. */
-  private clearOutputGate(): void {
+  private clearGateTimers(): void {
     if (this.gateTimer !== null) {
       window.clearTimeout(this.gateTimer);
       this.gateTimer = null;
     }
+    if (this.gateFailsafeTimer !== null) {
+      window.clearTimeout(this.gateFailsafeTimer);
+      this.gateFailsafeTimer = null;
+    }
+  }
+
+  /** Drop all roll-in state and restore the user's level at once (track
+   *  change, teardown): the next start must not inherit a silent bus. */
+  private clearOutputGate(): void {
+    this.clearGateTimers();
     this.outputGated = false;
     this.gateOpenAt = null;
     if (this.ctx && this.masterGain) {
@@ -940,25 +955,30 @@ class MediaElementEngine implements PlaybackEngine {
     this.openOutput(Math.max(delaysMoved ? DELAY_SETTLE_MS : 0, untilTargetMs));
     if (delaysMoved) return false;
 
-    // Video: move it to the stems' audible position (they all share the
-    // latest stem's time now), aimed ahead by what the previous seek was
-    // measured to lose while landing.
+    // Video: move it to the stems' audible position, aimed ahead by what the
+    // previous seek was measured to lose while landing. Aligned stems all
+    // share the latest stem's time; stems left alone because they started
+    // within tolerance are judged each by its own offset and the video is
+    // aimed at their centre.
     if (video.seeking) return false;
+    const audible = channels.map((c) => this.audibleTime(c));
+    const audibleCentre = (Math.max(...audible) + Math.min(...audible)) / 2;
     if (this.videoFlight) {
       this.videoFlight.landedAtMs ??= now;
       if (now - this.videoFlight.landedAtMs < RESYNC_SETTLE_MS) return false;
-      const residual = video.currentTime - latest;
+      const residual = video.currentTime - audibleCentre;
       this.videoLeadSec = Math.max(
         0,
         Math.min(MAX_VIDEO_SEEK_LEAD_SEC, this.videoFlight.leadSec - residual),
       );
       this.videoFlight = null;
     }
-    const offset = video.currentTime - latest;
+    const offset = video.currentTime - audibleCentre;
+    const maxVideoOffset = Math.max(...audible.map((time) => Math.abs(time - video.currentTime)));
     // Audible stem-to-stem separation beyond the threshold means the delay
     // cap was hit; that is not sync either.
-    const audibleSpread = Math.max(...channels.map((c) => this.audibleTime(c))) - latest;
-    if (Math.abs(offset) < HARD_DRIFT_SEC && audibleSpread < HARD_DRIFT_SEC) return true;
+    const audibleSpread = Math.max(...audible) - Math.min(...audible);
+    if (maxVideoOffset < HARD_DRIFT_SEC && audibleSpread < HARD_DRIFT_SEC) return true;
     const held = this.syncHeldSince !== null && now - this.syncHeldSince >= RESYNC_HOLD_MS;
     this.syncHeldSince = null;
     if (this.lastResyncAt === 0 || held) {
@@ -976,7 +996,7 @@ class MediaElementEngine implements PlaybackEngine {
     console.debug(
       `Moving video by ${(-offset * 1000).toFixed(0)} ms (lead ${(this.videoLeadSec * 1000).toFixed(0)} ms)`,
     );
-    video.currentTime = latest + this.videoLeadSec;
+    video.currentTime = audibleCentre + this.videoLeadSec;
     this.videoFlight = { leadSec: this.videoLeadSec, landedAtMs: null };
     this.videoAlignSeekSinceMs = now;
     this.videoSeeks += 1;
