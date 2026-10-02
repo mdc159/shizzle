@@ -14,7 +14,7 @@
     "allowedDispositions": ["fixed", "stale/already-fixed", "not reproducible", "false positive", "duplicate", "deferred follow-up", "blocked"]
   },
   "advisoryReviewers": {{ADVISORY_REVIEWERS_JSON}},
-  "retiredReviewers": ["greptile"],
+  "retiredReviewers": {{RETIRED_REVIEWERS_JSON}},
   "retiredReviewerPolicy": "do-not-trigger-or-wait; validate-historical-findings-only",
   "advisoryUnavailablePolicy": "record-and-continue",
   "repair": {

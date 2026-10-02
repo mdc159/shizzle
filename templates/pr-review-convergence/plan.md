@@ -21,8 +21,9 @@
    the concern is fixed or disproved, never merely because it was deferred.
 9. After required CI passes, complete `{{PRIMARY_REVIEWER}}` review on the final
    candidate (`independent` means the workflow's own whole-diff review).
-   Greptile is retired and must not be triggered or awaited. Treat `{{ADVISORY_REVIEWERS}}` as non-blocking inputs and never
-   wait for their quota. Repeat only for a reproduced P0/P1, up to
+   Greptile is retired and must not be triggered or awaited. Treat
+   `{{ADVISORY_REVIEWERS}}` as non-blocking inputs and never wait for their
+   quota. Repeat only for a reproduced P0/P1, up to
    `{{MAX_ITERATIONS}}` total repair batches.
 10. Once clean, capture two unchanged snapshots
     `{{QUIET_WINDOW_MINUTES}}` minutes apart. Report the exact SHA, checks,

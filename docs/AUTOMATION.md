@@ -103,12 +103,14 @@ transition, never from queue age (invariant B14).
 2. Job `deploy` pauses at the GitHub Environment `production` gate until
    mdc159 approves. The workflow rechecks that `master` still names the same
    reviewed SHA after approval; if `master` advanced while approval was pending,
-   the stale run exits cleanly without shipping. When several merges stack up
-   (CI on `master` is never cancelled: concurrency group `ci-refs/heads/master`),
-   each one queues its own waiting run; cancel the older waiting runs
-   (`gh run cancel <id>`) and approve only the newest, which carries every
-   earlier merge. Approving an older run first spends an approval on a deploy
-   that will stale-skip.
+   the stale run exits cleanly without shipping. While a run waits at the gate
+   it still occupies the `ci-refs/heads/master` concurrency group (master runs
+   are never cancelled in progress), so GitHub holds at most one further run
+   pending behind it and replaces that pending run whenever a newer master
+   merge arrives. To ship the newest merge: cancel the run waiting at the gate
+   (`gh run cancel <id>`), let the pending run start, and approve that one; it
+   carries every earlier merge. Approving the older waiting run first spends an
+   approval on a deploy that will stale-skip.
 3. After approval, the deploy SSHes to the VPS (using the pinned host key),
    records the prior files and database revision, sets
    `SHIZZLE_API_IMAGE=<tag>@<digest>`, validates the staged Compose config,
