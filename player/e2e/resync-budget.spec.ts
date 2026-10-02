@@ -386,6 +386,35 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(maxHardSeeks(after)).toBeLessThanOrEqual(4);
   });
 
+  test('a landing at the edge of the landing window is either made up for or recovered once', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    // The watchdog sees the 1500 ms window end only on a 100 ms tick, so a
+    // seek that lands just after it may or may not be caught. Either way the
+    // result must be sync, not a correction every few seconds.
+    await playWithLateSeeks(page, { latencyMs: 1550, landBehindVideoSec: null });
+    expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
+
+    await expect
+      .poll(
+        async () => {
+          const m = await metrics(page);
+          return maxOffsetMs(m) <= SETTLED_OFFSET_MS && m.health.status === 'healthy';
+        },
+        { timeout: 12_000, intervals: [200] },
+      )
+      .toBe(true);
+    await page.waitForTimeout(3000);
+    const after = await metrics(page);
+
+    expect((await videoState(page)).ended).toBe(false);
+    expect(after.health.status).toBe('healthy');
+    expect(after.health.recoveryAttempts).toBeLessThanOrEqual(2);
+    expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
+    expect(maxHardSeeks(after)).toBeLessThanOrEqual(5);
+  });
+
   test('a stem that cannot finish the paused re-seek stops playback instead of looping', async ({
     page,
   }) => {

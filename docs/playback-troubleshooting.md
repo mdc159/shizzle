@@ -119,9 +119,10 @@ buffered and no stem reports `waiting`.
    mid-seek, nor until one of its while-playing corrections has settled. It
    spaces further corrections out while sync does not hold, and aims each one
    ahead of the video by the lag the previous one was measured to lose, up to
-   1.5 s, except within the last seconds of a stem. A mid-seek stem is not
-   counted as stalled for 1.5 s; at that point recovery pauses the ensemble
-   and re-seeks it, and stops playback if a stem cannot become ready.
+   1.7 s, except within the last seconds of a stem. A mid-seek stem is not
+   counted as stalled for 1.5 s; on the first watchdog tick after that,
+   recovery pauses the ensemble and re-seeks it. If the paused re-seek cannot
+   become ready within its own 1.5 s, the recovery fails and playback stops.
    `player/e2e/resync-budget.spec.ts` reproduces late-landing seeks in Chromium
    and holds the engine to a hard-seek budget.
 4. Keep the existing 3-second recovery and 50 ms settled-offset limits. A

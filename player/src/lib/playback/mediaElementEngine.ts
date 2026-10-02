@@ -85,8 +85,10 @@ const RESYNC_HOLD_MS = 2000;
 /** How long a mid-seek stem is excused from stall detection. Past this it is
  *  stalled at once, and recover() re-seeks the paused ensemble. */
 const SEEK_LANDING_TIMEOUT_MS = 1500;
-/** A lead can make up for any landing the stall detector will wait out. */
-const MAX_SEEK_LEAD_SEC = SEEK_LANDING_TIMEOUT_MS / 1000;
+/** A lead can make up for any landing the stall detector will wait out. The
+ *  watchdog only sees the window end on a tick, so a landing up to two ticks
+ *  past it can still escape recovery and must be within reach of the lead. */
+const MAX_SEEK_LEAD_SEC = (SEEK_LANDING_TIMEOUT_MS + 2 * WATCHDOG_INTERVAL_MS) / 1000;
 /** No lead this close to the end of a stem: a seek that lands sooner than the
  *  lead assumed would run the stem out before the video. */
 const RESYNC_TAIL_GUARD_SEC = 1;
@@ -661,6 +663,8 @@ class MediaElementEngine implements PlaybackEngine {
       console.debug(`Syncing ${c.id}: offset was ${(c.el.currentTime - video.currentTime).toFixed(3)}s`);
       c.el.currentTime = target;
       c.hardSeeks += 1;
+      // The landing window runs from here, not from the next tick's look.
+      c.seekingSinceMs = now;
     }
     this.resyncInFlight = { leadSec, landedAt: null };
     this.lastResyncAt = now;
