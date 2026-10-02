@@ -110,6 +110,10 @@ const MAX_VIDEO_SEEK_LEAD_SEC = (CLOCK_STALL_MS + 2 * WATCHDOG_INTERVAL_MS) / 10
  *  then holds; each stem starts ~16 ms after the previous one). Offsets are
  *  not trusted until this much wall time has passed. */
 const ALIGN_SETTLE_MS = 1200;
+/** A browser whose stems start together has no freeze to wait out; only the
+ *  stable-clock window stands between a restart and the first judgement, so
+ *  a seek or recovery there settles about as fast as it did before alignment. */
+const ALIGN_SETTLE_NATIVE_MS = 300;
 /** A stem's offset is only meaningful once every stem clock has run at
  *  real-time speed over this window: a freezing stem's offset is still
  *  moving. */
@@ -845,7 +849,8 @@ class MediaElementEngine implements PlaybackEngine {
    * re-armed so the recovery cannot leave the output silent.
    */
   private restartAlignment(): void {
-    this.alignReadyAtMs = performance.now() + ALIGN_SETTLE_MS;
+    this.alignReadyAtMs =
+      performance.now() + (this.startNeedsAligning() ? ALIGN_SETTLE_MS : ALIGN_SETTLE_NATIVE_MS);
     this.alignHistory = [];
     this.videoFlight = null;
     this.videoAlignSeekSinceMs = null;
