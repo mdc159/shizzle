@@ -329,6 +329,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     // Longer than the 1000 ms stem-stall threshold, shorter than the 1500 ms
     // landing window: while it lands, the stem's clock sits at the target.
     await playWithLateSeeks(page, { latencyMs: 1200, landBehindVideoSec: null });
+    const atKnock = await metrics(page);
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
     // One correction to measure the 1.2 s landing, one aimed ahead by it:
@@ -345,8 +346,9 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     const after = await metrics(page);
 
     expect((await videoState(page)).ended).toBe(false);
-    expect(maxHardSeeks(after)).toBeGreaterThanOrEqual(2);
-    expect(maxHardSeeks(after)).toBeLessThanOrEqual(5);
+    // Counted from the knock: startup may already have needed corrections.
+    expect(maxHardSeeks(after) - maxHardSeeks(atKnock)).toBeGreaterThanOrEqual(1);
+    expect(maxHardSeeks(after) - maxHardSeeks(atKnock)).toBeLessThanOrEqual(4);
     // Recovering from a landing seek would hard-seek on top of it and reset
     // the budget; before landing seeks were excused from stall detection the
     // engine recovered about once a second here.
@@ -364,6 +366,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     // In this case a seek on a paused stem lands at once, so the paused
     // re-seek succeeds.
     await playWithLateSeeks(page, { latencyMs: 1800, landBehindVideoSec: null });
+    const atKnock = await metrics(page);
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
     await expect
@@ -383,7 +386,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(after.health.status).toBe('healthy');
     expect(after.health.recoveryAttempts).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
-    expect(maxHardSeeks(after)).toBeLessThanOrEqual(4);
+    expect(maxHardSeeks(after) - maxHardSeeks(atKnock)).toBeLessThanOrEqual(4);
   });
 
   test('a landing at the edge of the landing window is either made up for or recovered once', async ({
@@ -394,6 +397,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     // seek that lands just after it may or may not be caught. Either way the
     // result must be sync, not a correction every few seconds.
     await playWithLateSeeks(page, { latencyMs: 1550, landBehindVideoSec: null });
+    const atKnock = await metrics(page);
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
     await expect
@@ -412,7 +416,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(after.health.status).toBe('healthy');
     expect(after.health.recoveryAttempts).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
-    expect(maxHardSeeks(after)).toBeLessThanOrEqual(5);
+    expect(maxHardSeeks(after) - maxHardSeeks(atKnock)).toBeLessThanOrEqual(4);
   });
 
   test('a stem that cannot finish the paused re-seek stops playback instead of looping', async ({
@@ -421,6 +425,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     test.setTimeout(120_000);
     // Paused seeks land late too, later than recover() waits for readiness.
     await playWithLateSeeks(page, { latencyMs: 3500, landBehindVideoSec: null, latePausedSeeks: true });
+    const atKnock = await metrics(page);
     expect(await page.evaluate(() => window.__e2eSeekProbe.knockStemsBehind(0.3))).toBe(6);
 
     // The failed recovery hands control back to the user, as a stalled video does.
@@ -431,7 +436,7 @@ test.describe('while-playing resync budget (WebKit hard-seek loop)', () => {
     expect(after.incidents.map((incident) => incident.code)).toContain('recovery-failed');
     expect(after.health.recoveryAttempts).toBe(1);
     expect(await page.evaluate(() => window.__e2eSeekProbe.stackedSeeks)).toBe(0);
-    expect(maxHardSeeks(after)).toBeLessThanOrEqual(3);
+    expect(maxHardSeeks(after) - maxHardSeeks(atKnock)).toBeLessThanOrEqual(3);
     await expect(page.getByRole('button', { name: 'Play' })).toBeVisible();
   });
 
