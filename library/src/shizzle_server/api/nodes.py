@@ -116,11 +116,13 @@ class NodeListResponse(BaseModel):
 
 
 def _settings(request: Request) -> Settings:
-    return request.app.state.settings
+    settings: Settings = request.app.state.settings
+    return settings
 
 
 def _nodes(request: Request) -> NodeRepository:
-    return request.app.state.node_repo
+    repo: NodeRepository = request.app.state.node_repo
+    return repo
 
 
 def require_node(request: Request, node_id: str) -> str:
@@ -203,7 +205,7 @@ async def next_assignment(
 
 
 @router.post("/{node_id}/assignments/{assignment_id}/ack")
-async def acknowledge(request: Request, assignment_id: str, node_id: str = NodeAuth) -> dict:
+async def acknowledge(request: Request, assignment_id: str, node_id: str = NodeAuth) -> dict[str, bool]:
     ok = await _nodes(request).acknowledge(_parse_assignment_id(assignment_id), node_id=node_id)
     if not ok:
         raise HTTPException(409, "Assignment is not open for this node")
@@ -213,7 +215,7 @@ async def acknowledge(request: Request, assignment_id: str, node_id: str = NodeA
 @router.post("/{node_id}/assignments/{assignment_id}/progress")
 async def progress(
     request: Request, assignment_id: str, body: ProgressRequest, node_id: str = NodeAuth
-) -> dict:
+) -> dict[str, bool]:
     ok = await _nodes(request).progress(
         _parse_assignment_id(assignment_id), node_id=node_id, phase=body.phase
     )
@@ -225,7 +227,7 @@ async def progress(
 @router.post("/{node_id}/assignments/{assignment_id}/complete")
 async def complete(
     request: Request, assignment_id: str, body: CompleteRequest, node_id: str = NodeAuth
-) -> dict:
+) -> dict[str, bool]:
     ok = await _nodes(request).complete(
         _parse_assignment_id(assignment_id), node_id=node_id, detail=body.detail
     )
@@ -237,7 +239,7 @@ async def complete(
 @router.post("/{node_id}/assignments/{assignment_id}/fail")
 async def fail(
     request: Request, assignment_id: str, body: FailRequest, node_id: str = NodeAuth
-) -> dict:
+) -> dict[str, bool]:
     ok = await _nodes(request).fail(
         _parse_assignment_id(assignment_id),
         node_id=node_id,

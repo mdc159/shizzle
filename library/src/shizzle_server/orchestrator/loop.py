@@ -20,7 +20,12 @@ import uuid
 
 from ..db import create_engine, create_session_factory, init_db
 from ..db.models import RUNNABLE_STAGES, Job, JobStage
-from ..db.repository import HeartbeatRepository, InvalidTransition, JobRepository
+from ..db.repository import (
+    HeartbeatRepository,
+    InvalidTransition,
+    JobRepository,
+    NodeRepository,
+)
 from ..errors import ErrorCode, StageError
 from ..settings import Settings, get_settings
 from .pipelines import build_pipeline
@@ -50,6 +55,7 @@ class Orchestrator:
         sf = create_session_factory(self.engine)
         self.jobs = JobRepository(sf)
         self.heartbeats = HeartbeatRepository(sf)
+        self.nodes = NodeRepository(sf)
         self.pipeline = build_pipeline(self.settings)
         self.runpod = (
             HttpRunPodClient(
@@ -153,6 +159,7 @@ class Orchestrator:
                     jobs=self.jobs,
                     runpod=self.runpod,
                     worker_id=self.worker_id,
+                    nodes=self.nodes,
                 )
                 from_stage = job.status
                 started = time.monotonic()

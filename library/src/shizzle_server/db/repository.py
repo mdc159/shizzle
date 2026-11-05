@@ -577,6 +577,18 @@ class JobRepository:
             session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
             return True
 
+    async def set_input_checksum(
+        self, job_id: uuid.UUID, *, worker_id: str, checksum: str
+    ) -> None:
+        """Record the source sha256 a node proved (A12); lease-fenced (B2)."""
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.downloading)
+            _require_lease(job, worker_id, job.status, utcnow())
+            job.input_checksum = checksum
+            job.updated_at = utcnow()
+
     async def owns_lease(self, job_id: uuid.UUID, worker_id: str) -> bool:
         """B2 predicate: does this worker own the job's unexpired lease now?
 

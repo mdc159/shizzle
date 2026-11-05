@@ -66,15 +66,15 @@ async def test_node_token_does_not_open_passcode_routes(settings, tmp_path):
     settings.shizzle_passcode = "open-sesame"
     settings.shizzle_node_tokens = "mac-mini=mac-secret"
     app = create_app(settings)
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            assert (await c.get("/api/library", headers=MAC)).status_code == 401
-            assert (await c.get("/api/nodes", headers=MAC)).status_code == 401
-            # And the node route still works with the node token while the gate is on.
-            r = await c.post(
-                "/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC
-            )
-            assert r.status_code == 200
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c,
+    ):
+        assert (await c.get("/api/library", headers=MAC)).status_code == 401
+        assert (await c.get("/api/nodes", headers=MAC)).status_code == 401
+        # And the node route still works with the node token while the gate is on.
+        r = await c.post("/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC)
+        assert r.status_code == 200
 
 
 # --- registry ------------------------------------------------------------------
