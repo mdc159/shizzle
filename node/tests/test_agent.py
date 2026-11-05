@@ -153,6 +153,7 @@ def test_download_assignment_runs_download_upload_and_reports(config, client, pl
     def fake_upload(s3, *, bucket, source, receipt, progress):
         seen["upload"] = (s3, bucket, receipt)
         progress("upload: source.json")
+        return receipt
 
     agent = Agent(
         config, client, s3_factory=lambda: "S3", downloader=fake_download, uploader=fake_upload,
@@ -169,12 +170,13 @@ def test_download_assignment_runs_download_upload_and_reports(config, client, pl
     assert receipt["track_id"] == payload["track_id"]
     assert receipt["sha256"] == "a" * 64 and receipt["bytes"] == 3
     assert receipt["title"] == "Song (Official)" and receipt["uploader"] == "Band"
-    assert receipt["node_id"] == "mac-mini"
+    assert receipt["node_id"] == "mac-mini" and receipt["assignment_id"] == str(assignment.id)
     assert [c[1].rsplit("/", 1)[-1] for c in plane.calls] == [
         "ack", "heartbeat", "progress", "progress", "complete", "heartbeat",
     ]
     [done] = plane.sent("/complete")
     assert done["detail"]["sha256"] == "a" * 64 and done["detail"]["title"] == "Song (Official)"
+    assert done["detail"]["adopted"] is False
     # Busy pointer rode along on the in-flight heartbeat and was cleared after.
     beats = plane.sent("/heartbeat")
     assert beats[0]["busyAssignmentId"] == str(assignment.id) and beats[1]["busyAssignmentId"] is None
@@ -299,3 +301,22 @@ def test_build_receipt_matches_the_orchestrator_contract(tmp_path):
     assert receipt["interface"] == "shizzle-source-v1"
     assert receipt["duration_seconds"] == 12.5
     json.dumps(receipt, allow_nan=False)  # serializable, no NaN
+
+
+def test_adopted_receipt_is_what_gets_reported(config, client, plane, tmp_path):
+    """When another node finished the same video first, the report describes
+    the receipt in S3, not this run's download."""
+    def fake_upload(s3, *, bucket, source, receipt, progress):
+        return {"sha256": "b" * 64, "bytes": 99, "duration_seconds": 3.0, "title": "Theirs",
+                "uploader": "Them", "video_id": "dQw4w9WgXcQ"}
+
+    agent = Agent(
+        config, client, s3_factory=lambda: None, downloader=lambda *a, **k: _source(tmp_path),
+        uploader=fake_upload, separator=lambda *a, **k: {}, device_resolver=lambda d: d,
+    )
+    agent.execute(Assignment.from_json(_assignment("download", {
+        "url": "https://youtu.be/dQw4w9WgXcQ", "track_id": "t", "bucket": "b",
+        "source_key": "sources/t/source.mp4",
+    })))
+    [done] = plane.sent("/complete")
+    assert done["detail"]["sha256"] == "b" * 64 and done["detail"]["adopted"] is True

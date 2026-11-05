@@ -201,13 +201,19 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
     }
 
     if nodes.is_node_executor(job.runpod_job_id) and job.worker_phase != "failed":
-        # A node holds this attempt: reconcile its assignment, never RunPod.
+        # A node holds this attempt: reconcile its assignment, never RunPod. A
+        # previous attempt's assignment (its key is not this attempt's) is
+        # history: fall through and dispatch fresh.
         events = await ctx.jobs.list_events(job.id)
-        return await nodes.poll_node_separation(
-            ctx, dispatch_key=_confirmed_dispatch_key(events, job.runpod_job_id)
-        )
+        node_key = _confirmed_dispatch_key(events, job.runpod_job_id)
+        if node_key == f"{job.id.hex}:{job.attempt}":
+            return await nodes.poll_node_separation(ctx, dispatch_key=node_key)
 
-    if job.runpod_job_id and job.worker_phase != "failed":
+    if (
+        job.runpod_job_id
+        and not nodes.is_node_executor(job.runpod_job_id)
+        and job.worker_phase != "failed"
+    ):
         try:
             status_payload = await ctx.runpod.poll(job.runpod_job_id)
         except StageError as exc:

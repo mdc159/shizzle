@@ -137,17 +137,31 @@ The node needs only the source prefix and the separation attempt prefix:
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:GetObject", "s3:HeadObject"],
+      "Action": ["s3:PutObject", "s3:GetObject"],
       "Resource": [
         "arn:aws:s3:::karaoke-pimpshizzle/sources/*",
         "arn:aws:s3:::karaoke-pimpshizzle/tracks/*/1/separation/attempts/*"
       ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::karaoke-pimpshizzle",
+      "Condition": {"StringLike": {"s3:prefix": ["sources/*", "tracks/*/1/separation/attempts/*"]}}
     }
   ]
 }
 ```
 
-No RunPod, CloudFront, database or deploy credentials ever live on a node.
+HEAD requests are authorized by `s3:GetObject` (there is no `s3:HeadObject`
+action). `s3:ListBucket` on those prefixes makes a missing key answer 404
+rather than 403, which the worker's "is it there yet" checks rely on.
+
+This policy covers every job's source and attempt prefix, not only the
+current assignment's: accepted for the owner's own machines. Writes are
+conditional (first writer wins), so a stale node cannot overwrite a source or
+package the VPS already accepted. No RunPod, CloudFront, database or deploy
+credentials ever live on a node.
 
 ## Tests
 

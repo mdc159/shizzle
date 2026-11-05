@@ -16,9 +16,9 @@ multi-track file." Later: "The 6 should be named shizzle.m4a, not other."
 This plan assumes the Dell runs the production lossless worker image
 (`ghcr.io/mdc159/shizzle/worker`, `stemsplit/Dockerfile.lossless`), which is
 what RunPod runs today. Under that assumption nothing about file creation
-changes: the node emits the lossless package and the VPS derives the browser
-files, with the sixth stem named `shizzle.m4a`, exactly as it does for a
-browser upload now.
+changes: the node emits the lossless package (six WAVs, the sixth named
+`stems/shizzle.wav`) and the VPS derives the browser files, with the sixth AAC
+stem named `stems/shizzle.m4a`, exactly as it does for a browser upload now.
 
 Two facts do not fit that assumption and are unresolved from this session:
 
@@ -35,10 +35,11 @@ Two facts do not fit that assumption and are unresolved from this session:
 Until the Dell's image is identified (`docker images`, `docker ps -a`, or a
 Remote Control session), the node design stays as written below. If the Dell
 runs a newer all-in-one container that emits finished browser media, the
-handoff moves to the drop-box (`imports/{source_ref}/`, invariant C8), the
-agent adds only the two manifest fields that contract requires
-(`delivery_profile`, `integrity.objects`), and the 2.5 Mb/s budget (D4) must
-be measured on one real package first. If it runs the production worker
+handoff would move to the drop-box (`imports/{source_ref}/`, invariant C8),
+which requires a complete `shizzle-browser-v1` package (every v3 manifest
+field, not just `delivery_profile` and `integrity.objects`), and the 2.5 Mb/s
+budget (D4) would have to be measured on one real package first. That path is
+not implemented; the Mac inventory found no such container. If it runs the production worker
 image, the plan applies unchanged and a multi-track archive file is an
 optional add-on step on the node, assembled from finished stems without
 re-encoding.
@@ -210,9 +211,12 @@ event names, no schema change: `node_assigned`, `node_acknowledged`,
 
 ## Node API
 
-All routes require a node token. Responses never include credentials. The
-job's `source_ref` (the URL) is delivered here and nowhere else; the public
-job API still never exposes it (E2).
+All routes require a node token, and the token must be the one configured
+for the `{id}` in the path; an assignment can be acknowledged, progressed,
+completed or failed only by the node it names (E6). Responses never include
+credentials. The job's `source_ref` (the URL, always one YouTube video) is
+delivered here and nowhere else; the public job API still never exposes it
+(E2).
 
 | Route | Purpose |
 |---|---|
@@ -238,9 +242,14 @@ the one with the oldest `busy` release (round robin), ties by name.
 
 ```text
 upload job   -> as today: upload_source() to S3, advance to dispatched
-url job      -> if a download assignment exists for this job:
-                  source.json present in S3 and sha256 matches the report
-                      -> record input_checksum, advance to dispatched
+url job      -> SHIZZLE_NODE_ROUTING = off  -> fail YTDLP_BLOCKED (old behavior)
+                not a single YouTube video   -> fail YTDLP_BLOCKED (nodes fetch
+                                                nothing else; checked at submit too)
+                if a download assignment exists for this job:
+                  source.json present in S3 and re-proven against source.mp4
+                  (object key, sha256, size)  -> record input_checksum, advance
+                      to dispatched; the node's API report is a hint, the
+                      marker completes the assignment even if the report was lost
                   assignment heartbeat older than NODE_STALL_SECONDS
                       -> mark assignment failed, node_failed event, fall through
                   otherwise park (recheck NODE_POLL_SECONDS)
@@ -260,19 +269,24 @@ fallback for download because RunPod cannot download either.
 
 ```text
 if job.executor startswith "node:"  -> poll that node assignment:
-     handoff.json present under the attempt prefix -> verifying (as today)
+     handoff.json present under the attempt prefix -> verifying (as today;
+                                                      the marker, not the report)
      assignment failed or heartbeat stale          -> fail attempt, redispatch
                                                       fresh key (B12)
      otherwise park
 elif job.executor == "runpod"       -> existing RunPod branch, unchanged
 else (no executor yet):
-     available separate node        -> reserve_dispatch(key), create assignment
-                                       with key, executor = node:<id>, park
+     SHIZZLE_NODE_ROUTING = off     -> existing RunPod dispatch, no node lookup
+     available separate node that has not already expired/failed this job
+                                    -> create assignment with key, reserve and
+                                       confirm executor = node:<assignment>, park
+     no node ever registered        -> RunPod at once (prefer)
      no node, waited < NODE_SEPARATE_WAIT_SECONDS (default 120)
                                     -> node_wait event, park
-     no node, RunPod configured     -> fallback_runpod event, existing dispatch
-     no node, RunPod unconfigured   -> keep waiting for a node (parked cloud
-                                       semantics already exist)
+     no node, routing = prefer, RunPod configured
+                                    -> fallback_runpod event, existing dispatch
+     no node, routing = only, or RunPod unconfigured
+                                    -> keep waiting for a node (never RunPod)
 ```
 
 Policy knobs in `settings.py`, all env-driven:
@@ -300,81 +314,75 @@ requirement: the S3 copy is always the source of record, and
 `cloud_verifying` still checks `source.object_key` and `source.sha256`
 against the job.
 
-## Node runtime: containers, not a checkout
+## Node runtime: as built
 
-Owner decision, 2026-11-05: services on the local nodes run as containers.
-Both machines already carry containers for YouTube download, FFmpeg and stem
-splitting. The node design therefore treats **images as the interface** and
-does not require copying pipeline code into a second place.
+The 2026-11-05 decision favoured containers, and the Mac inventory the same
+evening showed what the Mac actually runs: the downloader container
+(`shizzle-ingest:local`, stopped for six weeks) and **native** separation on
+the Apple GPU through the proof script. There is no separator container on
+the Mac, and Docker Desktop cannot reach the Apple GPU. The agent was
+therefore built as one native Python service, `node/` (`shizzle-node`):
 
-Each node runs one small compose stack:
-
-| Container | Image | Role |
+| Piece | How | Notes |
 |---|---|---|
-| `agent` | built from `node/` in this repo, published to GHCR | holds the node token; heartbeats; long-polls assignments; starts one job container at a time through the Docker socket; relays progress; reports completion |
-| `downloader` | the Mac fork's existing `shizzle-ingest` image (yt-dlp, yt-dlp-ejs, Deno, FFmpeg), published to GHCR from wherever that code lives | one-shot run per assignment: `python -m shizzle_ingest.download <video_id> <dir>`, then the agent uploads `source.mp4` and writes `source.json` last |
-| `separator` | `ghcr.io/mdc159/shizzle/worker:sha-...`, the **same image RunPod pulls** | one-shot run per assignment in a new `--assignment` mode: same claim, receipt heartbeat, six uploads and handoff-last path as the RunPod handler |
+| agent loop | `uv run --directory node shizzle-node` | heartbeat thread, long-poll, one assignment at a time |
+| download | yt-dlp in-process, `allowed_extractors: ["youtube"]`, ffprobe gate | refuses anything that is not one YouTube video; writes `source.mp4` then `source.json` with conditional PUTs (first writer wins, never overwritten) |
+| separate | imports `../stemsplit/lossless_handler.py` and calls `handler(job, progress=...)` | the production code RunPod runs, `device=mps` on the Mac, `cuda` on the Dell; package and writes unchanged |
 
-What that means for code:
+No Docker socket is mounted anywhere; the agent holds only the node token and
+the node's scoped AWS keys. The containers decision stands for the Dell if a
+CUDA container is preferred there, but nothing in the design depends on it.
 
-- **No new separation code and no copy.** The production worker image already
-  exists, is built by `worker-image.yml`, and already has a local mode
-  (`lossless_handler.py --local`). The only change is in `stemsplit/`: move the
-  body of `handler()` into `stemsplit/attempt.py` as
-  `execute(payload, *, executor_id, device, heartbeat, worker_image)`, call it
-  from the RunPod wrapper as today, and add `--assignment <json>` so the same
-  container runs one node assignment and prints progress as JSON lines for the
-  agent to relay. All of #32's guards (A1, A6, B12) apply because it is the
-  same code in the same image.
-- **No copy of the downloader either.** The fork's `ingest/` image is used as
-  is; it needs a GHCR publish workflow where it lives. Whether that directory
-  later moves upstream is a housekeeping question, not a Phase 2 dependency.
-- **The agent is the one new component**, about 300 lines of Python: HTTP
-  client for the node API, Docker SDK calls, upload of the downloaded source,
-  marker writes. It lives in `node/` here so one image serves both machines.
+### Inventory (done 2026-11-05)
 
-### Inventory first
-
-The containers already on the Mac and the Dell must be inventoried in Phase 1
-(image name, digest, entrypoint, output format). A separator image counts as
-a node executor only if it emits `lossless-stem-v1`. The retired combined
-worker (`ghcr.io/mdc159/shizzle-worker:v2`, the k25 lineage) emits AAC stems
-and a browser manifest instead; it can keep serving local use but cannot be
-the node's separator, because the VPS verifies the lossless handoff. The
-current `ghcr.io/mdc159/shizzle/worker` image is the drop-in.
+The Mac's only Shizzle image is the downloader; separation is native. The
+retired combined worker (`ghcr.io/mdc159/shizzle-worker:v2`, k25 lineage)
+was not found on the Mac. The Dell has not been inventoried.
 
 ### GPU access per machine
 
-- **Dell 9530 (Windows, RTX 4070):** Docker Desktop with the WSL2 backend
-  passes the NVIDIA GPU to Linux containers (`--gpus all`). The CUDA worker
-  image runs unchanged; this is the same image and device path RunPod uses.
-- **Mac mini (M4 Pro):** Docker Desktop cannot expose Apple's GPU to a Linux
-  container, and the worker image is amd64 CUDA. Containerized separation on
-  the Mac is CPU-only, on an arm64 build that does not exist yet, at an
-  unmeasured speed. The fork proved native MPS separation at 18.2 s for a
-  4:16 track. **Open decision for Phase 3:** measure CPU-in-container on the
-  Mac; if it is acceptable, the Mac runs both containers like the Dell; if
-  not, the Mac's agent calls a native MPS helper (the fork's `prove.py` path)
-  for separation only, and downloads stay in the container. Until measured,
-  the working default is: Mac downloads in a container and separates natively.
+- **Dell 9530 (Windows, RTX 4070):** the agent runs natively with the CUDA
+  torch build (README); a CUDA container is an alternative, not a need.
+- **Mac mini (M4 Pro):** native `mps` (proof: 18.2 s for a 4:16 track).
 
 ### Credentials on a node
 
-Phase 1 ships with a per-node IAM user whose policy allows only:
+Phase 1 ships with a per-node IAM user. `s3:HeadObject` is not an IAM action
+(HEAD is authorized by `s3:GetObject`), and without `s3:ListBucket` a missing
+key answers 403 instead of 404, which the worker's `_is_not_found` would treat
+as an error; so the policy is:
 
-```text
-s3:PutObject, s3:GetObject, s3:HeadObject on
-  arn:aws:s3:::karaoke-pimpshizzle/sources/*
-  arn:aws:s3:::karaoke-pimpshizzle/tracks/*/1/separation/attempts/*
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::karaoke-pimpshizzle/sources/*",
+        "arn:aws:s3:::karaoke-pimpshizzle/tracks/*/1/separation/attempts/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::karaoke-pimpshizzle",
+      "Condition": {"StringLike": {"s3:prefix": ["sources/*", "tracks/*/1/separation/attempts/*"]}}
+    }
+  ]
+}
 ```
 
-The agent receives the node token and these keys as environment at container
-start, from the Studio54 vault the Mac fork already documents, never from a
-`.env` in a checkout (E3). It passes the AWS keys into each one-shot job
-container the way RunPod passes them to the worker today. Nodes never hold
-RunPod, CloudFront, database or deploy credentials. A later phase can replace
-the IAM user with STS credentials vended per assignment, which is what PR #50
-argued for.
+Accepted risk, stated plainly: this static policy lets a node read and write
+every job's source and separation attempt, not only its own assignment's. The
+nodes are the owner's own machines, so this is accepted for Phase 1; the
+overwrite hazard is closed separately by conditional writes (a stale node
+cannot replace an accepted `source.mp4`, `source.json`, `dispatch.json` or
+`handoff.json`). Per-assignment STS credentials, which PR #50 argued for,
+remain the Phase 4 follow-up. Keys come from the Studio54 vault, never from a
+`.env` in a checkout (E3). Nodes never hold RunPod, CloudFront, database or
+deploy credentials.
 
 ## Player and dashboard
 

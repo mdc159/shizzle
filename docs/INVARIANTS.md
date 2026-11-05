@@ -152,7 +152,12 @@ URL job out of `downloading` only after reading that receipt and re-proving
 it: interface `shizzle-source-v1`, `object_key` equal to the pipeline's
 source key, `track_id` equal to the job's, a 64-hex sha256, a positive
 `bytes` that equals the object's `ContentLength`, duration and size within
-the upload limits. The node's completion report is a hint, never the proof.
+the upload limits. The node's completion report is a hint, never the proof:
+the marker completes an open assignment even when the report was lost, and
+the node writes both objects with `If-None-Match: *`, so a stale node that
+was reassigned away can never overwrite a source the orchestrator accepted.
+Only a link to one YouTube video is ever handed to a node (checked at
+`POST /api/submit-url`, again in the orchestrator, and again by the agent).
 
 Guard: `library/tests/test_node_routing.py`
 (`test_rejected_source_receipt_is_a_retryable_checksum_failure`,
@@ -606,9 +611,11 @@ MUST be under `tracks/`.
 ### E6 — node tokens are node-scoped
 
 A node authenticates every `/api/nodes/{id}/...` call with its own bearer
-token from `SHIZZLE_NODE_TOKENS`; the token is compared in constant time,
-an unknown node, missing token and wrong token all answer 401, and a node
-token opens no passcode-gated route. Tokens live only in the environment;
+token from `SHIZZLE_NODE_TOKENS`; the token must be the one configured for
+the `{id}` in the path (another node's valid token is a 401), it is compared
+in constant time, an unknown node, missing token and wrong token all answer
+401, an assignment accepts reports only from the node it names (409 for any
+other), and a node token opens no passcode-gated route. Tokens live only in the environment;
 the `nodes` row never stores one. The assignment payload is the only place
 a job's `source_ref` URL is delivered (E2 still holds for the public job API).
 

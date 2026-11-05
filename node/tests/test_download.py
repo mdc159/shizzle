@@ -13,9 +13,11 @@ from shizzle_node.download import (
     DownloadError,
     SourceFile,
     classify_ytdlp_error,
+    download_source,
     sha256_file,
     upload_source,
     validate_probe,
+    youtube_video_id,
 )
 
 
@@ -52,23 +54,31 @@ def test_ytdlp_errors_map_to_stable_codes(message, code):
     assert classify_ytdlp_error(message) == code
 
 
+class _Precondition(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("412")
+        self.response = {"Error": {"Code": "PreconditionFailed"},
+                         "ResponseMetadata": {"HTTPStatusCode": 412}}
+
+
 class _FakeS3:
+    """Honours If-None-Match: a second conditional PUT of an existing key is a 412."""
+
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.order: list[str] = []
 
-    def upload_file(self, path, bucket, key, ExtraArgs=None):  # noqa: N803
-        self.objects[key] = Path(path).read_bytes()
-        self.order.append(f"upload:{key}:{(ExtraArgs or {}).get('ContentType')}")
+    def put_object(self, *, Bucket, Key, Body, ContentType, IfNoneMatch=None):  # noqa: N803, ARG002
+        if IfNoneMatch == "*" and Key in self.objects:
+            raise _Precondition()
+        data = Body.read() if hasattr(Body, "read") else Body
+        self.objects[Key] = data
+        self.order.append(f"put:{Key}:{ContentType}:{IfNoneMatch}")
 
     def head_object(self, *, Bucket, Key):  # noqa: N803, ARG002
         if Key not in self.objects:
             raise RuntimeError("missing")
         return {"ContentLength": len(self.objects[Key])}
-
-    def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803, ARG002
-        self.objects[Key] = Body
-        self.order.append(f"put:{Key}:{ContentType}")
 
     def get_object(self, *, Bucket, Key):  # noqa: N803, ARG002
         if Key not in self.objects:
@@ -87,21 +97,53 @@ def _source(tmp_path: Path) -> SourceFile:
     )
 
 
-def test_upload_writes_source_then_receipt_last_and_is_idempotent(tmp_path):
+def test_upload_writes_source_then_receipt_last_conditionally(tmp_path):
     s3 = _FakeS3()
     source = _source(tmp_path)
     receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
     phases: list[str] = []
-    upload_source(s3, bucket="b", source=source, receipt=receipt, progress=phases.append)
+    landed = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=phases.append)
+    assert landed is receipt
     assert s3.order == [
-        "upload:sources/t/source.mp4:video/mp4",
-        "put:sources/t/source.json:application/json",
+        "put:sources/t/source.mp4:video/mp4:*",
+        "put:sources/t/source.json:application/json:*",
     ]
     assert json.loads(s3.objects["sources/t/source.json"])["sha256"] == source.sha256
     assert phases == ["upload: source.mp4", "upload: source.json"]
-    # Second run: receipt already there with the same sha -> nothing re-uploaded.
-    upload_source(s3, bucket="b", source=source, receipt=receipt, progress=phases.append)
-    assert len(s3.order) == 2 and phases[-1] == "upload: already complete"
+    # Second run (any sha): the existing receipt is adopted, nothing is rewritten.
+    other = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": "f" * 64}
+    adopted = upload_source(s3, bucket="b", source=source, receipt=other, progress=phases.append)
+    assert adopted["sha256"] == source.sha256 and len(s3.order) == 2
+    assert phases[-1].startswith("upload: already complete")
+
+
+def test_stale_node_cannot_overwrite_an_owned_source(tmp_path):
+    """First writer wins: a 412 on source.mp4 adopts the owner's receipt once it
+    exists and is a retryable race while it does not."""
+    s3 = _FakeS3()
+    source = _source(tmp_path)
+    s3.objects["sources/t/source.mp4"] = b"the other node's bytes"
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
+    with pytest.raises(DownloadError, match="SOURCE_RACE"):
+        upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+    assert s3.objects["sources/t/source.mp4"] == b"the other node's bytes"
+    s3.objects["sources/t/source.json"] = json.dumps({"sha256": "a" * 64, "bytes": 22}).encode()
+    adopted = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+    assert adopted == {"sha256": "a" * 64, "bytes": 22}
+    assert s3.order == []  # nothing written by the stale node
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://vimeo.com/12345", "http://169.254.169.254/latest/meta-data/", "ftp://x/y",
+     "https://www.youtube.com/watch?v=short"],
+)
+def test_download_refuses_anything_but_one_youtube_video(tmp_path, url):
+    assert youtube_video_id(url) is None
+    with pytest.raises(DownloadError, match="URL_REFUSED"):
+        download_source(url, tmp_path, max_bytes=10, max_duration_seconds=10,
+                        cookies_file=None, progress=lambda _m: None)
+    assert list(tmp_path.glob("source.*")) == []
 
 
 def test_upload_size_mismatch_is_a_structured_failure(tmp_path):

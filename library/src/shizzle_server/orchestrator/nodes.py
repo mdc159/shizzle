@@ -166,6 +166,23 @@ async def _note_wait(ctx: StageContext, events: list[JobEvent], kind: str, attem
         )
 
 
+def _nodes_tried(events: list[JobEvent]) -> set[str]:
+    """Nodes that expired or failed an assignment for this job: not picked again
+    while another node is available (a node that keeps heartbeating but never
+    acknowledges must not block the fallback forever)."""
+    tried: set[str] = set()
+    for event in events:
+        detail = event.detail if isinstance(event.detail, dict) else {}
+        if event.event in (NODE_EXPIRED_EVENT, NODE_FAILED_EVENT) and detail.get("node_id"):
+            tried.add(str(detail["node_id"]))
+    return tried
+
+
+def _prefer_untried(candidates: list[Any], tried: set[str]) -> list[Any]:
+    fresh = [node for node in candidates if node.id not in tried]
+    return fresh or candidates
+
+
 def _assignment_is_stale(assignment: NodeAssignment, ctx: StageContext) -> str | None:
     """Why an open assignment should be expired, or None while it is healthy."""
     if assignment.status == NodeAssignmentStatus.assigned:
@@ -215,17 +232,39 @@ async def _mirror_phase(ctx: StageContext, assignment: NodeAssignment) -> None:
 async def download_via_node(ctx: StageContext) -> JobStage | None:
     """Drive a URL job's download through a node. Returns the next stage or parks."""
     job = ctx.job
+    if youtube_video_id(job.source_ref) is None:
+        # Defense in depth behind POST /api/submit-url: a node downloads one
+        # YouTube video, never an arbitrary URL.
+        raise StageError(
+            ErrorCode.YTDLP_BLOCKED,
+            "only a link to one YouTube video can be fetched by a worker node",
+            retryable=False,
+        )
     track_id = track_id_for_job(job.id)
     events = await ctx.jobs.list_events(job.id)
     assignment = await ctx.nodes.latest_for_job(job.id, kind=NodeAssignmentKind.download)
 
     if assignment is not None and assignment.status in NODE_ASSIGNMENT_OPEN:
-        reason = _assignment_is_stale(assignment, ctx)
-        if reason is not None:
-            raise await _expire_and_retry(ctx, assignment, reason)
-        await _mirror_phase(ctx, assignment)
-        ctx.park_seconds = ctx.settings.node_poll_seconds
-        return None
+        # The S3 marker is the truth: a download whose completion report was
+        # lost still completes once source.json is there (A12). An S3 read
+        # error here is "unknown", never a burned attempt.
+        try:
+            receipt = await _read_source_receipt(ctx, track_id)
+        except StageError as exc:
+            logger.warning("job %s: source receipt check failed: %s", job.id, exc)
+            receipt = None
+        if receipt is not None and await _verify_source_receipt(ctx, track_id, receipt) is None:
+            await ctx.nodes.complete(
+                assignment.id, node_id=assignment.node_id, detail={"completed_by": "s3-marker"}
+            )
+            assignment = await ctx.nodes.get_assignment(assignment.id) or assignment
+        else:
+            reason = _assignment_is_stale(assignment, ctx)
+            if reason is not None:
+                raise await _expire_and_retry(ctx, assignment, reason)
+            await _mirror_phase(ctx, assignment)
+            ctx.park_seconds = ctx.settings.node_poll_seconds
+            return None
 
     if assignment is not None and assignment.status == NodeAssignmentStatus.completed:
         receipt = await _read_source_receipt(ctx, track_id)
@@ -314,8 +353,11 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         )
 
     # No usable assignment (none yet, or the last one expired): assign or wait.
-    candidates = await ctx.nodes.available(
-        NodeAssignmentKind.download, online_seconds=ctx.settings.node_online_seconds
+    candidates = _prefer_untried(
+        await ctx.nodes.available(
+            NodeAssignmentKind.download, online_seconds=ctx.settings.node_online_seconds
+        ),
+        _nodes_tried(events),
     )
     for node in candidates:
         created = await ctx.nodes.create_assignment(
@@ -440,13 +482,23 @@ async def poll_node_separation(ctx: StageContext, *, dispatch_key: str | None) -
     track_id = track_id_for_job(job.id)
 
     if assignment.status in NODE_ASSIGNMENT_OPEN:
-        reason = _assignment_is_stale(assignment, ctx)
-        if reason is not None:
-            await ctx.jobs.record_worker_progress(job.id, phase="failed", worker_id=ctx.worker_id)
-            raise await _expire_and_retry(ctx, assignment, reason)
-        await _mirror_phase(ctx, assignment)
-        ctx.park_seconds = ctx.settings.node_poll_seconds
-        return None
+        if await cloud.package_ready(ctx, idempotency_key=dispatch_key):
+            # handoff.json is the truth (A1): a lost completion report must not
+            # stall a finished package until the stall window.
+            await ctx.nodes.complete(
+                assignment.id, node_id=assignment.node_id, detail={"completed_by": "s3-marker"}
+            )
+            assignment = await ctx.nodes.get_assignment(assignment.id) or assignment
+        else:
+            reason = _assignment_is_stale(assignment, ctx)
+            if reason is not None:
+                await ctx.jobs.record_worker_progress(
+                    job.id, phase="failed", worker_id=ctx.worker_id
+                )
+                raise await _expire_and_retry(ctx, assignment, reason)
+            await _mirror_phase(ctx, assignment)
+            ctx.park_seconds = ctx.settings.node_poll_seconds
+            return None
 
     if assignment.status == NodeAssignmentStatus.completed:
         if await cloud.package_ready(ctx, idempotency_key=dispatch_key):
@@ -522,8 +574,13 @@ async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str
     candidates = await ctx.nodes.available(
         NodeAssignmentKind.separate, online_seconds=settings.node_online_seconds
     )
-    if candidates:
-        return str(candidates[0].id)
+    events = await ctx.jobs.list_events(ctx.job.id)
+    tried = _nodes_tried(events)
+    fresh = [node for node in candidates if node.id not in tried]
+    if fresh:
+        return str(fresh[0].id)
+    # Only nodes that already stalled or failed this job are available: treat
+    # that as no node, so the wait window and the RunPod fallback apply.
     runpod_configured = not isinstance(ctx.runpod, NotConfiguredRunPodClient)
     if settings.node_routing == "prefer" and runpod_configured:
         # No node has ever registered: nothing to wait for, RunPod right away.
@@ -534,7 +591,6 @@ async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str
             for n in registered
         ):
             return "runpod"
-    events = await ctx.jobs.list_events(ctx.job.id)
     if settings.node_routing == "only" or not runpod_configured:
         await _note_wait(ctx, events, "separate", ctx.job.attempt)
         await ctx.jobs.record_worker_progress(

@@ -33,6 +33,7 @@ from ..db.repository import (
     TrackRepository,
 )
 from ..metadata import resolve_track_metadata
+from ..orchestrator.nodes import youtube_video_id
 from ..orchestrator.processing import get_duration
 from ..settings import Settings
 from . import cloudfront, media
@@ -290,6 +291,11 @@ async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Pro
     parsed = urlparse(body.url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(400, "A valid http(s) URL is required")
+    # Only a single YouTube video is ever handed to a worker node's downloader
+    # (docs/WORKER-NODES.md): the node must never become a fetcher for
+    # arbitrary or private-network URLs.
+    if youtube_video_id(body.url) is None:
+        raise HTTPException(400, "Paste a link to one YouTube video")
 
     metadata = resolve_track_metadata(body.title, body.artist, body.title)
     job = await _jobs(request).create_job(

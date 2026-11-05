@@ -34,7 +34,7 @@ class Agent:
         *,
         s3_factory: Callable[[], Any],
         downloader: Callable[..., Any] = download_source,
-        uploader: Callable[..., None] = upload_source,
+        uploader: Callable[..., Any] = upload_source,
         separator: Callable[..., dict[str, Any]] = run_separation,
         device_resolver: Callable[[str], str] = resolve_device,
         sleep: Callable[[float], None] = time.sleep,
@@ -183,21 +183,26 @@ class Agent:
             cookies_file=self.config.cookies_file,
             progress=progress,
         )
-        receipt = build_receipt(source, payload=payload, node_id=self.config.node_id)
-        self._upload(
+        receipt = build_receipt(
+            source, payload=payload, node_id=self.config.node_id, assignment_id=str(assignment.id)
+        )
+        landed = self._upload(
             self._s3_factory(),
             bucket=str(payload["bucket"]),
             source=source,
             receipt=receipt,
             progress=progress,
-        )
+        ) or receipt
+        # Report what is in S3 (possibly another node's earlier download of
+        # the same video), never what this run would have written.
         return {
-            "sha256": source.sha256,
-            "bytes": source.bytes,
-            "duration_seconds": round(source.duration_seconds, 3),
-            "title": source.title,
-            "uploader": source.uploader,
-            "video_id": source.video_id,
+            "sha256": landed.get("sha256"),
+            "bytes": landed.get("bytes"),
+            "duration_seconds": landed.get("duration_seconds"),
+            "title": landed.get("title"),
+            "uploader": landed.get("uploader"),
+            "video_id": landed.get("video_id"),
+            "adopted": landed is not receipt,
         }
 
     def _do_separate(

@@ -105,8 +105,14 @@ async def _wait_phase(job_repo, job_id, phase: str, timeout: float = 5.0) -> Non
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
-def _stub_source_receipt(monkeypatch, *, sha256: str = "c" * 64, problem: str | None = None):
+def _stub_source_receipt(monkeypatch, *, sha256: str = "c" * 64, problem: str | None = None,
+                         present: bool = True) -> dict:
+    """Stub the S3 receipt; returns a state dict whose ``present`` flag tests can flip."""
+    state = {"present": present}
+
     async def _read(ctx, track_id):
+        if not state["present"]:
+            return None
         return {
             "interface": nodes.SOURCE_INTERFACE,
             "object_key": cloud.source_key(track_id),
@@ -122,6 +128,7 @@ def _stub_source_receipt(monkeypatch, *, sha256: str = "c" * 64, problem: str | 
 
     monkeypatch.setattr(nodes, "_read_source_receipt", _read)
     monkeypatch.setattr(nodes, "_verify_source_receipt", _verify)
+    return state
 
 
 def _stub_package_ready(monkeypatch, ready: bool = True):
@@ -210,8 +217,13 @@ async def test_url_job_runs_download_then_separation_on_the_node_to_ready(
     separation assignment under the dispatch key -> handoff proven ->
     verifying/publishing -> ready. RunPod is never called."""
     _stub_cloud_intake(monkeypatch)
-    _stub_source_receipt(monkeypatch, sha256="d" * 64)
-    _stub_package_ready(monkeypatch, True)
+    receipt = _stub_source_receipt(monkeypatch, sha256="d" * 64, present=False)
+    package = {"ready": False}
+
+    async def _ready(ctx, *, idempotency_key):
+        return package["ready"]
+
+    monkeypatch.setattr(cloud, "package_ready", _ready)
     await _register(node_repo)
     job = await job_repo.create_job(
         source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ", title="T"
@@ -224,6 +236,7 @@ async def test_url_job_runs_download_then_separation_on_the_node_to_ready(
         assert await node_repo.acknowledge(dl.id, node_id=MAC)
         assert await node_repo.progress(dl.id, node_id=MAC, phase="download: 50%")
         await _wait_phase(job_repo, job.id, f"{MAC}: download: 50%")
+        receipt["present"] = True  # source.json written last, then the report
         assert await node_repo.complete(dl.id, node_id=MAC, detail={"sha256": "d" * 64})
         sep = await _wait_assignment(node_repo, job.id, NodeAssignmentKind.separate)
         assert sep.idempotency_key == f"{job.id.hex}:0"
@@ -232,6 +245,7 @@ async def test_url_job_runs_download_then_separation_on_the_node_to_ready(
         assert await node_repo.acknowledge(sep.id, node_id=MAC)
         assert await node_repo.progress(sep.id, node_id=MAC, phase="separate: 80%")
         await _wait_phase(job_repo, job.id, f"{MAC}: separate: 80%")
+        package["ready"] = True  # handoff.json written last, then the report
         assert await node_repo.complete(sep.id, node_id=MAC, detail={"uploads": 7})
         return dl, sep
 
@@ -462,23 +476,27 @@ async def test_routing_only_never_dispatches_to_runpod(
     assert names.count("node_wait") == 1 and "fallback_runpod" not in names
 
 
-async def test_stalled_node_separation_is_expired_and_redispatched(
+async def test_stalled_node_separation_is_expired_and_redispatched_to_another_node(
     cloud_settings, job_repo, node_repo, upload_job, monkeypatch
 ):
     _stub_cloud_intake(monkeypatch)
-    _stub_package_ready(monkeypatch, True)
+    _stub_package_ready(monkeypatch, False)
     await _register(node_repo)
+    await _register(node_repo, "dell-9530", device="cuda")
     fake = FakeRunPodClient([])
     orch, task = await _run(cloud_settings, fake)
     try:
         first = await _wait_assignment(node_repo, upload_job.id, NodeAssignmentKind.separate)
-        assert await node_repo.acknowledge(first.id, node_id=MAC)
-        # ...then silence past node_stall_seconds: expired, attempt 1 under a new key.
+        assert await node_repo.acknowledge(first.id, node_id=first.node_id)
+        # ...then silence past node_stall_seconds: expired, attempt 1 under a new
+        # key, and the node that stalled is not picked again for this job.
         second = await _wait_assignment(
             node_repo, upload_job.id, NodeAssignmentKind.separate, after=first.id, timeout=10
         )
         assert second.idempotency_key == f"{upload_job.id.hex}:1"
-        assert await node_repo.complete(second.id, node_id=MAC, detail={})
+        assert second.node_id != first.node_id
+        _stub_package_ready(monkeypatch, True)
+        assert await node_repo.complete(second.id, node_id=second.node_id, detail={})
         ready = await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
     finally:
         await _stop(orch, task)
@@ -488,3 +506,81 @@ async def test_stalled_node_separation_is_expired_and_redispatched(
     events = await job_repo.list_events(upload_job.id)
     assert [e.detail["error_code"] for e in events if e.event == "retry_scheduled"] == ["NODE_FAILED"]
     assert any(e.event == "node_expired" for e in events)
+
+
+async def test_only_node_that_stalled_this_job_yields_to_runpod(
+    cloud_settings, job_repo, node_repo, upload_job, monkeypatch
+):
+    """A node that keeps heartbeating but never acknowledges must not block the
+    RunPod fallback forever: after it expires, it is not picked again for this
+    job, so the wait window runs and RunPod takes the retry (B17)."""
+    _stub_cloud_intake(monkeypatch)
+    _stub_package_ready(monkeypatch, False)
+    await _register(node_repo)
+    fake = FakeRunPodClient([
+        {"status": "COMPLETED", "output": {"separation": {"sample_count": 44100}}},
+    ])
+    orch, task = await _run(cloud_settings, fake)
+    try:
+        first = await _wait_assignment(node_repo, upload_job.id, NodeAssignmentKind.separate)
+        ready = await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=15)
+    finally:
+        await _stop(orch, task)
+    assert (await node_repo.get_assignment(first.id)).status == NodeAssignmentStatus.expired
+    assert len(fake.dispatched) == 1 and fake.dispatched[0][1] == f"{upload_job.id.hex}:1"
+    assert ready.runpod_job_id == "rp-1"
+    names = [e.event for e in await job_repo.list_events(upload_job.id)]
+    assert names.index("node_expired") < names.index("fallback_runpod")
+
+
+async def test_non_youtube_url_fails_closed_before_any_node(cloud_settings, job_repo, node_repo):
+    await _register(node_repo)
+    job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://vimeo.com/12345")
+    orch, task = await _run(cloud_settings)
+    try:
+        failed = await wait_for_status(job_repo, job.id, JobStage.failed, timeout=10)
+    finally:
+        await _stop(orch, task)
+    assert failed.error_code == "YTDLP_BLOCKED" and failed.attempt == 0
+    assert await node_repo.latest_for_job(job.id) is None
+
+
+async def test_lost_download_report_completes_from_the_s3_marker(
+    cloud_settings, job_repo, node_repo, monkeypatch
+):
+    _stub_source_receipt(monkeypatch, sha256="e" * 64)
+    await _register(node_repo)
+    job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ")
+    orch, task = await _run(cloud_settings)
+    try:
+        dl = await _wait_assignment(node_repo, job.id, NodeAssignmentKind.download)
+        # The node acknowledged, wrote source.json (stubbed present), and its
+        # completion report never arrived: the marker still completes it.
+        assert await node_repo.acknowledge(dl.id, node_id=MAC)
+        job_after = await wait_for_status(job_repo, job.id, JobStage.dispatched, timeout=10)
+    finally:
+        await _stop(orch, task)
+    assert job_after.input_checksum == "e" * 64
+    done = await node_repo.get_assignment(dl.id)
+    assert done.status == NodeAssignmentStatus.completed
+    assert done.detail == {"completed_by": "s3-marker"}
+    # The node is free again (it may already hold this job's separation).
+    assert (await node_repo.get(MAC)).busy_assignment_id != dl.id
+
+
+async def test_lost_separation_report_completes_from_handoff(
+    cloud_settings, job_repo, node_repo, upload_job, monkeypatch
+):
+    _stub_cloud_intake(monkeypatch)
+    _stub_package_ready(monkeypatch, True)  # handoff.json "exists" from the start
+    await _register(node_repo)
+    fake = FakeRunPodClient([])
+    orch, task = await _run(cloud_settings, fake)
+    try:
+        sep = await _wait_assignment(node_repo, upload_job.id, NodeAssignmentKind.separate)
+        ready = await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
+    finally:
+        await _stop(orch, task)
+    assert fake.dispatched == []
+    assert (await node_repo.get_assignment(sep.id)).detail == {"completed_by": "s3-marker"}
+    assert ready.runpod_job_id == nodes.executor_id(sep.id)

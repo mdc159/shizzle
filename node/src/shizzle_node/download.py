@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -18,9 +19,42 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 SOURCE_INTERFACE = "shizzle-source-v1"
 Progress = Callable[[str], None]
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
+
+
+def youtube_video_id(url: str) -> str | None:
+    """The single YouTube video id in ``url``; None for anything else.
+
+    Mirrors the control plane's check (library/.../orchestrator/nodes.py): the
+    node refuses to fetch anything that is not one YouTube video, so it can
+    never be pointed at a private address or an arbitrary host.
+    """
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or parts.username or parts.password:
+        return None
+    host = (parts.hostname or "").lower()
+    candidate: str | None = None
+    if host in {"youtu.be", "www.youtu.be"}:
+        candidate = parts.path.removeprefix("/").split("/")[0]
+    elif host in _YOUTUBE_HOSTS and parts.path == "/watch":
+        values = parse_qs(parts.query).get("v", [])
+        candidate = values[0] if len(values) == 1 else None
+    elif host in _YOUTUBE_HOSTS:
+        segments = parts.path.split("/")
+        if len(segments) == 3 and segments[1] in {"shorts", "live", "embed"}:
+            candidate = segments[2]
+    if candidate and _VIDEO_ID_RE.fullmatch(candidate):
+        return candidate
+    return None
 
 
 class DownloadError(RuntimeError):
@@ -125,6 +159,10 @@ def download_source(
     except ImportError as exc:  # pragma: no cover - environment problem
         raise DownloadError("DOWNLOAD_FAILED", "yt-dlp is not installed") from exc
 
+    video_id = youtube_video_id(url)
+    if video_id is None:
+        raise DownloadError("URL_REFUSED", "only a link to one YouTube video is fetched")
+    url = f"https://www.youtube.com/watch?v={video_id}"
     workdir.mkdir(parents=True, exist_ok=True)
     for stale in workdir.glob("source.*"):
         stale.unlink()
@@ -151,6 +189,8 @@ def download_source(
         "merge_output_format": "mp4",
         "outtmpl": str(workdir / "source.%(ext)s"),
         "noplaylist": True,
+        # Never the generic extractor: that would fetch arbitrary media URLs.
+        "allowed_extractors": ["youtube"],
         "quiet": True,
         "no_warnings": True,
         "progress_hooks": [hook],
@@ -221,10 +261,16 @@ def _to_mp4(source: Path, target: Path, *, ffmpeg: str = "ffmpeg") -> None:
 
 
 def build_receipt(
-    source: SourceFile, *, payload: dict[str, Any], node_id: str, now: datetime | None = None
+    source: SourceFile,
+    *,
+    payload: dict[str, Any],
+    node_id: str,
+    assignment_id: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     return {
         "interface": SOURCE_INTERFACE,
+        "assignment_id": assignment_id,
         "track_id": str(payload["track_id"]),
         "object_key": str(payload["source_key"]),
         "bytes": source.bytes,
@@ -247,32 +293,69 @@ def upload_source(
     source: SourceFile,
     receipt: dict[str, Any],
     progress: Progress,
-) -> None:
-    """Upload source.mp4, verify its size, then write source.json LAST (A12).
+) -> dict[str, Any]:
+    """Write source.mp4, verify its size, then source.json LAST (A12).
 
-    Idempotent: an existing source.json with the same sha256 means a previous
-    run already finished and nothing is re-uploaded.
+    Both writes are conditional (``If-None-Match: *``): the first node to
+    finish owns the key, so a stale node that was reassigned away can never
+    overwrite a source the orchestrator already accepted. When the key is
+    already owned, this run adopts the existing receipt (it is the same video)
+    and returns it, so the completion report describes what is in S3.
     """
     key = receipt["object_key"]
     receipt_key = f"sources/{receipt['track_id']}/source.json"
     existing = _read_json(s3, bucket, receipt_key)
-    if existing is not None and existing.get("sha256") == source.sha256:
-        progress("upload: already complete")
-        return
+    if existing is not None:
+        progress("upload: already complete (adopting the existing source)")
+        return existing
     progress("upload: source.mp4")
-    s3.upload_file(str(source.path), bucket, key, ExtraArgs={"ContentType": "video/mp4"})
+    try:
+        with source.path.open("rb") as body:
+            s3.put_object(
+                Bucket=bucket, Key=key, Body=body, ContentType="video/mp4", IfNoneMatch="*"
+            )
+    except Exception as exc:
+        if not _precondition_failed(exc):
+            raise
+        existing = _read_json(s3, bucket, receipt_key)
+        if existing is not None:
+            progress("upload: another node finished first; adopting its receipt")
+            return existing
+        raise DownloadError(
+            "SOURCE_RACE", "source.mp4 exists but its receipt does not yet; retry later"
+        ) from exc
     head = s3.head_object(Bucket=bucket, Key=key)
     if int(head.get("ContentLength", -1)) != source.bytes:
         raise DownloadError(
             "UPLOAD_FAILED", f"uploaded {head.get('ContentLength')} bytes, expected {source.bytes}"
         )
     progress("upload: source.json")
-    s3.put_object(
-        Bucket=bucket,
-        Key=receipt_key,
-        Body=json.dumps(receipt, indent=2, allow_nan=False).encode("utf-8"),
-        ContentType="application/json",
-    )
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=receipt_key,
+            Body=json.dumps(receipt, indent=2, allow_nan=False).encode("utf-8"),
+            ContentType="application/json",
+            IfNoneMatch="*",
+        )
+    except Exception as exc:
+        if not _precondition_failed(exc):
+            raise
+        existing = _read_json(s3, bucket, receipt_key)
+        if existing is None:
+            raise
+        progress("upload: receipt already written by another node; adopting it")
+        return existing
+    return receipt
+
+
+def _precondition_failed(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code", ""))
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code == "PreconditionFailed" or status == 412
 
 
 def _read_json(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
