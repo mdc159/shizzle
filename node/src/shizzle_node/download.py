@@ -220,7 +220,7 @@ def download_source(
         raise DownloadError("DOWNLOAD_FAILED", "yt-dlp produced no file")
     if target not in produced:
         progress("download: remuxing to MP4")
-        _to_mp4(produced[0], target)
+        _to_mp4(produced[0], target, progress=progress)
     if target.stat().st_size > max_bytes:
         raise DownloadError("SOURCE_SIZE", f"source is {target.stat().st_size} bytes")
 
@@ -240,13 +240,22 @@ def download_source(
     )
 
 
-def _to_mp4(source: Path, target: Path, *, ffmpeg: str = "ffmpeg") -> None:
-    """Remux (or, failing that, transcode) a non-MP4 download into MP4."""
+def _to_mp4(
+    source: Path, target: Path, *, ffmpeg: str = "ffmpeg", progress: Progress | None = None
+) -> None:
+    """Remux (or, failing that, transcode) a non-MP4 download into MP4.
+
+    Each step is announced first; while ffmpeg runs the agent's heartbeat
+    (which names the busy assignment) keeps the assignment alive on the
+    control plane, so a long transcode is never mistaken for a stall.
+    """
     if shutil.which(ffmpeg) is None:
         raise DownloadError("DOWNLOAD_FAILED", "ffmpeg is not on PATH to produce an MP4")
+    report = progress or (lambda _m: None)
     # Bounded like probe(): a hung ffmpeg must not stall the one-at-a-time
     # assignment loop until someone restarts the agent.
     try:
+        report("convert: remux to mp4")
         copy = subprocess.run(
             [ffmpeg, "-y", "-i", str(source), "-c", "copy", "-movflags", "+faststart", str(target)],
             capture_output=True,
@@ -255,6 +264,7 @@ def _to_mp4(source: Path, target: Path, *, ffmpeg: str = "ffmpeg") -> None:
             timeout=REMUX_TIMEOUT_SECONDS,
         )
         if copy.returncode != 0:
+            report("convert: transcode to h264/aac (this can take a while)")
             encode = subprocess.run(
                 [ffmpeg, "-y", "-i", str(source), "-c:v", "libx264", "-preset", "veryfast",
                  "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",

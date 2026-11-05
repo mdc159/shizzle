@@ -61,6 +61,7 @@ class Agent:
         self._device = device_resolver(config.device) if "separate" in config.capabilities else "none"
         self._sleep = sleep
         self._busy: uuid.UUID | None = None
+        self._workdir: Path | None = None
         self._stop = threading.Event()
 
     # --- lifecycle -------------------------------------------------------------
@@ -78,6 +79,14 @@ class Agent:
     @property
     def stop_requested(self) -> bool:
         return self._stop.is_set()
+
+    def abandon(self) -> None:
+        """Forced exit mid-job: drop the staged files the interrupted
+        ``finally`` would otherwise have removed. The orchestrator's stall
+        watchdog reclaims the assignment itself (B16)."""
+        if self._workdir is not None:
+            shutil.rmtree(self._workdir, ignore_errors=True)
+            self._workdir = None
 
     def heartbeat_once(self) -> bool:
         try:
@@ -158,6 +167,7 @@ class Agent:
         self._busy = assignment.id
         self.heartbeat_once()
         workdir = self.config.workdir / assignment.job_id / assignment.kind
+        self._workdir = workdir
         last = [""]
 
         def progress(msg: str) -> None:
@@ -203,6 +213,7 @@ class Agent:
         finally:
             # Success or failure, the staged source/package leaves the disk.
             shutil.rmtree(workdir, ignore_errors=True)
+            self._workdir = None
             self._busy = None
             self.heartbeat_once()
 

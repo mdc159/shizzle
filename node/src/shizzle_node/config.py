@@ -27,6 +27,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import __version__
 
@@ -86,11 +87,15 @@ class NodeConfig:
         api_base = need("SHIZZLE_API_BASE").rstrip("/")
         if not api_base.startswith(("https://", "http://")):
             raise ConfigError("SHIZZLE_API_BASE must be an http(s) URL")
-        if api_base.startswith("http://"):
+        parts = urlsplit(api_base)
+        if parts.username or parts.password or not parts.hostname:
+            raise ConfigError("SHIZZLE_API_BASE must not carry credentials and must name a host")
+        if parts.scheme == "http":
             # Bearer tokens travel on every request: plain http only for a
-            # local development control plane, and only when asked for.
-            host = api_base[len("http://"):].split("/")[0].split(":")[0].lower()
-            if host not in ("localhost", "127.0.0.1", "::1", "[::1]") and env.get(
+            # local development control plane, and only when asked for. The
+            # host comes from a real URL parse, never from string splitting.
+            host = parts.hostname.lower()
+            if host not in ("localhost", "127.0.0.1", "::1") and env.get(
                 "SHIZZLE_NODE_ALLOW_HTTP", ""
             ).strip() != "1":
                 raise ConfigError(

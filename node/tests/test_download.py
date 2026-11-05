@@ -74,8 +74,9 @@ class _FakeS3:
         if IfNoneMatch == "*" and Key in self.objects:
             raise _Precondition()
         data = Body.read() if hasattr(Body, "read") else Body
-        if ChecksumSHA256 is not None:
-            # S3 verifies the upload against the declared digest.
+        if Key.endswith(".mp4"):
+            # The source must declare its SHA-256 (A12) and S3 verifies it.
+            assert ChecksumSHA256 is not None, "source.mp4 uploaded without ChecksumSHA256"
             assert base64.b64decode(ChecksumSHA256) == hashlib.sha256(data).digest()
         self.objects[Key] = data
         self.order.append(f"put:{Key}:{ContentType}:{IfNoneMatch}")

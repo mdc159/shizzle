@@ -268,6 +268,17 @@ async def test_heartbeat_adopts_only_an_open_assignment_held_by_this_node(node_c
     )
     await c.post("/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(theirs.id)}, headers=MAC)
     assert (await repo.get("mac-mini")).busy_assignment_id is None
+    # A heartbeat naming the open assignment it holds keeps that assignment
+    # alive: a long ffmpeg/demucs run without a progress line is not a stall.
+    third = await _claimed_job(app, worker_id="w3")
+    mine = await repo.create_assignment(
+        third.id, worker_id="w3", node_id="mac-mini", kind=NodeAssignmentKind.download, payload={}
+    )
+    before = (await repo.get_assignment(mine.id)).heartbeat_at
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(mine.id)}, headers=MAC)
+    after = (await repo.get_assignment(mine.id)).heartbeat_at
+    assert after is not None and (before is None or after > before)
+    assert await repo.expire(mine.id, reason="done")
     # A heartbeat without capabilities keeps the stored set.
     await c.post(
         "/api/nodes/mac-mini/heartbeat", json={"capabilities": {"download": True}}, headers=MAC

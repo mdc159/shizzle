@@ -133,6 +133,12 @@ def test_config_requires_https_except_for_local_development():
         NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://evil.example"})
     with pytest.raises(ConfigError, match="https"):
         NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://localhost.evil.example"})
+    # Userinfo cannot smuggle the token to another host, and IPv6 loopback is local.
+    with pytest.raises(ConfigError, match="credentials"):
+        NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://localhost:80@evil.example"})
+    with pytest.raises(ConfigError, match="credentials"):
+        NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "https://user:pw@shizzle.systems"})
+    assert NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://[::1]:8000"}).api_base == "http://[::1]:8000"
     allowed = NodeConfig.from_env(
         {**base, "SHIZZLE_API_BASE": "http://dev.example:8000", "SHIZZLE_NODE_ALLOW_HTTP": "1"}
     )

@@ -492,5 +492,4 @@ Asked and answered by the owner on 2026-11-05:
 | RunPod `workers_max` during rollout | **Leave it as is.** `SHIZZLE_NODE_ROUTING=prefer` keeps RunPod idle while a node is online. |
 | Do uploads also prefer a node? | **Yes.** Rule 3 is about load, not source type. Upload jobs go to S3 as today, then a node separates if one is online. |
 | Mac fork and PR #50 | **Nodes run the existing containers; no code copy required.** Images are the interface: the production worker image for separation, the fork's ingest image for download. PR #50's import API is not the node path and stays parked. |
-
 | Mac runtime (2026-11-05, evening) | **Native `mps`, not a container.** The plan's runtime section was container-first; the Mac inventory found no separator container and Docker Desktop cannot reach the Apple GPU, so the measurement the plan asked for was not taken and the agent runs the production handler natively. Revisit only if a GPU-capable container runtime appears on macOS. |

@@ -143,7 +143,12 @@ class Settings(BaseSettings):
 
     @property
     def node_routing(self) -> str:
-        return self.shizzle_node_routing
+        # Normalized here as well: a value assigned after construction (tests,
+        # tooling) bypasses the validator.
+        mode = self.shizzle_node_routing.strip().lower()
+        if mode not in ("prefer", "only", "off"):
+            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        return mode
 
     @property
     def node_routing_enabled(self) -> bool:

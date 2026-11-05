@@ -1309,17 +1309,23 @@ class NodeRepository:
             # reports no busy assignment while the server still records one
             # keeps the server's record: the stall watchdog decides, not the
             # heartbeat, so a brief restart cannot free a slot mid-job.
-            if busy_assignment_id is not None and node.busy_assignment_id is None:
+            if busy_assignment_id is not None:
                 # Only an open assignment held by this node: after the watchdog
                 # expired one, the agent's next heartbeat must not re-mark the
                 # node busy with a dead id that nothing would ever clear.
-                held = await session.get(NodeAssignment, busy_assignment_id)
+                held = await session.get(NodeAssignment, busy_assignment_id, with_for_update=True)
                 if (
                     held is not None
                     and held.node_id == node_id
                     and held.status in NODE_ASSIGNMENT_OPEN
                 ):
-                    node.busy_assignment_id = busy_assignment_id
+                    if node.busy_assignment_id is None:
+                        node.busy_assignment_id = busy_assignment_id
+                    if node.busy_assignment_id == busy_assignment_id:
+                        # The node holding it is alive: a long ffmpeg or demucs
+                        # run with no progress line is not a stall (B16).
+                        held.heartbeat_at = now
+                        held.updated_at = now
             node.last_seen_at = now
             node.updated_at = now
             return node
