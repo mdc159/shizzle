@@ -154,5 +154,7 @@ def test_error_codes_are_stable_strings():
         "PUBLISH_FAILED",
         "MAX_ATTEMPTS_EXCEEDED",
         "INTERNAL",
+        "NO_NODE_AVAILABLE",
+        "NODE_FAILED",
     }
     assert {c.value for c in ErrorCode} == expected

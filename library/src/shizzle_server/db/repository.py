@@ -20,11 +20,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..errors import ErrorCode
 from .models import (
     ALLOWED_TRANSITIONS,
+    NODE_ASSIGNMENT_OPEN,
     RUNNABLE_STAGES,
     TERMINAL_STAGES,
     Job,
     JobEvent,
     JobStage,
+    Node,
+    NodeAssignment,
+    NodeAssignmentKind,
+    NodeAssignmentStatus,
     OrchestratorHeartbeat,
     PlaybackEvent,
     PlaybackSession,
@@ -1230,3 +1235,287 @@ class HeartbeatRepository:
         async with self._sf() as session:
             res = await session.execute(select(func.max(OrchestratorHeartbeat.updated_at)))
             return _aware(res.scalar_one_or_none())
+
+
+class NodeRepository:
+    """Worker-node registry and assignments (docs/WORKER-NODES.md).
+
+    Assignments are created only by the orchestrator while it owns the job's
+    lease (B16) and are reported against by exactly the node they name. The
+    repository never trusts a report as proof of work: the orchestrator
+    re-checks the S3 markers before advancing, as it does for RunPod.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    # --- registry ------------------------------------------------------------
+
+    async def heartbeat(
+        self,
+        node_id: str,
+        *,
+        display_name: str | None = None,
+        capabilities: dict[str, Any] | None = None,
+        agent_version: str | None = None,
+        busy_assignment_id: uuid.UUID | None = None,
+    ) -> Node:
+        """Upsert the node row from an authenticated heartbeat."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            node = await session.get(Node, node_id, with_for_update=True)
+            if node is None:
+                node = Node(id=node_id, display_name=display_name or node_id)
+                session.add(node)
+            if display_name:
+                node.display_name = display_name
+            if capabilities is not None:
+                node.capabilities = capabilities
+            if agent_version is not None:
+                node.agent_version = agent_version[:64]
+            # The node's own view of what it holds. A node that restarted and
+            # reports no busy assignment while the server still records one
+            # keeps the server's record: the stall watchdog decides, not the
+            # heartbeat, so a brief restart cannot free a slot mid-job.
+            if busy_assignment_id is not None and node.busy_assignment_id is None:
+                node.busy_assignment_id = busy_assignment_id
+            node.last_seen_at = now
+            node.updated_at = now
+            return node
+
+    async def get(self, node_id: str) -> Node | None:
+        async with self._sf() as session:
+            return await session.get(Node, node_id)
+
+    async def list_nodes(self) -> list[Node]:
+        async with self._sf() as session:
+            res = await session.execute(select(Node).order_by(Node.id))
+            return list(res.scalars().all())
+
+    async def set_disabled(self, node_id: str, disabled: bool) -> bool:
+        async with self._sf() as session, session.begin():
+            node = await session.get(Node, node_id, with_for_update=True)
+            if node is None:
+                return False
+            node.disabled_at = utcnow() if disabled else None
+            node.updated_at = utcnow()
+            return True
+
+    async def available(
+        self,
+        kind: NodeAssignmentKind,
+        *,
+        online_seconds: float,
+        now: datetime | None = None,
+    ) -> list[Node]:
+        """Online, enabled, idle nodes advertising ``kind`` — oldest-idle first."""
+        now = now or utcnow()
+        cutoff = now - timedelta(seconds=online_seconds)
+        async with self._sf() as session:
+            res = await session.execute(
+                select(Node)
+                .where(
+                    Node.disabled_at.is_(None),
+                    Node.busy_assignment_id.is_(None),
+                    Node.last_seen_at.is_not(None),
+                    Node.last_seen_at >= cutoff,
+                )
+                .order_by(Node.updated_at, Node.id)
+            )
+            nodes = list(res.scalars().all())
+        return [
+            node
+            for node in nodes
+            if isinstance(node.capabilities, dict) and bool(node.capabilities.get(kind.value))
+        ]
+
+    # --- assignments: orchestrator side -------------------------------------
+
+    async def create_assignment(
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: str,
+        node_id: str,
+        kind: NodeAssignmentKind,
+        payload: dict[str, Any],
+        idempotency_key: str | None = None,
+    ) -> NodeAssignment | None:
+        """Hand one unit of work to one idle node, inside the job's lease (B16).
+
+        Returns None when the node is no longer idle/enabled (a peer took it
+        between the availability read and this locked write). Marks the node
+        busy and records ``jobs.executor`` in the same transaction.
+        """
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.downloading)
+            _require_lease(job, worker_id, job.status, now)
+            node = await session.get(Node, node_id, with_for_update=True)
+            if node is None or node.disabled_at is not None or node.busy_assignment_id is not None:
+                return None
+            assignment = NodeAssignment(
+                job_id=job_id,
+                node_id=node_id,
+                kind=kind,
+                status=NodeAssignmentStatus.assigned,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                heartbeat_at=now,
+            )
+            session.add(assignment)
+            await session.flush()
+            node.busy_assignment_id = assignment.id
+            node.updated_at = now
+            job.executor = f"node:{node_id}"
+            job.updated_at = now
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    event="node_assigned",
+                    detail={
+                        "assignment_id": str(assignment.id),
+                        "node_id": node_id,
+                        "kind": kind.value,
+                        "idempotency_key": idempotency_key,
+                    },
+                )
+            )
+            return assignment
+
+    async def get_assignment(self, assignment_id: uuid.UUID) -> NodeAssignment | None:
+        async with self._sf() as session:
+            return await session.get(NodeAssignment, assignment_id)
+
+    async def latest_for_job(
+        self, job_id: uuid.UUID, kind: NodeAssignmentKind | None = None
+    ) -> NodeAssignment | None:
+        async with self._sf() as session:
+            stmt = select(NodeAssignment).where(NodeAssignment.job_id == job_id)
+            if kind is not None:
+                stmt = stmt.where(NodeAssignment.kind == kind)
+            stmt = stmt.order_by(NodeAssignment.created_at.desc(), NodeAssignment.id.desc()).limit(1)
+            return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_job(self, job_id: uuid.UUID) -> list[NodeAssignment]:
+        async with self._sf() as session:
+            res = await session.execute(
+                select(NodeAssignment)
+                .where(NodeAssignment.job_id == job_id)
+                .order_by(NodeAssignment.created_at, NodeAssignment.id)
+            )
+            return list(res.scalars().all())
+
+    async def expire(self, assignment_id: uuid.UUID, *, reason: str) -> bool:
+        """Orchestrator gave up on a silent node: close the assignment, free the node."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+                return False
+            assignment.status = NodeAssignmentStatus.expired
+            assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
+            assignment.updated_at = now
+            await self._free_node(session, assignment, now)
+            return True
+
+    # --- assignments: node side ---------------------------------------------
+
+    async def next_for_node(self, node_id: str) -> NodeAssignment | None:
+        """The oldest assignment waiting for this node, or None."""
+        async with self._sf() as session:
+            res = await session.execute(
+                select(NodeAssignment)
+                .where(
+                    NodeAssignment.node_id == node_id,
+                    NodeAssignment.status.in_(
+                        (NodeAssignmentStatus.assigned, NodeAssignmentStatus.acknowledged)
+                    ),
+                )
+                .order_by(NodeAssignment.created_at, NodeAssignment.id)
+                .limit(1)
+            )
+            return res.scalar_one_or_none()
+
+    async def acknowledge(self, assignment_id: uuid.UUID, *, node_id: str) -> bool:
+        return await self._node_update(
+            assignment_id,
+            node_id,
+            allowed=(NodeAssignmentStatus.assigned, NodeAssignmentStatus.acknowledged),
+            status=NodeAssignmentStatus.acknowledged,
+        )
+
+    async def progress(self, assignment_id: uuid.UUID, *, node_id: str, phase: str) -> bool:
+        return await self._node_update(
+            assignment_id,
+            node_id,
+            allowed=tuple(NODE_ASSIGNMENT_OPEN),
+            status=NodeAssignmentStatus.running,
+            phase=phase[:256],
+        )
+
+    async def complete(
+        self, assignment_id: uuid.UUID, *, node_id: str, detail: dict[str, Any] | None
+    ) -> bool:
+        return await self._node_update(
+            assignment_id,
+            node_id,
+            allowed=tuple(NODE_ASSIGNMENT_OPEN),
+            status=NodeAssignmentStatus.completed,
+            detail=detail,
+            terminal=True,
+        )
+
+    async def fail(
+        self, assignment_id: uuid.UUID, *, node_id: str, detail: dict[str, Any] | None
+    ) -> bool:
+        return await self._node_update(
+            assignment_id,
+            node_id,
+            allowed=tuple(NODE_ASSIGNMENT_OPEN),
+            status=NodeAssignmentStatus.failed,
+            detail=detail,
+            terminal=True,
+        )
+
+    async def _node_update(
+        self,
+        assignment_id: uuid.UUID,
+        node_id: str,
+        *,
+        allowed: tuple[NodeAssignmentStatus, ...],
+        status: NodeAssignmentStatus,
+        phase: str | None = None,
+        detail: dict[str, Any] | None = None,
+        terminal: bool = False,
+    ) -> bool:
+        """A node may only move its own open assignment; anything else is a no-op False."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
+            if (
+                assignment is None
+                or assignment.node_id != node_id
+                or assignment.status not in allowed
+            ):
+                return False
+            assignment.status = status
+            assignment.heartbeat_at = now
+            assignment.updated_at = now
+            if phase is not None:
+                assignment.phase = phase
+            if detail is not None:
+                assignment.detail = detail
+            if terminal:
+                await self._free_node(session, assignment, now)
+            return True
+
+    async def _free_node(
+        self, session: AsyncSession, assignment: NodeAssignment, now: datetime
+    ) -> None:
+        node = await session.get(Node, assignment.node_id, with_for_update=True)
+        if node is not None and node.busy_assignment_id == assignment.id:
+            node.busy_assignment_id = None
+            node.updated_at = now
