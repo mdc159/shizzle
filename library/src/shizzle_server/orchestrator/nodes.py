@@ -195,6 +195,14 @@ def _prefer_untried(candidates: list[Any], tried: set[str]) -> list[Any]:
 
 def _assignment_is_stale(assignment: NodeAssignment, ctx: StageContext) -> str | None:
     """Why an open assignment should be expired, or None while it is healthy."""
+    total = _age_seconds(assignment.created_at) or 0.0
+    if total > ctx.settings.node_assignment_max_seconds:
+        # The node's heartbeat keeps the assignment alive while it works, so
+        # a wedged run on a live node needs this absolute cap to be reclaimed.
+        return (
+            f"running for {total:.0f}s (> NODE_ASSIGNMENT_MAX_SECONDS "
+            f"{ctx.settings.node_assignment_max_seconds:.0f}s)"
+        )
     if assignment.status == NodeAssignmentStatus.assigned:
         age = _age_seconds(assignment.created_at) or 0.0
         if age > ctx.settings.node_ack_seconds:
@@ -209,8 +217,16 @@ def _assignment_is_stale(assignment: NodeAssignment, ctx: StageContext) -> str |
 async def _expire_and_retry(
     ctx: StageContext, assignment: NodeAssignment, reason: str
 ) -> StageError:
-    """Close a silent assignment and build the retryable error that redispatches."""
-    await _repo(ctx).expire(assignment.id, reason=reason, worker_id=ctx.worker_id)
+    """Close a silent assignment and build the retryable error that redispatches.
+
+    A still-open assignment is expired; one the node already reported
+    complete (but whose marker never appeared) is rejected, since ``expire``
+    only closes open ones.
+    """
+    if assignment.status == NodeAssignmentStatus.completed:
+        await _repo(ctx).reject(assignment.id, reason=reason, worker_id=ctx.worker_id)
+    else:
+        await _repo(ctx).expire(assignment.id, reason=reason, worker_id=ctx.worker_id)
     await ctx.jobs.append_event(
         ctx.job.id,
         NODE_EXPIRED_EVENT,

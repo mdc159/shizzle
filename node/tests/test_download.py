@@ -187,6 +187,57 @@ def test_orphan_that_vanishes_is_a_retryable_race_and_other_errors_propagate(tmp
         upload_source(Forbidden(), bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
 
 
+def test_tracked_runner_kills_a_hung_child_and_forgets_it():
+    import subprocess
+    import sys
+
+    from shizzle_node import download as dl
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        dl._run_tracked([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.2)
+    assert set() == dl._CHILDREN
+    done = dl._run_tracked([sys.executable, "-c", "print('hi')"], timeout=10)
+    assert done.returncode == 0 and done.stdout.strip() == "hi" and set() == dl._CHILDREN
+    dl.terminate_children()  # nothing to do, never raises
+
+
+def test_abandon_terminates_children_before_removing_the_workdir(tmp_path):
+    import subprocess
+    import sys
+    import threading
+
+    from shizzle_node import download as dl
+    from shizzle_node.agent import Agent
+    from shizzle_node.client import NodeClient
+    from shizzle_node.config import NodeConfig
+
+    config = NodeConfig.from_env({"SHIZZLE_API_BASE": "https://x", "SHIZZLE_NODE_ID": "n",
+                                  "SHIZZLE_NODE_TOKEN": "t", "SHIZZLE_NODE_WORKDIR": str(tmp_path)})
+    agent = Agent(config, NodeClient("https://x", "n", "t"), s3_factory=lambda: None,
+                  device_resolver=lambda d: d)
+    work = tmp_path / "job" / "download"
+    work.mkdir(parents=True)
+    (work / "source.mp4").write_bytes(b"x")
+    agent._workdir = work
+    started = threading.Event()
+    outcome: list[subprocess.CompletedProcess[str]] = []
+
+    def long_child():
+        started.set()
+        # abandon() kills the child, so communicate() returns (no timeout).
+        outcome.append(dl._run_tracked([sys.executable, "-c", "import time; time.sleep(30)"], timeout=20))
+
+    worker = threading.Thread(target=long_child)
+    worker.start()
+    started.wait(5)
+    while not dl._CHILDREN:
+        pass
+    agent.abandon()
+    worker.join(10)
+    assert not worker.is_alive() and not work.exists() and set() == dl._CHILDREN
+    assert outcome and outcome[0].returncode != 0  # killed, not completed
+
+
 @pytest.mark.parametrize("hang_on", ["remux", "transcode"])
 def test_a_hung_ffmpeg_is_a_structured_failure_not_a_stall(tmp_path, monkeypatch, hang_on):
     import subprocess
@@ -197,15 +248,15 @@ def test_a_hung_ffmpeg_is_a_structured_failure_not_a_stall(tmp_path, monkeypatch
     source.write_bytes(b"x")
     calls: list[list[str]] = []
 
-    def fake_run(cmd, **kwargs):  # noqa: ANN001
+    def fake_run(cmd, *, timeout):  # noqa: ANN001
         calls.append(cmd)
-        assert kwargs["timeout"] > 0
+        assert timeout > 0
         is_remux = "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
         if (hang_on == "remux" and is_remux) or (hang_on == "transcode" and not is_remux):
-            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+            raise subprocess.TimeoutExpired(cmd, timeout)
         return subprocess.CompletedProcess(cmd, 1, "", "remux refused")  # remux fails -> transcode
 
-    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+    monkeypatch.setattr(dl, "_run_tracked", fake_run)
     monkeypatch.setattr(dl.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
     with pytest.raises(DownloadError, match="DOWNLOAD_FAILED.*timed out"):
         dl._to_mp4(source, tmp_path / "source.mp4")

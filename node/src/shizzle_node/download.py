@@ -27,6 +27,35 @@ Progress = Callable[[str], None]
 REMUX_TIMEOUT_SECONDS = 600.0
 TRANSCODE_TIMEOUT_SECONDS = 3600.0
 
+# ffmpeg children started by this module, so a forced agent exit can end
+# them before removing the staged files they hold open (Windows locks them).
+_CHILDREN: set[subprocess.Popen[str]] = set()
+
+
+def _run_tracked(cmd: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _CHILDREN.add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    finally:
+        _CHILDREN.discard(proc)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def terminate_children() -> None:
+    """Kill any ffmpeg this module started (forced exit path)."""
+    for proc in list(_CHILDREN):
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:  # already gone, or unkillable: nothing more to do
+            pass
+        _CHILDREN.discard(proc)
+
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
 
@@ -256,22 +285,16 @@ def _to_mp4(
     # assignment loop until someone restarts the agent.
     try:
         report("convert: remux to mp4")
-        copy = subprocess.run(
+        copy = _run_tracked(
             [ffmpeg, "-y", "-i", str(source), "-c", "copy", "-movflags", "+faststart", str(target)],
-            capture_output=True,
-            text=True,
-            check=False,
             timeout=REMUX_TIMEOUT_SECONDS,
         )
         if copy.returncode != 0:
             report("convert: transcode to h264/aac (this can take a while)")
-            encode = subprocess.run(
+            encode = _run_tracked(
                 [ffmpeg, "-y", "-i", str(source), "-c:v", "libx264", "-preset", "veryfast",
                  "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
                  "-movflags", "+faststart", str(target)],
-                capture_output=True,
-                text=True,
-                check=False,
                 timeout=TRANSCODE_TIMEOUT_SECONDS,
             )
             if encode.returncode != 0:

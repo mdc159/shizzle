@@ -25,6 +25,7 @@ from .download import (
     build_receipt,
     download_source,
     existing_receipt,
+    terminate_children,
     upload_source,
 )
 from .separate import resolve_device, run_separation
@@ -84,9 +85,19 @@ class Agent:
         """Forced exit mid-job: drop the staged files the interrupted
         ``finally`` would otherwise have removed. The orchestrator's stall
         watchdog reclaims the assignment itself (B16)."""
-        if self._workdir is not None:
+        if self._workdir is None:
+            return
+        terminate_children()  # an ffmpeg still writing would keep files locked on Windows
+        for attempt in range(3):
             shutil.rmtree(self._workdir, ignore_errors=True)
-            self._workdir = None
+            if not self._workdir.exists():
+                break
+            time.sleep(0.5 * (attempt + 1))
+        if self._workdir.exists():
+            logger.warning(
+                "could not remove %s before exit; the next run of this job clears it", self._workdir
+            )
+        self._workdir = None
 
     def heartbeat_once(self) -> bool:
         try:

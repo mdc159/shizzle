@@ -383,6 +383,10 @@ reservation and confirmation with executor id `node:<assignment>` in
 `jobs.runpod_job_id`, so B3/B4/B10/B12 apply unchanged. A silent node
 (no acknowledgement within `NODE_ACK_SECONDS`, no progress within
 `NODE_STALL_SECONDS`) is expired and the job redispatches under a fresh key.
+A node's heartbeat that names the assignment it holds counts as progress
+(a long ffmpeg or demucs run prints nothing), so an assignment is also
+expired once it is older than `NODE_ASSIGNMENT_MAX_SECONDS` regardless of
+heartbeats: a wedged run on a live node is reclaimed, never parked forever.
 
 Guard: `library/tests/test_nodes_api.py`
 (`test_create_assignment_requires_the_job_lease`,

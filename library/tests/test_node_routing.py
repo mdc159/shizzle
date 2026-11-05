@@ -602,6 +602,55 @@ async def test_non_youtube_url_fails_closed_before_any_node(cloud_settings, job_
     assert await node_repo.latest_for_job(job.id) is None
 
 
+def test_stale_check_caps_the_age_of_a_heartbeating_assignment(cloud_settings):
+    """A live node's heartbeat keeps an assignment fresh; the absolute cap
+    still reclaims a wedged run (B16)."""
+    cloud_settings.node_assignment_max_seconds = 3600
+    cloud_settings.node_stall_seconds = 300
+    ctx = SimpleNamespace(settings=cloud_settings)
+    now = utcnow()
+    fresh = SimpleNamespace(status=NodeAssignmentStatus.running, created_at=now - timedelta(minutes=30),
+                            heartbeat_at=now, updated_at=now)
+    assert nodes._assignment_is_stale(fresh, ctx) is None
+    silent = SimpleNamespace(status=NodeAssignmentStatus.running, created_at=now - timedelta(minutes=30),
+                             heartbeat_at=now - timedelta(minutes=10), updated_at=now)
+    assert "no progress" in nodes._assignment_is_stale(silent, ctx)
+    wedged = SimpleNamespace(status=NodeAssignmentStatus.running, created_at=now - timedelta(hours=2),
+                             heartbeat_at=now, updated_at=now)
+    assert "NODE_ASSIGNMENT_MAX_SECONDS" in nodes._assignment_is_stale(wedged, ctx)
+
+
+async def test_completed_report_without_a_marker_closes_the_assignment(
+    cloud_settings, job_repo, node_repo, monkeypatch
+):
+    """The node said done but source.json never appeared: after the stall
+    window the completed assignment is closed (rejected) and the job retries;
+    it must not stay 'completed' and hit the same branch forever."""
+    _stub_source_receipt(monkeypatch, present=False)
+    cloud_settings.node_stall_seconds = 0.2
+    await _register(node_repo)
+    job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ")
+    orch, task = await _run(cloud_settings)
+    try:
+        dl = await _wait_assignment(node_repo, job.id, NodeAssignmentKind.download)
+        assert await node_repo.acknowledge(dl.id, node_id=MAC)
+        assert await node_repo.complete(dl.id, node_id=MAC, detail={})
+
+        async def _closed():
+            while True:
+                row = await node_repo.get_assignment(dl.id)
+                if row.status == NodeAssignmentStatus.failed:
+                    return row
+                await asyncio.sleep(0.02)
+
+        closed = await asyncio.wait_for(_closed(), timeout=10)
+    finally:
+        await _stop(orch, task)
+    assert "never appeared" in closed.detail["rejected_reason"]
+    events = [e.event for e in await job_repo.list_events(job.id)]
+    assert "node_expired" in events and "retry_scheduled" in events
+
+
 async def test_lost_download_report_completes_from_the_s3_marker(
     cloud_settings, job_repo, node_repo, monkeypatch
 ):

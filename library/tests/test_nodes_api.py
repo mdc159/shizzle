@@ -8,6 +8,7 @@ reports. Orchestrator routing lives in test_node_routing.py.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,13 @@ from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from shizzle_server.api.nodes import require_node
-from shizzle_server.db.models import NodeAssignmentKind, NodeAssignmentStatus, SourceType
+from shizzle_server.db.models import (
+    NodeAssignment,
+    NodeAssignmentKind,
+    NodeAssignmentStatus,
+    SourceType,
+    utcnow,
+)
 from shizzle_server.main import create_app
 
 MAC = {"Authorization": "Bearer mac-secret"}
@@ -274,10 +281,12 @@ async def test_heartbeat_adopts_only_an_open_assignment_held_by_this_node(node_c
     mine = await repo.create_assignment(
         third.id, worker_id="w3", node_id="mac-mini", kind=NodeAssignmentKind.download, payload={}
     )
-    before = (await repo.get_assignment(mine.id)).heartbeat_at
+    long_ago = utcnow() - timedelta(minutes=20)
+    async with repo._sf() as session, session.begin():
+        (await session.get(NodeAssignment, mine.id)).heartbeat_at = long_ago
     await c.post("/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(mine.id)}, headers=MAC)
     after = (await repo.get_assignment(mine.id)).heartbeat_at
-    assert after is not None and (before is None or after > before)
+    assert after is not None and after.replace(tzinfo=UTC) > long_ago
     assert await repo.expire(mine.id, reason="done")
     # A heartbeat without capabilities keeps the stored set.
     await c.post(

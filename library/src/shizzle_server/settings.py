@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # A running assignment whose heartbeat is older than this is failed and
     # redispatched under a fresh key (mirrors runpod_worker_stall_seconds).
     node_stall_seconds: float = 300.0
+    # Absolute cap on one assignment's age, whatever the node reports: the
+    # node heartbeat keeps a long ffmpeg/demucs run alive, so a wedged run on
+    # a live node must still be reclaimed (B16).
+    node_assignment_max_seconds: float = 3 * 3600.0
     # How long a separation waits for a node before RunPod is used.
     node_separate_wait_seconds: float = 120.0
     # How long a URL job waits for any download node (a sleeping Mac may wake).
