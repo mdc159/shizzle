@@ -1451,22 +1451,36 @@ class NodeRepository:
             )
             return list(res.scalars().all())
 
-    async def expire(self, assignment_id: uuid.UUID, *, reason: str) -> bool:
-        """Orchestrator gave up on a silent node: close the assignment, free the node."""
+    async def expire(
+        self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None
+    ) -> bool:
+        """Orchestrator gave up on a silent node: close the assignment, free the node.
+
+        With ``worker_id`` the write is fenced to the job's lease (B2): a
+        handler that lost its lease cannot expire an assignment a newer owner
+        may be relying on. Returns False when the fence fails.
+        """
         now = utcnow()
         async with self._sf() as session, session.begin():
             assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
             if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
                 return False
+            if worker_id is not None:
+                job = await session.get(Job, assignment.job_id, with_for_update=True)
+                if job is None or not _lease_is_owned(job, worker_id, now):
+                    return False
             assignment.status = NodeAssignmentStatus.expired
             assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
             assignment.updated_at = now
             await self._free_node(session, assignment, now)
             return True
 
-    async def reject(self, assignment_id: uuid.UUID, *, reason: str) -> bool:
+    async def reject(
+        self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None
+    ) -> bool:
         """Orchestrator refused what a node reported complete (e.g. a receipt
-        that fails A12): mark it failed so the retry assigns afresh, free the node."""
+        that fails A12): mark it failed so the retry assigns afresh, free the
+        node. Lease-fenced like ``expire`` when ``worker_id`` is given."""
         now = utcnow()
         async with self._sf() as session, session.begin():
             assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
@@ -1474,6 +1488,10 @@ class NodeRepository:
                 NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
             ):
                 return False
+            if worker_id is not None:
+                job = await session.get(Job, assignment.job_id, with_for_update=True)
+                if job is None or not _lease_is_owned(job, worker_id, now):
+                    return False
             assignment.status = NodeAssignmentStatus.failed
             assignment.detail = {**(assignment.detail or {}), "rejected_reason": reason}
             assignment.updated_at = now

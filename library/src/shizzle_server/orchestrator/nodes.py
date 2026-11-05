@@ -210,7 +210,7 @@ async def _expire_and_retry(
     ctx: StageContext, assignment: NodeAssignment, reason: str
 ) -> StageError:
     """Close a silent assignment and build the retryable error that redispatches."""
-    await _repo(ctx).expire(assignment.id, reason=reason)
+    await _repo(ctx).expire(assignment.id, reason=reason, worker_id=ctx.worker_id)
     await ctx.jobs.append_event(
         ctx.job.id,
         NODE_EXPIRED_EVENT,
@@ -293,7 +293,7 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         if problem is not None:
             # Close the assignment too: left "completed", every retry would
             # re-verify the same receipt and fail the same way.
-            await _repo(ctx).reject(assignment.id, reason=problem)
+            await _repo(ctx).reject(assignment.id, reason=problem, worker_id=ctx.worker_id)
             await ctx.jobs.append_event(
                 job.id,
                 NODE_FAILED_EVENT,
@@ -708,7 +708,8 @@ async def expire_superseded_assignments(ctx: StageContext, *, dispatch_key: str)
 
     A fresh dispatch under ``dispatch_key`` makes an older open assignment
     history; nothing else would ever expire it, and its node would stay
-    marked busy with it forever.
+    marked busy with it forever. Fenced to this handler's lease (B2): a
+    handler that lost the job cannot free a node a newer owner relies on.
     """
     for assignment in await _repo(ctx).list_for_job(ctx.job.id):
         if (
@@ -718,7 +719,7 @@ async def expire_superseded_assignments(ctx: StageContext, *, dispatch_key: str)
         ):
             continue
         reason = f"superseded by attempt {ctx.job.attempt}"
-        if await _repo(ctx).expire(assignment.id, reason=reason):
+        if await _repo(ctx).expire(assignment.id, reason=reason, worker_id=ctx.worker_id):
             await ctx.jobs.append_event(
                 ctx.job.id,
                 NODE_EXPIRED_EVENT,

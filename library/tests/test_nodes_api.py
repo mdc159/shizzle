@@ -306,6 +306,45 @@ async def test_disabled_node_is_offered_nothing_and_completion_detail_is_bounded
     assert refused.value.status_code == 401
 
 
+async def test_superseded_separation_assignment_is_expired_under_the_lease(node_client):
+    """B16 cleanup before a fresh dispatch: an open assignment from an earlier
+    attempt is expired, its node freed and a node_expired event recorded, but
+    only by the handler that still holds the job's lease (B2)."""
+    from types import SimpleNamespace as NS
+
+    from shizzle_server.orchestrator import nodes as nodes_mod
+
+    c, app = node_client
+    repo, jobs = app.state.node_repo, app.state.job_repo
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC)
+    job = await _claimed_job(app, worker_id="w1")
+    old = await repo.create_assignment(
+        job.id, worker_id="w1", node_id="mac-mini", kind=NodeAssignmentKind.separate,
+        payload={}, idempotency_key=f"{job.id.hex}:0",
+    )
+    assert (await repo.get("mac-mini")).busy_assignment_id == old.id
+    job_row = await jobs.get_job(job.id)
+    fresh_key = f"{job.id.hex}:{job_row.attempt + 1}"
+
+    # A handler that does not hold the lease changes nothing.
+    stranger = NS(job=NS(id=job.id, attempt=job_row.attempt + 1), nodes=repo, jobs=jobs, worker_id="w2")
+    await nodes_mod.expire_superseded_assignments(stranger, dispatch_key=fresh_key)
+    assert (await repo.get_assignment(old.id)).status == NodeAssignmentStatus.assigned
+    assert (await repo.get("mac-mini")).busy_assignment_id == old.id
+
+    owner = NS(job=NS(id=job.id, attempt=job_row.attempt + 1), nodes=repo, jobs=jobs, worker_id="w1")
+    await nodes_mod.expire_superseded_assignments(owner, dispatch_key=fresh_key)
+    expired = await repo.get_assignment(old.id)
+    assert expired.status == NodeAssignmentStatus.expired
+    assert expired.detail["expired_reason"].startswith("superseded by attempt")
+    assert (await repo.get("mac-mini")).busy_assignment_id is None
+    events = [e for e in await jobs.list_events(job.id) if e.event == "node_expired"]
+    assert len(events) == 1 and events[0].detail["assignment_id"] == str(old.id)
+    # The current attempt's own assignment is never touched.
+    await nodes_mod.expire_superseded_assignments(owner, dispatch_key=f"{job.id.hex}:0")
+    assert (await repo.get_assignment(old.id)).status == NodeAssignmentStatus.expired
+
+
 async def test_create_assignment_refuses_a_busy_or_disabled_node(node_client):
     c, app = node_client
     await c.post("/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC)

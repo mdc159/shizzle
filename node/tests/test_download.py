@@ -159,6 +159,33 @@ def test_orphaned_source_without_a_receipt_is_completed_not_overwritten(tmp_path
     assert adopted == landed and len(s3.order) == 1
 
 
+def test_orphan_that_vanishes_is_a_retryable_race_and_other_errors_propagate(tmp_path):
+    source = _source(tmp_path)
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
+
+    class Vanishing(_FakeS3):
+        """412 on the PUT (owned) but the object is gone by the time we read it."""
+
+        def put_object(self, **kwargs):  # noqa: ANN003
+            if kwargs["Key"] == "sources/t/source.mp4":
+                raise _Precondition()
+            return super().put_object(**kwargs)
+
+    with pytest.raises(DownloadError, match="SOURCE_RACE"):
+        upload_source(Vanishing(), bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+
+    class Forbidden(Vanishing):
+        def get_object(self, *, Bucket, Key):  # noqa: N803, ARG002
+            if Key.endswith("source.mp4"):
+                exc = RuntimeError("403")
+                exc.response = {"Error": {"Code": "AccessDenied"}}  # type: ignore[attr-defined]
+                raise exc
+            return super().get_object(Bucket=Bucket, Key=Key)
+
+    with pytest.raises(RuntimeError, match="403"):  # not disguised as a race
+        upload_source(Forbidden(), bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+
+
 @pytest.mark.parametrize(
     "url",
     ["https://vimeo.com/12345", "http://169.254.169.254/latest/meta-data/", "ftp://x/y",

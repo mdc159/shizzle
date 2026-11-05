@@ -13,6 +13,7 @@ Optional:
     SHIZZLE_NODE_WORKDIR        where sources and packages are staged
     SHIZZLE_NODE_HEARTBEAT_SECONDS   15
     SHIZZLE_NODE_POLL_WAIT_SECONDS   25   (long-poll length, server caps at 30)
+    SHIZZLE_NODE_ACK_RETRY_SECONDS   5    (pause after an ack the API failed to answer)
     SHIZZLE_NODE_LOG_LEVEL      INFO (DEBUG | INFO | WARNING | ERROR)
     SHIZZLE_NODE_ALLOW_HTTP     1 to allow a plain-http SHIZZLE_API_BASE (local dev only)
     SHIZZLE_YTDLP_COOKIES       path to a Netscape cookies file for yt-dlp
@@ -122,6 +123,7 @@ class NodeConfig:
             stemsplit_dir=stemsplit_dir,
             heartbeat_seconds=_positive_float(env, "SHIZZLE_NODE_HEARTBEAT_SECONDS", 15.0),
             poll_wait_seconds=max(1, min(30, int(_positive_float(env, "SHIZZLE_NODE_POLL_WAIT_SECONDS", 25.0)))),
+            ack_retry_seconds=_positive_float(env, "SHIZZLE_NODE_ACK_RETRY_SECONDS", 5.0),
             cookies_file=Path(cookies) if cookies else None,
             aws_region=env.get("AWS_REGION", "").strip() or "us-east-1",
         )

@@ -400,6 +400,8 @@ def _receipt_for_existing_object(
     try:
         body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     except Exception as exc:
+        if not _is_missing_key(exc):
+            raise  # a transient or permission failure is not a vanished object
         raise DownloadError(
             "SOURCE_RACE", "source.mp4 was there a moment ago and is gone; retry later"
         ) from exc
@@ -426,12 +428,16 @@ def _precondition_failed(exc: Exception) -> bool:
     return code == "PreconditionFailed" or status == 412
 
 
+def _is_missing_key(exc: Exception) -> bool:
+    code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+    return code in ("404", "NoSuchKey", "NotFound")
+
+
 def _read_json(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
     try:
         body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     except Exception as exc:  # NoSuchKey and friends
-        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
-        if code in ("404", "NoSuchKey", "NotFound"):
+        if _is_missing_key(exc):
             return None
         raise
     try:

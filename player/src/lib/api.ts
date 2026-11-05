@@ -121,8 +121,10 @@ export async function getNodes(signal?: AbortSignal): Promise<NodeInfo[]> {
   const response = await authFetch('/api/nodes', { signal });
   if (!response.ok) throw new Error(`Failed to fetch nodes: ${response.statusText}`);
   const data: Partial<NodeListResponse> = await response.json();
-  // An unexpected body (e.g. a stub returning `{}`) must not crash the panel.
-  return Array.isArray(data.nodes) ? data.nodes : [];
+  // A malformed body is a failure, not an empty registry: the panel records
+  // it as "node status unavailable" rather than showing "no nodes".
+  if (!Array.isArray(data.nodes)) throw new Error('Failed to fetch nodes: unexpected response');
+  return data.nodes;
 }
 
 /**
