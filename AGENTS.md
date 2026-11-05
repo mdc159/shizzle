@@ -42,13 +42,18 @@ tracks at https://shizzle.systems. Current state and next actions:
 
 - `library/` — FastAPI control plane, orchestrator, publisher, alembic
   migrations (the single schema writer).
-- `stemsplit/` — RunPod GPU worker producing the `lossless-stem-v1` package.
+- `stemsplit/` — lossless separation producing the `lossless-stem-v1`
+  package; run by the RunPod image and by worker nodes.
+- `node/` — worker-node agent (`shizzle-node`) for the owner's machines;
+  see `docs/WORKER-NODES.md`. Nodes update on their own machines, not
+  through the production deploy.
 - `player/` — browser UI (vite).
 - `deploy/vps/` — production compose, Caddyfile, transactional deploy and
   restore scripts plus their fault-injection tests.
 - `deploy/runpod/` — serverless endpoint assets.
 - `interfaces/` — the frozen interface specs between subsystems.
 - `docs/` — runbooks; start with HANDOFF.md, then AUTOMATION.md.
+  `docs/archive/` holds planning records, not current behavior.
 
 ## Cross-repo knowledge
 
