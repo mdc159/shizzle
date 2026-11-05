@@ -58,6 +58,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [nodesError, setNodesError] = useState<string | null>(null);
+  const [nodesLoaded, setNodesLoaded] = useState(false);
   const [orchestratorAlive, setOrchestratorAlive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [jobsLoaded, setJobsLoaded] = useState(false);
@@ -129,9 +130,11 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
       if (nodesAbort.current !== controller) return;
       setNodes(next);
       setNodesError(null);
+      setNodesLoaded(true);
     } catch (err) {
       if (nodesAbort.current !== controller) return;
       setNodesError(err instanceof Error ? err.message : 'Failed to load nodes');
+      setNodesLoaded(true);
     } finally {
       window.clearTimeout(timeout);
       if (nodesAbort.current === controller) nodesAbort.current = null;
@@ -189,7 +192,12 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
           <Activity className="h-5 w-5" /> Pipeline
         </h1>
       )}
-      <Button size="icon" variant="ghost" onClick={() => void refresh(true)} title="Refresh pipeline">
+      <Button
+        size="icon"
+        variant="ghost"
+        onClick={() => { void refresh(true); void refreshNodes(); }}
+        title="Refresh pipeline"
+      >
         <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
       </Button>
     </div>
@@ -197,7 +205,9 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
 
   const nodesSummary = nodesError
     ? 'node status unavailable'
-    : `${onlineNodes}/${nodes.length} node${nodes.length === 1 ? '' : 's'} online`;
+    : !nodesLoaded
+      ? 'nodes loading'
+      : `${onlineNodes}/${nodes.length} node${nodes.length === 1 ? '' : 's'} online`;
   const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'} — ${nodesSummary}`;
 
   const nodesStrip = (
@@ -205,6 +215,8 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h3>
       {nodesError ? (
         <p className="text-sm text-amber-400">Node status unavailable: {nodesError}</p>
+      ) : !nodesLoaded ? (
+        <p className="text-sm text-zinc-600">Loading node status...</p>
       ) : nodes.length === 0 ? (
         <p className="text-sm text-zinc-600">No worker nodes registered</p>
       ) : (

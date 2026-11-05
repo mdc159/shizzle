@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -53,6 +52,8 @@ def test_run_separation_calls_the_handler_with_executor_id_device_and_image(tmp_
         "    return {'status': 'ok', 'image': WORKER_IMAGE}\n"
     )
     monkeypatch.delitem(sys.modules, "lossless_handler", raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))  # import_handler's insert is undone
+    monkeypatch.setenv("WORKER_IMAGE", "")
     phases: list[str] = []
     result = separate.run_separation(
         {"track_id": "t", "device": "cpu"},
@@ -68,7 +69,7 @@ def test_run_separation_calls_the_handler_with_executor_id_device_and_image(tmp_
     assert job["input"]["device"] == "mps"  # the agent's device wins over the payload
     assert result == {"status": "ok", "image": "node:mac/shizzle-node-0.1/mps"}
     assert phases == ["separating"]
-    assert Path(sys.path[0]) == stemsplit or str(stemsplit) in sys.path
+    assert str(stemsplit) in sys.path  # restored by monkeypatch after the test
 
 
 def test_run_separation_rejects_a_non_dict_result(tmp_path, monkeypatch):
@@ -80,6 +81,8 @@ def test_run_separation_rejects_a_non_dict_result(tmp_path, monkeypatch):
         "    return 'done'\n"
     )
     monkeypatch.delitem(sys.modules, "lossless_handler", raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setenv("WORKER_IMAGE", "")
     with pytest.raises(RuntimeError, match="expected dict"):
         separate.run_separation(
             {}, executor_job_id="x", device="cpu", worker_image="i",

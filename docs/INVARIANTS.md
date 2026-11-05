@@ -155,8 +155,11 @@ object's stored S3 SHA-256 checksum (the node uploads with
 `ChecksumSHA256`, so S3 verified those bytes on the way in), a positive
 `bytes` that equals the object's `ContentLength`, a positive finite
 `duration_seconds`, and duration and size within the upload limits. A
-receipt that fails any of these closes its assignment as failed so the
-retry assigns afresh. The node's completion report is a hint, never the proof:
+receipt that fails any of these after the node reported the download
+complete closes that assignment as failed so the retry assigns afresh; while
+the assignment is still open a failing marker is simply not yet proof, and the
+orchestrator keeps polling until the node reports or the stall window expires
+it. The node's completion report is a hint, never the proof:
 the marker completes an open assignment even when the report was lost, and
 the node writes both objects with `If-None-Match: *`, so a stale node that
 was reassigned away can never overwrite a source the orchestrator accepted.

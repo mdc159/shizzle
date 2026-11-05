@@ -462,7 +462,7 @@ async def _verify_source_receipt(
     if (
         isinstance(duration, bool)
         or not isinstance(duration, int | float)
-        or not math.isfinite(duration)
+        or (isinstance(duration, float) and not math.isfinite(duration))
         or duration <= 0
     ):
         return "duration_seconds must be a positive number"

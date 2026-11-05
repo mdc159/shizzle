@@ -124,6 +124,44 @@ def test_config_requires_the_essentials_and_validates_choices():
     }
 
 
+def test_config_requires_https_except_for_local_development():
+    base = {"SHIZZLE_NODE_ID": "n", "SHIZZLE_NODE_TOKEN": "t"}
+    assert NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "https://shizzle.systems/"}).api_base == "https://shizzle.systems"
+    assert NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://localhost:8000"}).api_base == "http://localhost:8000"
+    assert NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://127.0.0.1:8000"}).api_base == "http://127.0.0.1:8000"
+    with pytest.raises(ConfigError, match="https"):
+        NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://evil.example"})
+    with pytest.raises(ConfigError, match="https"):
+        NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://localhost.evil.example"})
+    allowed = NodeConfig.from_env(
+        {**base, "SHIZZLE_API_BASE": "http://dev.example:8000", "SHIZZLE_NODE_ALLOW_HTTP": "1"}
+    )
+    assert allowed.api_base == "http://dev.example:8000"
+    assert "token=" not in repr(allowed)  # the token never appears in a repr or traceback
+
+
+@pytest.mark.parametrize("name", ["SHIZZLE_NODE_HEARTBEAT_SECONDS", "SHIZZLE_NODE_POLL_WAIT_SECONDS",
+                                  "SHIZZLE_NODE_ACK_RETRY_SECONDS"])
+@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf", "soon", ""])
+def test_timing_knobs_must_be_positive_numbers(name, bad):
+    base = {"SHIZZLE_API_BASE": "https://x", "SHIZZLE_NODE_ID": "n", "SHIZZLE_NODE_TOKEN": "t"}
+    if bad == "":
+        NodeConfig.from_env({**base, name: bad})  # empty means default
+        return
+    with pytest.raises(ConfigError, match=name):
+        NodeConfig.from_env({**base, name: bad})
+
+
+def test_timing_knobs_are_read_and_clamped():
+    base = {"SHIZZLE_API_BASE": "https://x", "SHIZZLE_NODE_ID": "n", "SHIZZLE_NODE_TOKEN": "t"}
+    cfg = NodeConfig.from_env({
+        **base, "SHIZZLE_NODE_HEARTBEAT_SECONDS": "7.5", "SHIZZLE_NODE_POLL_WAIT_SECONDS": "99",
+        "SHIZZLE_NODE_ACK_RETRY_SECONDS": "2",
+    })
+    assert (cfg.heartbeat_seconds, cfg.poll_wait_seconds, cfg.ack_retry_seconds) == (7.5, 30, 2.0)
+    assert NodeConfig.from_env({**base, "SHIZZLE_NODE_POLL_WAIT_SECONDS": "0.4"}).poll_wait_seconds == 1
+
+
 # --- client ----------------------------------------------------------------------
 
 
@@ -306,6 +344,28 @@ def test_ack_hit_by_an_api_error_backs_off_instead_of_dropping_the_job(config, c
         "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
     })))
     assert ran == [] and plane.sent("/fail") == [] and slept == [config.ack_retry_seconds]
+
+
+def test_a_transport_failure_on_ack_backs_off_and_keeps_the_agent_alive(config, plane, tmp_path):
+    """The lease is still ours; the next poll offers the assignment again."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/ack"):
+            raise httpx.ConnectError("connection refused", request=request)
+        return plane.handler(request)
+
+    client = NodeClient("https://shizzle.test", "mac-mini", "tok", transport=httpx.MockTransport(handler))
+    ran, slept = [], []
+    agent = Agent(
+        config, client, s3_factory=lambda: None,
+        downloader=lambda *a, **k: ran.append("download") or _source(tmp_path),
+        uploader=lambda *a, **k: None, separator=lambda *a, **k: {},
+        device_resolver=lambda d: d, sleep=slept.append,
+    )
+    agent.execute(Assignment.from_json(_assignment("download", {
+        "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
+    })))
+    assert ran == [] and plane.sent("/fail") == [] and plane.sent("/complete") == []
+    assert slept == [config.ack_retry_seconds]
 
 
 def test_a_409_on_progress_aborts_the_run_without_a_failure_report(config, client, plane, tmp_path):

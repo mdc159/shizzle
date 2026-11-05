@@ -186,6 +186,32 @@ def test_orphan_that_vanishes_is_a_retryable_race_and_other_errors_propagate(tmp
         upload_source(Forbidden(), bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
 
 
+@pytest.mark.parametrize("hang_on", ["remux", "transcode"])
+def test_a_hung_ffmpeg_is_a_structured_failure_not_a_stall(tmp_path, monkeypatch, hang_on):
+    import subprocess
+
+    from shizzle_node import download as dl
+
+    source = tmp_path / "source.webm"
+    source.write_bytes(b"x")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001
+        calls.append(cmd)
+        assert kwargs["timeout"] > 0
+        is_remux = "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
+        if (hang_on == "remux" and is_remux) or (hang_on == "transcode" and not is_remux):
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return subprocess.CompletedProcess(cmd, 1, "", "remux refused")  # remux fails -> transcode
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+    monkeypatch.setattr(dl.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    with pytest.raises(DownloadError, match="DOWNLOAD_FAILED.*timed out"):
+        dl._to_mp4(source, tmp_path / "source.mp4")
+    assert len(calls) == (1 if hang_on == "remux" else 2)
+    assert source.exists()  # the input is only removed after a successful conversion
+
+
 @pytest.mark.parametrize(
     "url",
     ["https://vimeo.com/12345", "http://169.254.169.254/latest/meta-data/", "ftp://x/y",
