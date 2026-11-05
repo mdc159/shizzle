@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -72,6 +73,33 @@ class Settings(BaseSettings):
 
     processing_profile_version: int = 1
 
+    # --- worker nodes (docs/WORKER-NODES.md) --------------------------------
+    # "prefer": an online node takes download and separation first, RunPod is
+    #           the separation fallback after node_separate_wait_seconds.
+    # "only":   never dispatch to RunPod; wait for a node.
+    # "off":    today's behavior (URL jobs fail YTDLP_BLOCKED, RunPod separates).
+    shizzle_node_routing: str = "prefer"
+    # Per-node bearer tokens: "mac-mini=<token>,dell-9530=<token>". The node
+    # row is created on first authenticated heartbeat; tokens live only here (E3).
+    shizzle_node_tokens: str = ""
+    # A node whose last heartbeat is older than this is not online.
+    node_online_seconds: float = 45.0
+    # An assignment the node has not acknowledged within this window expires.
+    node_ack_seconds: float = 120.0
+    # A running assignment whose heartbeat is older than this is failed and
+    # redispatched under a fresh key (mirrors runpod_worker_stall_seconds).
+    node_stall_seconds: float = 300.0
+    # Absolute cap on one assignment's age, whatever the node reports: the
+    # node heartbeat keeps a long ffmpeg/demucs run alive, so a wedged run on
+    # a live node must still be reclaimed (B16).
+    node_assignment_max_seconds: float = 3 * 3600.0
+    # How long a separation waits for a node before RunPod is used.
+    node_separate_wait_seconds: float = 120.0
+    # How long a URL job waits for any download node (a sleeping Mac may wake).
+    node_download_wait_seconds: float = 86400.0
+    # Park interval while a node assignment is in flight.
+    node_poll_seconds: float = 10.0
+
     # --- auth (design spec §7) -----------------------------------------------
     # One shared passcode friends enter once per device. When empty (the local
     # and test default) the gate is OFF — every route is open, which keeps the
@@ -106,6 +134,43 @@ class Settings(BaseSettings):
     media_cookie_path: str = "/cdn"
     # Signed-cookie validity. Refreshed by /api/media/session.
     media_ttl_seconds: int = 24 * 3600
+
+    @field_validator("shizzle_node_routing")
+    @classmethod
+    def _routing_mode(cls, value: str) -> str:
+        # Fail at startup, not silently as "prefer": a typo here would make
+        # URL jobs wait a day instead of failing fast.
+        mode = value.strip().lower()
+        if mode not in ("prefer", "only", "off"):
+            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        return mode
+
+    @property
+    def node_routing(self) -> str:
+        # Normalized here as well: a value assigned after construction (tests,
+        # tooling) bypasses the validator.
+        mode = self.shizzle_node_routing.strip().lower()
+        if mode not in ("prefer", "only", "off"):
+            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        return mode
+
+    @property
+    def node_routing_enabled(self) -> bool:
+        return self.node_routing != "off"
+
+    @property
+    def node_tokens(self) -> dict[str, str]:
+        """``{node_id: token}`` parsed from SHIZZLE_NODE_TOKENS; malformed entries are skipped."""
+        tokens: dict[str, str] = {}
+        for entry in self.shizzle_node_tokens.split(","):
+            entry = entry.strip()
+            if not entry or "=" not in entry:
+                continue
+            node_id, token = entry.split("=", 1)
+            node_id, token = node_id.strip(), token.strip()
+            if node_id and token:
+                tokens[node_id] = token
+        return tokens
 
     @property
     def cloud_pipeline(self) -> bool:

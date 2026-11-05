@@ -144,6 +144,34 @@ progress MUST be monotonic.
 - Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_transfer_callback_is_thread_safe_and_monotonic`
 - Violation smell: touching callback state without holding its lock.
 
+### A12 — a node-downloaded source is complete only with source.json
+
+A worker node (docs/WORKER-NODES.md) uploads `sources/<track>/source.mp4` and
+then writes `sources/<track>/source.json` LAST. The orchestrator advances a
+URL job out of `downloading` only after reading that receipt and re-proving
+it: interface `shizzle-source-v1`, `object_key` equal to the pipeline's
+source key, `track_id` equal to the job's, a 64-hex sha256 that equals the
+object's stored S3 SHA-256 checksum (the node uploads with
+`ChecksumSHA256`, so S3 verified those bytes on the way in), a positive
+`bytes` that equals the object's `ContentLength`, a positive finite
+`duration_seconds`, and duration and size within the upload limits. A
+receipt that fails any of these after the node reported the download
+complete closes that assignment as failed so the retry assigns afresh; while
+the assignment is still open a failing marker is simply not yet proof, and the
+orchestrator keeps polling until the node reports or the stall window expires
+it. The node's completion report is a hint, never the proof:
+the marker completes an open assignment even when the report was lost, and
+the node writes both objects with `If-None-Match: *`, so a stale node that
+was reassigned away can never overwrite a source the orchestrator accepted.
+Only a link to one YouTube video is ever handed to a node (checked at
+`POST /api/submit-url`, again in the orchestrator, and again by the agent).
+
+Guard: `library/tests/test_node_routing.py`
+(`test_rejected_source_receipt_is_a_retryable_checksum_failure`,
+`test_url_job_runs_download_then_separation_on_the_node_to_ready`);
+`node/tests/test_download.py`
+(`test_upload_writes_source_then_receipt_last_and_is_idempotent`).
+
 ## B. Orchestrator lease / dispatch
 
 ### B1 — claim uses FOR UPDATE SKIP LOCKED
@@ -343,6 +371,47 @@ only on phase change (B8).
   claim-and-process loop, so a busy healthy stage (source transfer, package
   verification, AAC/video derivation) starves it past the liveness threshold
   (issue #21).
+
+### B16 — node assignments are fenced like dispatches
+
+An assignment is created only by the orchestrator while it owns the job's
+unexpired lease, inside one transaction that also marks the node busy and
+records `jobs.executor`. Only the node named on an assignment can
+acknowledge, report progress on, complete or fail it; a terminal report or an
+orchestrator expiry frees the node. A node separation reuses the dispatch
+reservation and confirmation with executor id `node:<assignment>` in
+`jobs.runpod_job_id`, so B3/B4/B10/B12 apply unchanged. A silent node
+(no acknowledgement within `NODE_ACK_SECONDS`, no progress within
+`NODE_STALL_SECONDS`) is expired and the job redispatches under a fresh key.
+A node's heartbeat that names the assignment it holds counts as progress
+(a long ffmpeg or demucs run prints nothing), so an assignment is also
+expired once it is older than `NODE_ASSIGNMENT_MAX_SECONDS` regardless of
+heartbeats: a wedged run on a live node is reclaimed, never parked forever.
+
+Guard: `library/tests/test_nodes_api.py`
+(`test_create_assignment_requires_the_job_lease`,
+`test_only_the_named_node_can_report`);
+`library/tests/test_node_routing.py`
+(`test_unacknowledged_download_expires_and_is_reassigned`,
+`test_stalled_node_separation_is_expired_and_redispatched_to_another_node`).
+
+### B17 — RunPod is the fallback, not the default
+
+With `SHIZZLE_NODE_ROUTING=prefer`, an online separation node is chosen
+before RunPod; a registered node that is offline earns
+`NODE_SEPARATE_WAIT_SECONDS` before the orchestrator records
+`fallback_runpod` and dispatches to RunPod. With `only`, RunPod is never
+called. With no separation node ever registered, RunPod is used at once
+(when RunPod is configured; an unconfigured RunPod parks the job as before). URL downloads
+have no RunPod fallback: RunPod cannot download, so the job waits up to
+`NODE_DOWNLOAD_WAIT_SECONDS` and then fails `NO_NODE_AVAILABLE`.
+
+Guard: `library/tests/test_node_routing.py`
+(`test_upload_job_prefers_an_online_separation_node`,
+`test_separation_falls_back_to_runpod_after_the_wait_window`,
+`test_routing_only_never_dispatches_to_runpod`,
+`test_no_registered_node_dispatches_to_runpod_immediately`,
+`test_url_job_waits_then_fails_without_any_download_node`).
 
 ## C. Publication immutability
 
@@ -550,6 +619,21 @@ MUST be under `tracks/`.
 - Guarded by: `library/tests/test_auth_media.py`
 - Violation smell: a wildcard `tracks/*` cookie where a file-scoped URL
   suffices, or signing a key outside `tracks/`.
+
+### E6 — node tokens are node-scoped
+
+A node authenticates every `/api/nodes/{id}/...` call with its own bearer
+token from `SHIZZLE_NODE_TOKENS`; the token must be the one configured for
+the `{id}` in the path (another node's valid token is a 401), it is compared
+in constant time, an unknown node, missing token and wrong token all answer
+401, an assignment accepts reports only from the node it names (409 for any
+other), and a node token opens no passcode-gated route. Tokens live only in the environment;
+the `nodes` row never stores one. The assignment payload is the only place
+a job's `source_ref` URL is delivered (E2 still holds for the public job API).
+
+Guard: `library/tests/test_nodes_api.py`
+(`test_heartbeat_requires_the_nodes_own_token`,
+`test_node_token_does_not_open_passcode_routes`).
 
 ## F. Migration / DB conventions
 

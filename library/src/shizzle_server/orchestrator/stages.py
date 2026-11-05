@@ -20,13 +20,14 @@ from ..db.models import Job, JobStage, SourceType, utcnow
 from ..db.repository import (
     InvalidTransition,
     JobRepository,
+    NodeRepository,
     PublishRefusedError,
     pending_runpod_dispatch,
     track_id_for_job,
 )
 from ..errors import ErrorCode, StageError
 from ..settings import Settings
-from . import cloud
+from . import cloud, nodes
 from .pipelines import Pipeline
 from .runpod_client import NotConfiguredRunPodClient, RunPodClient, parse_worker_progress
 
@@ -126,6 +127,8 @@ class StageContext:
     jobs: JobRepository
     runpod: RunPodClient
     worker_id: str
+    # Worker-node registry (docs/WORKER-NODES.md); None in lightweight unit contexts.
+    nodes: NodeRepository | None = None
     # Set by handle_publishing when it commits the track+ready transaction
     # itself; the loop then skips its own advance() call.
     published: bool = False
@@ -147,20 +150,23 @@ async def handle_pending(ctx: StageContext) -> JobStage:
     return JobStage.downloading
 
 
-async def handle_downloading(ctx: StageContext) -> JobStage:
+async def handle_downloading(ctx: StageContext) -> JobStage | None:
     """Get the source video onto local disk.
 
     Upload-sourced jobs already streamed to disk in POST /api/upload, so this
     is a presence check + no-op transition. URL-sourced jobs are a Phase 3
     stub (ingest/ytdlp.py): they fail here with a clean structured
-    YTDLP_BLOCKED error — correct Phase 2 behavior.
+    YTDLP_BLOCKED error — correct Phase 2 behavior. With node routing on,
+    URL jobs park here while a worker node downloads (docs/WORKER-NODES.md).
     """
     if ctx.job.source_type == SourceType.url:
-        # TODO(Phase 3, 3.3): ingest/ytdlp.py — YouTube-domain-validated URLs,
-        # browser-cookie auth, structured YTDLP_BLOCKED on real blocks.
+        # The VPS never downloads (datacenter addresses are blocked). A worker
+        # node does, and proves it with sources/<track>/source.json (A12).
+        if ctx.settings.cloud_pipeline and ctx.settings.node_routing_enabled and ctx.nodes:
+            return await nodes.download_via_node(ctx)
         raise StageError(
             ErrorCode.YTDLP_BLOCKED,
-            "URL ingest is not implemented yet (Phase 3); upload the file directly",
+            "URL ingest needs a worker node (SHIZZLE_NODE_ROUTING); upload the file directly",
             retryable=False,
         )
     if not ctx.source_path.exists():
@@ -195,7 +201,20 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         "output_prefix": cloud.separation_prefix(track_id),
     }
 
-    if job.runpod_job_id and job.worker_phase != "failed":
+    if nodes.is_node_executor(job.runpod_job_id) and job.worker_phase != "failed":
+        # A node holds this attempt: reconcile its assignment, never RunPod. A
+        # previous attempt's assignment (its key is not this attempt's) is
+        # history: fall through and dispatch fresh.
+        events = await ctx.jobs.list_events(job.id)
+        node_key = _confirmed_dispatch_key(events, job.runpod_job_id)
+        if node_key == f"{job.id.hex}:{job.attempt}":
+            return await nodes.poll_node_separation(ctx, dispatch_key=node_key)
+
+    if (
+        job.runpod_job_id
+        and not nodes.is_node_executor(job.runpod_job_id)
+        and job.worker_phase != "failed"
+    ):
         try:
             status_payload = await ctx.runpod.poll(job.runpod_job_id)
         except StageError as exc:
@@ -522,6 +541,23 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
 
     dispatch_key = f"{job.id.hex}:{job.attempt}"
     payload["idempotency_key"] = dispatch_key
+    if ctx.nodes and ctx.settings.node_routing_enabled:
+        # A previous attempt's open assignment is history now: free its node.
+        await nodes.expire_superseded_assignments(ctx, dispatch_key=dispatch_key)
+        # Routing (B17): a node first, RunPod only after the wait window.
+        if await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
+            ctx.park_seconds = ctx.settings.node_poll_seconds
+            return None
+        choice = await nodes.choose_separation_node(ctx, dispatch_key=dispatch_key)
+        if choice is None:
+            ctx.park_seconds = ctx.settings.node_poll_seconds
+            return None
+        if choice != "runpod":
+            await nodes.assign_separation(
+                ctx, node_id=choice, dispatch_key=dispatch_key, payload=payload
+            )
+            ctx.park_seconds = ctx.settings.node_poll_seconds
+            return None
     reserved = await ctx.jobs.reserve_dispatch(
         job.id,
         worker_id=ctx.worker_id,

@@ -16,9 +16,16 @@ concurrency:
   # transaction before its rollback step executes.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Runner image is pinned, not `ubuntu-latest`. On 2026-11-05 that label moved
+# to Ubuntu 26.04, whose system Python is 3.14: `uv sync` in stemsplit then
+# compiled numpy 1.26.4 from source (no 3.14 wheels exist) and the result
+# miscomputed the integrity-gate residuals (5 test_integrity failures), and
+# `playwright install --with-deps` refused the image outright. Move the pin
+# deliberately, with the stemsplit interpreter pin (`stemsplit/.python-version`)
+# and the Playwright version checked against the new image.
 jobs:
   library:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,7 +48,7 @@ jobs:
         continue-on-error: true
 
   stemsplit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,7 +60,7 @@ jobs:
       - run: uv run --directory stemsplit ruff check .
 
   postgres-contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       postgres:
@@ -84,8 +91,22 @@ jobs:
           uv run --directory library alembic downgrade -1
           uv run --directory library alembic upgrade head
 
+  node:
+    # Worker-node agent (node/): fake-plane tests only; the separation stack
+    # (torch/demucs) is a default dependency group that CI skips.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - run: uv sync --locked --directory node --no-default-groups --group dev
+      - run: uv run --directory node --no-sync pytest -q
+      - run: uv run --directory node --no-sync ruff check src tests
+
   player:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -110,7 +131,7 @@ jobs:
   deploy-gate:
     name: Classify merge as deployable or docs-only
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       deploy: ${{ steps.classify.outputs.deploy }}

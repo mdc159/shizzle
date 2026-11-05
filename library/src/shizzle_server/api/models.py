@@ -28,6 +28,7 @@ class JobResponse(BaseModel):
     stageTimings: dict[str, Any] | None = None
     workerPhase: str | None = None
     workerHeartbeatAt: datetime | None = None
+    executor: str | None = None
     trackId: str | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
@@ -46,6 +47,7 @@ class JobResponse(BaseModel):
             stageTimings=job.stage_timings,
             workerPhase=job.worker_phase,
             workerHeartbeatAt=job.worker_heartbeat_at,
+            executor=job.executor,
             trackId=str(job.track_id) if job.track_id else None,
             createdAt=job.created_at,
             updatedAt=job.updated_at,

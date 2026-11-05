@@ -24,6 +24,8 @@ on runtime changes.
 - [Playback troubleshooting](playback-troubleshooting.md): diagnosis and evidence.
 - [Contributing completed media](contributing-completed-media.md): the S3 drop-box
   for finished `shizzle-browser-v1` packages and its VPS ingest (issue #45).
+- [Worker nodes](WORKER-NODES.md): plan for the Mac mini and Dell 9530 as
+  first-choice download and separation executors, RunPod as fallback.
 - [Lossless handoff](../interfaces/lossless-stem-v1/spec.md) and
   [browser delivery](../interfaces/shizzle-browser-v1/spec.md): format contracts.
 

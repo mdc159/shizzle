@@ -1,0 +1,194 @@
+# Shizzle worker-node agent
+
+The agent that turns the Mac mini (and later the Dell 9530) into a worker
+node for <https://shizzle.systems>. It is the node half of
+[docs/WORKER-NODES.md](../docs/WORKER-NODES.md): it pulls assignments from the
+control plane over outbound HTTPS, downloads YouTube sources with yt-dlp, and
+runs the **production separation code from `../stemsplit` unchanged** (the
+same `lossless_handler.py` the RunPod image runs), uploading the
+`lossless-stem-v1` package with `handoff.json` last. The VPS verifies,
+derives the browser files and publishes exactly as it does for RunPod.
+
+Nothing about file creation changes. The node never writes under `tracks/*/1/`
+except the separation attempt prefix, and never under `imports/`.
+
+## What a node does
+
+| Assignment | Input | Output in S3 | Proof the orchestrator checks |
+|---|---|---|---|
+| `download` | a YouTube URL | `sources/<track>/source.mp4`, then `sources/<track>/source.json` **last** | object key, size and sha256 in the receipt match the object |
+| `separate` | `sources/<track>/source.mp4` | `tracks/<track>/1/separation/attempts/<key>/{dispatch.json, stems/*.wav, handoff.json last}` | `handoff.json` present; re-proven by `cloud_verifying` |
+
+One assignment at a time per node. A crash mid-job leaves no completion
+marker; the orchestrator expires the assignment and redispatches.
+
+## Install on the Mac mini (first node)
+
+Requirements: Python 3.11 via `uv`, `ffmpeg`/`ffprobe` on PATH (already there),
+Docker is **not** needed for the agent. Separation runs natively on the Apple
+GPU (`mps`); Docker Desktop cannot reach it.
+
+```sh
+cd /path/to/shizzle          # a checkout of mdc159/shizzle (this repo)
+uv sync --locked --directory node --python 3.11
+```
+
+That installs exactly what `node/uv.lock` pins: torch/torchaudio 2.2.2 (the
+same version as the RunPod image; the macOS build has Metal support),
+`demucs==4.1.0`, yt-dlp, boto3 and httpx into `node/.venv`. The first
+separation downloads the `htdemucs_6s` weights (~80 MB) into the torch cache.
+
+Environment (put it in the launchd plist or a vault-managed env, never in a
+committed file):
+
+```sh
+SHIZZLE_API_BASE=https://shizzle.systems
+SHIZZLE_NODE_ID=mac-mini                 # must match an entry in SHIZZLE_NODE_TOKENS on the VPS
+SHIZZLE_NODE_TOKEN=<long random token>
+SHIZZLE_NODE_DISPLAY_NAME="Mac mini"
+SHIZZLE_NODE_DEVICE=mps                  # auto | mps | cuda | cpu
+SHIZZLE_NODE_CAPABILITIES=download,separate
+SHIZZLE_NODE_WORKDIR=$HOME/.shizzle-node
+AWS_ACCESS_KEY_ID=...                    # the node's scoped IAM user (below)
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+# optional: SHIZZLE_YTDLP_COOKIES=/path/to/youtube-cookies.txt
+```
+
+Run it:
+
+```sh
+uv run --directory node shizzle-node
+```
+
+You should see the node appear on `/dashboard` within one heartbeat (15 s).
+Then paste a YouTube link into the player's Add Source dialog.
+
+### Keep it running (launchd)
+
+The secrets live in one root-only env file that a wrapper script sources;
+the plist itself holds nothing sensitive. Replace `<you>` and the checkout
+path with your own.
+
+`~/.config/shizzle-node/env` (`chmod 600`), written from the vault:
+
+```sh
+SHIZZLE_API_BASE=https://shizzle.systems
+SHIZZLE_NODE_ID=mac-mini
+SHIZZLE_NODE_TOKEN=<long random token>
+SHIZZLE_NODE_DISPLAY_NAME="Mac mini"
+SHIZZLE_NODE_DEVICE=mps
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+```
+
+`~/.config/shizzle-node/run.sh` (`chmod 700`):
+
+```sh
+#!/bin/sh
+set -a; . "$HOME/.config/shizzle-node/env"; set +a
+exec "$HOME/.local/bin/uv" run --directory "$HOME/Projects/shizzle/node" shizzle-node
+```
+
+`~/Library/LaunchAgents/com.shizzle.node.plist`, then
+`launchctl load ~/Library/LaunchAgents/com.shizzle.node.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.shizzle.node</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/<you>/.config/shizzle-node/run.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- The agent finishes its current job on SIGTERM (a second signal exits
+       at once); launchd's default 20 s would cut that short. -->
+  <key>ExitTimeOut</key><integer>1800</integer>
+  <key>StandardOutPath</key><string>/tmp/shizzle-node.log</string>
+  <key>StandardErrorPath</key><string>/tmp/shizzle-node.log</string>
+</dict></plist>
+```
+
+## Install on the Dell 9530 (Windows, RTX 4070)
+
+Same agent; after the sync, swap in the CUDA build of torch (the PyPI
+build on Windows is CPU-only):
+
+```powershell
+cd C:\path\to\shizzle
+uv sync --directory node --python 3.11
+uv pip install --directory node --python .venv --reinstall `
+  --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2+cu121 torchaudio==2.2.2+cu121
+$env:SHIZZLE_NODE_ID = "dell-9530"; $env:SHIZZLE_NODE_DEVICE = "cuda"   # plus the rest
+uv run --directory node --no-sync shizzle-node
+```
+
+`--no-sync` keeps `uv run` from putting the CPU build back. Verify with
+`uv run --directory node --no-sync python -c "import torch; print(torch.cuda.is_available())"`.
+
+`ffmpeg`/`ffprobe` must be on PATH (winget `Gyan.FFmpeg`). Register it as a
+service with NSSM or a Task Scheduler "at startup" task once it works by hand.
+
+## Server side
+
+On the VPS `.env`:
+
+```sh
+SHIZZLE_NODE_ROUTING=prefer                     # prefer | only | off
+SHIZZLE_NODE_TOKENS=mac-mini=<token>,dell-9530=<token>
+```
+
+Generate a token with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+Both `api` and `orchestrator` read the same `.env`, so one edit and a restart
+of both services.
+
+### IAM policy for a node
+
+The node needs only the source prefix and the separation attempt prefix:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::karaoke-pimpshizzle/sources/*",
+        "arn:aws:s3:::karaoke-pimpshizzle/tracks/*/1/separation/attempts/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::karaoke-pimpshizzle",
+      "Condition": {"StringLike": {"s3:prefix": ["sources/*", "tracks/*/1/separation/attempts/*"]}}
+    }
+  ]
+}
+```
+
+HEAD requests are authorized by `s3:GetObject` (there is no `s3:HeadObject`
+action). `s3:ListBucket` on those prefixes makes a missing key answer 404
+rather than 403, which the worker's "is it there yet" checks rely on.
+
+This policy covers every job's source and attempt prefix, not only the
+current assignment's: accepted for the owner's own machines. Writes are
+conditional (first writer wins), so a stale node cannot overwrite a source or
+package the VPS already accepted. No RunPod, CloudFront, database or deploy
+credentials ever live on a node.
+
+## Tests
+
+```sh
+uv sync --locked --directory node --no-default-groups --group dev   # no torch needed
+uv run --directory node pytest -q
+uv run --directory node ruff check src tests
+```
+
+The tests use a fake control plane and injected executors; nothing touches
+the network, yt-dlp or torch. The real proof is one URL through
+`shizzle.systems` with the node online and `fake.dispatched == []` on RunPod,
+recorded under `evidence/` when it happens.

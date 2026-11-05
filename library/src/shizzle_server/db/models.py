@@ -25,6 +25,9 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import (
+    Uuid as sa_Uuid,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -107,6 +110,10 @@ class Job(Base):
         index=True,
     )
     runpod_job_id: Mapped[str | None] = mapped_column(String(128))
+    # Who holds the current attempt: "runpod" or "node:<node-id>". Null until
+    # the orchestrator routes the job (docs/WORKER-NODES.md).
+    # "runpod" or "node:<node id>" (node ids are up to 64 chars, so 96 is ample).
+    executor: Mapped[str | None] = mapped_column(String(96))
     # Latest worker progress heartbeat; phase changes are also kept in job_events.
     worker_phase: Mapped[str | None] = mapped_column(String(256))
     worker_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -250,4 +257,116 @@ class OrchestratorHeartbeat(Base):
     worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+
+
+# --- worker nodes (docs/WORKER-NODES.md) --------------------------------------
+
+
+class NodeAssignmentKind(StrEnum):
+    """What a node is asked to do for one job."""
+
+    download = "download"  # URL -> sources/<track>/source.mp4 + source.json (last)
+    separate = "separate"  # sources/<track>/source.mp4 -> lossless-stem-v1 attempt package
+
+
+class NodeAssignmentStatus(StrEnum):
+    assigned = "assigned"  # created by the orchestrator, not yet fetched
+    acknowledged = "acknowledged"  # the node fetched and accepted it
+    running = "running"  # the node reported progress
+    completed = "completed"  # the node reported completion (S3 markers are the proof)
+    failed = "failed"  # the node reported a failure
+    expired = "expired"  # the orchestrator gave up on a silent node
+
+
+NODE_ASSIGNMENT_OPEN = frozenset(
+    {
+        NodeAssignmentStatus.assigned,
+        NodeAssignmentStatus.acknowledged,
+        NodeAssignmentStatus.running,
+    }
+)
+
+
+class Node(Base):
+    """A home worker node (Mac mini, Dell) that pulls assignments over the API.
+
+    Rows are created by the first authenticated heartbeat. Authentication is
+    the per-node bearer token from ``SHIZZLE_NODE_TOKENS`` (E3: secrets only
+    in env); the row never stores the token.
+    """
+
+    __tablename__ = "nodes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # {"download": true, "separate": true, "device": "mps"|"cuda"|"cpu", ...}
+    capabilities: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    agent_version: Mapped[str | None] = mapped_column(String(64))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # One job at a time per node: the open assignment it holds, if any.
+    busy_assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa_Uuid(),
+        ForeignKey("node_assignments.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_nodes_busy_assignment"),
+    )
+    # Operator kill switch: a disabled node is never assigned work.
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )
+
+
+class NodeAssignment(Base):
+    """One unit of work handed to one node for one job.
+
+    Created only by the orchestrator while it owns the job's lease (B16). The
+    node reports progress and completion against it; the orchestrator trusts
+    the S3 markers (``source.json`` / ``handoff.json`` written last) as the
+    truth and the report as a hint, exactly as it treats RunPod.
+    """
+
+    __tablename__ = "node_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[NodeAssignmentKind] = mapped_column(
+        Enum(NodeAssignmentKind, native_enum=False, length=16), nullable=False
+    )
+    status: Mapped[NodeAssignmentStatus] = mapped_column(
+        Enum(NodeAssignmentStatus, native_enum=False, length=16),
+        nullable=False,
+        default=NodeAssignmentStatus.assigned,
+        index=True,
+    )
+    # For separate: the job's dispatch idempotency key (attempt prefix identity).
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    # What the node receives. Contains the source URL for download work; the
+    # public job API never exposes it (E2) — only the node API does.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    phase: Mapped[str | None] = mapped_column(String(256))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Completion or failure detail reported by the node (sha256, bytes, error).
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
     )
