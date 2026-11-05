@@ -500,6 +500,11 @@ class JobRepository:
             if not isinstance(detail, dict) or detail.get("idempotency_key") != idempotency_key:
                 raise InvalidTransition(job_id, job.status, JobStage.dispatched)
             job.runpod_job_id = runpod_job_id
+            # A node assignment set executor to node:<id> when it was created;
+            # a RunPod confirmation (first choice or fallback) records RunPod so
+            # the API never reports a stale node as the executor.
+            if not runpod_job_id.startswith("node:"):
+                job.executor = "runpod"
             job.worker_phase = "dispatched"
             job.worker_heartbeat_at = now
             job.updated_at = now
@@ -1305,7 +1310,16 @@ class NodeRepository:
             # keeps the server's record: the stall watchdog decides, not the
             # heartbeat, so a brief restart cannot free a slot mid-job.
             if busy_assignment_id is not None and node.busy_assignment_id is None:
-                node.busy_assignment_id = busy_assignment_id
+                # Only an open assignment held by this node: after the watchdog
+                # expired one, the agent's next heartbeat must not re-mark the
+                # node busy with a dead id that nothing would ever clear.
+                held = await session.get(NodeAssignment, busy_assignment_id)
+                if (
+                    held is not None
+                    and held.node_id == node_id
+                    and held.status in NODE_ASSIGNMENT_OPEN
+                ):
+                    node.busy_assignment_id = busy_assignment_id
             node.last_seen_at = now
             node.updated_at = now
             return node
@@ -1335,7 +1349,7 @@ class NodeRepository:
         online_seconds: float,
         now: datetime | None = None,
     ) -> list[Node]:
-        """Online, enabled, idle nodes advertising ``kind`` — oldest-idle first."""
+        """Online, enabled, idle nodes advertising ``kind``, least recently heard from first."""
         now = now or utcnow()
         cutoff = now - timedelta(seconds=online_seconds)
         async with self._sf() as session:
@@ -1347,6 +1361,8 @@ class NodeRepository:
                     Node.last_seen_at.is_not(None),
                     Node.last_seen_at >= cutoff,
                 )
+                # Least recently heard from first (updated_at moves on every
+                # heartbeat), then id: a stable spread, not a strict round-robin.
                 .order_by(Node.updated_at, Node.id)
             )
             nodes = list(res.scalars().all())
@@ -1448,11 +1464,35 @@ class NodeRepository:
             await self._free_node(session, assignment, now)
             return True
 
+    async def reject(self, assignment_id: uuid.UUID, *, reason: str) -> bool:
+        """Orchestrator refused what a node reported complete (e.g. a receipt
+        that fails A12): mark it failed so the retry assigns afresh, free the node."""
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
+            if assignment is None or assignment.status in (
+                NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
+            ):
+                return False
+            assignment.status = NodeAssignmentStatus.failed
+            assignment.detail = {**(assignment.detail or {}), "rejected_reason": reason}
+            assignment.updated_at = now
+            await self._free_node(session, assignment, now)
+            return True
+
     # --- assignments: node side ---------------------------------------------
 
     async def next_for_node(self, node_id: str) -> NodeAssignment | None:
-        """The oldest assignment waiting for this node, or None."""
+        """The oldest assignment waiting for this node, or None.
+
+        A disabled node (operator kill switch) is offered nothing, including
+        work created before it was disabled; the watchdog expires that work
+        and the orchestrator redispatches it elsewhere.
+        """
         async with self._sf() as session:
+            node = await session.get(Node, node_id)
+            if node is not None and node.disabled_at is not None:
+                return None
             res = await session.execute(
                 select(NodeAssignment)
                 .where(

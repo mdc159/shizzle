@@ -22,7 +22,8 @@ JSONType = sa.JSON().with_variant(JSONB(), "postgresql")
 
 
 def upgrade() -> None:
-    op.add_column("jobs", sa.Column("executor", sa.String(length=64), nullable=True))
+    # "runpod" or "node:<node id>"; node ids are up to 64 chars.
+    op.add_column("jobs", sa.Column("executor", sa.String(length=96), nullable=True))
 
     op.create_table(
         "nodes",
@@ -90,9 +91,20 @@ def upgrade() -> None:
     op.create_index("ix_node_assignments_job_id", "node_assignments", ["job_id"])
     op.create_index("ix_node_assignments_node_id", "node_assignments", ["node_id"])
     op.create_index("ix_node_assignments_status", "node_assignments", ["status"])
+    # Deleting a job cascades to its assignments; the node's busy pointer must
+    # follow, or the node stays busy forever.
+    op.create_foreign_key(
+        "fk_nodes_busy_assignment",
+        "nodes",
+        "node_assignments",
+        ["busy_assignment_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
 
 
 def downgrade() -> None:
+    op.drop_constraint("fk_nodes_busy_assignment", "nodes", type_="foreignkey")
     op.drop_index("ix_node_assignments_status", table_name="node_assignments")
     op.drop_index("ix_node_assignments_node_id", table_name="node_assignments")
     op.drop_index("ix_node_assignments_job_id", table_name="node_assignments")

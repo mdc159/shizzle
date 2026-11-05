@@ -13,6 +13,8 @@ Optional:
     SHIZZLE_NODE_WORKDIR        where sources and packages are staged
     SHIZZLE_NODE_HEARTBEAT_SECONDS   15
     SHIZZLE_NODE_POLL_WAIT_SECONDS   25   (long-poll length, server caps at 30)
+    SHIZZLE_NODE_LOG_LEVEL      INFO (DEBUG | INFO | WARNING | ERROR)
+    SHIZZLE_NODE_ALLOW_HTTP     1 to allow a plain-http SHIZZLE_API_BASE (local dev only)
     SHIZZLE_YTDLP_COOKIES       path to a Netscape cookies file for yt-dlp
     SHIZZLE_STEMSPLIT_DIR       path to the repo's stemsplit/ (default: ../../stemsplit)
     AWS_REGION                  us-east-1
@@ -20,6 +22,7 @@ Optional:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +36,19 @@ class ConfigError(ValueError):
     pass
 
 
+def _positive_float(env: dict[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number (got {raw!r})") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"{name} must be a positive number (got {raw!r})")
+    return value
+
+
 def _flag_set(value: str) -> frozenset[str]:
     return frozenset(part.strip().lower() for part in value.split(",") if part.strip())
 
@@ -41,7 +57,7 @@ def _flag_set(value: str) -> frozenset[str]:
 class NodeConfig:
     api_base: str
     node_id: str
-    token: str
+    token: str = field(repr=False)  # never in logs or tracebacks
     display_name: str
     device: str
     workdir: Path
@@ -69,6 +85,17 @@ class NodeConfig:
         api_base = need("SHIZZLE_API_BASE").rstrip("/")
         if not api_base.startswith(("https://", "http://")):
             raise ConfigError("SHIZZLE_API_BASE must be an http(s) URL")
+        if api_base.startswith("http://"):
+            # Bearer tokens travel on every request: plain http only for a
+            # local development control plane, and only when asked for.
+            host = api_base[len("http://"):].split("/")[0].split(":")[0].lower()
+            if host not in ("localhost", "127.0.0.1", "::1", "[::1]") and env.get(
+                "SHIZZLE_NODE_ALLOW_HTTP", ""
+            ).strip() != "1":
+                raise ConfigError(
+                    "SHIZZLE_API_BASE must be https:// (set SHIZZLE_NODE_ALLOW_HTTP=1 only for a "
+                    "local development server)"
+                )
         node_id = need("SHIZZLE_NODE_ID")
         if not all(ch.isalnum() or ch in "-_" for ch in node_id) or len(node_id) > 64:
             raise ConfigError("SHIZZLE_NODE_ID may only contain letters, digits, '-' and '_'")
@@ -93,8 +120,8 @@ class NodeConfig:
             workdir=workdir,
             capabilities=capabilities,
             stemsplit_dir=stemsplit_dir,
-            heartbeat_seconds=float(env.get("SHIZZLE_NODE_HEARTBEAT_SECONDS", "15") or 15),
-            poll_wait_seconds=max(1, min(30, int(env.get("SHIZZLE_NODE_POLL_WAIT_SECONDS", "25") or 25))),
+            heartbeat_seconds=_positive_float(env, "SHIZZLE_NODE_HEARTBEAT_SECONDS", 15.0),
+            poll_wait_seconds=max(1, min(30, int(_positive_float(env, "SHIZZLE_NODE_POLL_WAIT_SECONDS", 25.0)))),
             cookies_file=Path(cookies) if cookies else None,
             aws_region=env.get("AWS_REGION", "").strip() or "us-east-1",
         )

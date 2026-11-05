@@ -150,9 +150,13 @@ A worker node (docs/WORKER-NODES.md) uploads `sources/<track>/source.mp4` and
 then writes `sources/<track>/source.json` LAST. The orchestrator advances a
 URL job out of `downloading` only after reading that receipt and re-proving
 it: interface `shizzle-source-v1`, `object_key` equal to the pipeline's
-source key, `track_id` equal to the job's, a 64-hex sha256, a positive
-`bytes` that equals the object's `ContentLength`, duration and size within
-the upload limits. The node's completion report is a hint, never the proof:
+source key, `track_id` equal to the job's, a 64-hex sha256 that equals the
+object's stored S3 SHA-256 checksum (the node uploads with
+`ChecksumSHA256`, so S3 verified those bytes on the way in), a positive
+`bytes` that equals the object's `ContentLength`, a positive finite
+`duration_seconds`, and duration and size within the upload limits. A
+receipt that fails any of these closes its assignment as failed so the
+retry assigns afresh. The node's completion report is a hint, never the proof:
 the marker completes an open assignment even when the report was lost, and
 the node writes both objects with `If-None-Match: *`, so a stale node that
 was reassigned away can never overwrite a source the orchestrator accepted.
@@ -390,7 +394,8 @@ With `SHIZZLE_NODE_ROUTING=prefer`, an online separation node is chosen
 before RunPod; a registered node that is offline earns
 `NODE_SEPARATE_WAIT_SECONDS` before the orchestrator records
 `fallback_runpod` and dispatches to RunPod. With `only`, RunPod is never
-called. With no node ever registered, RunPod is used at once. URL downloads
+called. With no separation node ever registered, RunPod is used at once
+(when RunPod is configured; an unconfigured RunPod parks the job as before). URL downloads
 have no RunPod fallback: RunPod cannot download, so the job waits up to
 `NODE_DOWNLOAD_WAIT_SECONDS` and then fails `NO_NODE_AVAILABLE`.
 

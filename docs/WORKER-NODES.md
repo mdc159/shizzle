@@ -59,12 +59,26 @@ Implemented on this branch (see the PR for the commits):
 - `player/`: URL input in Add Source, node-aware progress, nodes strip on
   `/dashboard`.
 
-Not yet done: a live run (one URL through shizzle.systems with the Mac online),
-the IAM user for the node, `SHIZZLE_NODE_TOKENS` in the production `.env`,
-and the Mac's launchd service. The Mac inventory (2026-11-05) showed no
-separator container there: separation runs natively on the Apple GPU, which
-is what the agent does; the downloader container stays as is for the native
-app and is not used by the agent.
+Not yet done, against the plan's own done criteria below:
+
+- a live run (one URL through shizzle.systems with the Mac online), and the
+  matching run with the agents stopped (RunPod fallback), both recorded under
+  `evidence/`;
+- the IAM user for the node, `SHIZZLE_NODE_TOKENS` in the production `.env`,
+  and the Mac's launchd service;
+- the Mac inventory written up under `evidence/` (it was taken on 2026-11-05
+  over the bridge session and is summarized in "Node runtime: as built", but
+  the raw listing is not yet committed);
+- the Mac CPU-in-container versus native-MPS measurement. It was **not**
+  taken: the inventory showed no separator container on the Mac and Docker
+  Desktop cannot reach the Apple GPU, so native MPS was chosen without the
+  measurement. That is a decision taken against the container-first
+  runtime section of the plan, recorded in "Decisions taken" below;
+- the Dell agent install (Mac first by the owner's decision).
+
+The Phase sections further down are the original plan and are kept as the
+done criteria; "Node runtime: as built" is the authoritative description of
+what runs.
 
 ## Goal
 
@@ -181,7 +195,7 @@ Migration `0006_worker_nodes` (next in the single linear chain, F1):
 nodes
   id                 text pk           ("mac-mini", "dell-9530")
   display_name       text
-  token_sha256       text              (bearer token hash; raw never stored, E3)
+  (no token column: tokens live only in SHIZZLE_NODE_TOKENS on the VPS, E6)
   capabilities       jsonb             {"download": true, "separate": true,
                                         "device": "mps", "max_duration_s": 1800}
   agent_version      text
@@ -236,7 +250,7 @@ A node is **online** when `last_seen_at` is younger than
 `NODE_ONLINE_SECONDS` (default 45) and `disabled_at` is null. It is
 **available** for a kind when it is online, advertises that capability,
 and `busy_assignment_id` is null. Selection among several available nodes:
-the one with the oldest `busy` release (round robin), ties by name.
+the one least recently heard from (`updated_at`, a stable spread rather than a strict round-robin), ties by name.
 
 ### downloading stage
 
@@ -410,9 +424,10 @@ deploy credentials.
 - **E6 node tokens are node-scoped.** A node token is rejected on every
   non-`/api/nodes/*` route; the public job API never returns `source_ref`.
 
-## Phases
+## Phases (original plan, kept as the done criteria)
 
-Each phase is one or two PRs through the required `library`, `stemsplit`,
+Where this section says "container", the as-built agent runs natively (see
+"Node runtime: as built" and "Decisions taken"). Each phase is one or two PRs through the required `library`, `stemsplit`,
 `player` and `postgres-contract` checks and the review-convergence workflow.
 Each adds its tests, invariants and docs in the same PR. Production deploys
 through the human-approved gate as usual.
@@ -478,6 +493,4 @@ Asked and answered by the owner on 2026-11-05:
 | Do uploads also prefer a node? | **Yes.** Rule 3 is about load, not source type. Upload jobs go to S3 as today, then a node separates if one is online. |
 | Mac fork and PR #50 | **Nodes run the existing containers; no code copy required.** Images are the interface: the production worker image for separation, the fork's ingest image for download. PR #50's import API is not the node path and stays parked. |
 
-Still open, to be settled by measurement in Phase 3: Mac separation in a
-CPU-only container versus the native MPS helper (see "GPU access per
-machine").
+| Mac runtime (2026-11-05, evening) | **Native `mps`, not a container.** The plan's runtime section was container-first; the Mac inventory found no separator container and Docker Desktop cannot reach the Apple GPU, so the measurement the plan asked for was not taken and the agent runs the production handler natively. Revisit only if a GPU-capable container runtime appears on macOS. |

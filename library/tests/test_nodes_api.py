@@ -8,11 +8,14 @@ reports. Orchestrator routing lives in test_node_routing.py.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from shizzle_server.api.nodes import require_node
 from shizzle_server.db.models import NodeAssignmentKind, NodeAssignmentStatus, SourceType
 from shizzle_server.main import create_app
 
@@ -235,6 +238,72 @@ async def test_fail_report_records_detail_and_frees_the_node(node_client):
     assert failed.status == NodeAssignmentStatus.failed
     assert failed.detail["code"] == "YTDLP_BLOCKED"
     assert (await repo.get("mac-mini")).busy_assignment_id is None
+
+
+async def test_heartbeat_adopts_only_an_open_assignment_held_by_this_node(node_client):
+    """After the watchdog expired an assignment, the agent's next heartbeat must
+    not re-mark the node busy with that dead id (nothing would ever clear it)."""
+    c, app = node_client
+    repo = app.state.node_repo
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC)
+    await c.post("/api/nodes/dell-9530/heartbeat", json={"capabilities": {}}, headers=DELL)
+    job = await _claimed_job(app, worker_id="w1")
+    held = await repo.create_assignment(
+        job.id, worker_id="w1", node_id="mac-mini", kind=NodeAssignmentKind.download, payload={}
+    )
+    assert await repo.expire(held.id, reason="stalled")
+    assert (await repo.get("mac-mini")).busy_assignment_id is None
+    # The agent still thinks it holds it.
+    r = await c.post(
+        "/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(held.id)}, headers=MAC
+    )
+    assert r.status_code == 200
+    assert (await repo.get("mac-mini")).busy_assignment_id is None
+    # A random id, or another node's open assignment, is not adopted either.
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(uuid.uuid4())}, headers=MAC)
+    assert (await repo.get("mac-mini")).busy_assignment_id is None
+    second = await _claimed_job(app, worker_id="w2")
+    theirs = await repo.create_assignment(
+        second.id, worker_id="w2", node_id="dell-9530", kind=NodeAssignmentKind.download, payload={}
+    )
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"busyAssignmentId": str(theirs.id)}, headers=MAC)
+    assert (await repo.get("mac-mini")).busy_assignment_id is None
+    # A heartbeat without capabilities keeps the stored set.
+    await c.post(
+        "/api/nodes/mac-mini/heartbeat", json={"capabilities": {"download": True}}, headers=MAC
+    )
+    await c.post("/api/nodes/mac-mini/heartbeat", json={}, headers=MAC)
+    assert (await repo.get("mac-mini")).capabilities == {"download": True}
+
+
+async def test_disabled_node_is_offered_nothing_and_completion_detail_is_bounded(node_client):
+    c, app = node_client
+    repo = app.state.node_repo
+    await c.post("/api/nodes/mac-mini/heartbeat", json={"capabilities": {}}, headers=MAC)
+    job = await _claimed_job(app, worker_id="w1")
+    held = await repo.create_assignment(
+        job.id, worker_id="w1", node_id="mac-mini", kind=NodeAssignmentKind.download, payload={}
+    )
+    assert (await c.get("/api/nodes/mac-mini/assignments/next", headers=MAC)).status_code == 200
+    # Kill switch after the fact: pending work is withheld too.
+    assert await repo.set_disabled("mac-mini", True)
+    assert (await c.get("/api/nodes/mac-mini/assignments/next", headers=MAC)).status_code == 204
+    assert await repo.set_disabled("mac-mini", False)
+    assert (await c.get("/api/nodes/mac-mini/assignments/next", headers=MAC)).status_code == 200
+    # A completion report is a hint and stays small.
+    r = await c.post(
+        f"/api/nodes/mac-mini/assignments/{held.id}/complete",
+        json={"detail": {"blob": "x" * 9000}},
+        headers=MAC,
+    )
+    assert r.status_code == 422
+    # A non-ASCII token is a 401, not a 500 (hmac.compare_digest on str would
+    # raise TypeError). The HTTP client cannot even send such a header, so the
+    # dependency is exercised directly.
+    fake_request = SimpleNamespace(headers={"authorization": "Bearer t\u00f6ken"}, app=app)
+    with pytest.raises(HTTPException) as refused:
+        require_node(fake_request, "mac-mini")
+    assert refused.value.status_code == 401
 
 
 async def test_create_assignment_refuses_a_busy_or_disabled_node(node_client):

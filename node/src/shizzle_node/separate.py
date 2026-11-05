@@ -22,10 +22,10 @@ def resolve_device(requested: str) -> str:
     """``auto`` -> mps on Apple silicon, cuda when available, else cpu."""
     if requested != "auto":
         return requested
-    try:
-        import torch
-    except ImportError:
-        return "cpu"
+    # A missing torch is a broken install, not "cpu": let the ImportError end
+    # the agent at startup instead of advertising a separator that cannot run.
+    import torch
+
     mps = getattr(torch.backends, "mps", None)
     if mps is not None and mps.is_available():
         return "mps"

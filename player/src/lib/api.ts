@@ -80,7 +80,10 @@ export async function uploadFile(file: File, metadata?: SourceMetadata): Promise
  * (docs/WORKER-NODES.md). Title/artist are optional: the node fills them
  * from the video's metadata when omitted.
  */
-export async function submitUrl(url: string, metadata?: SourceMetadata): Promise<{ jobId: string }> {
+export async function submitUrl(
+  url: string,
+  metadata?: SourceMetadata
+): Promise<{ jobId: string; maxWaitSeconds?: number }> {
   const body: Record<string, string> = { url: url.trim() };
   const title = metadata?.title?.trim();
   const artist = metadata?.artist?.trim();
@@ -98,6 +101,12 @@ export async function submitUrl(url: string, metadata?: SourceMetadata): Promise
     try {
       const payload = await response.json();
       if (typeof payload?.detail === 'string') detail = payload.detail;
+      // A 422 carries a list of field errors; surface the first one.
+      else if (Array.isArray(payload?.detail) && payload.detail.length > 0) {
+        const first = payload.detail[0];
+        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : undefined;
+        if (typeof first?.msg === 'string') detail = field ? `${field}: ${first.msg}` : first.msg;
+      }
     } catch {
       // keep statusText
     }

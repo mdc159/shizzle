@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..db.models import Node, NodeAssignment
 from ..db.repository import NodeRepository
@@ -34,7 +35,8 @@ _LONG_POLL_MAX_SECONDS = 30
 
 class NodeHeartbeatRequest(BaseModel):
     displayName: str | None = Field(None, max_length=128)
-    capabilities: dict[str, Any] = Field(default_factory=dict)
+    # Omitted keeps the stored capability set; only an explicit dict replaces it.
+    capabilities: dict[str, Any] | None = None
     agentVersion: str | None = Field(None, max_length=64)
     busyAssignmentId: uuid.UUID | None = None
 
@@ -70,8 +72,20 @@ class ProgressRequest(BaseModel):
     phase: str = Field(min_length=1, max_length=256)
 
 
+_COMPLETE_DETAIL_MAX_BYTES = 8192
+
+
 class CompleteRequest(BaseModel):
     detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("detail")
+    @classmethod
+    def _bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # A completion report is a hint (the S3 markers are the proof), so it
+        # is kept small: the documented summary fields fit in well under 8 KiB.
+        if len(json.dumps(value, separators=(",", ":"))) > _COMPLETE_DETAIL_MAX_BYTES:
+            raise ValueError(f"detail must serialize to at most {_COMPLETE_DETAIL_MAX_BYTES} bytes")
+        return value
 
 
 class FailRequest(BaseModel):
@@ -134,7 +148,13 @@ def require_node(request: Request, node_id: str) -> str:
     expected = _settings(request).node_tokens.get(node_id)
     auth = request.headers.get("authorization", "")
     presented = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    if not expected or not presented or not hmac.compare_digest(presented, expected):
+    # Bytes, not str: compare_digest raises TypeError on non-ASCII str, which
+    # would turn a bad token into a 500 instead of a 401.
+    if (
+        not expected
+        or not presented
+        or not hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+    ):
         raise HTTPException(status_code=401, detail="Node authentication required")
     return node_id
 

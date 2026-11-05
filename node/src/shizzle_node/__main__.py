@@ -29,20 +29,28 @@ def _s3_factory(region: str):
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=os.environ.get("SHIZZLE_NODE_LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    level = os.environ.get("SHIZZLE_NODE_LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    if level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        print(f"shizzle-node: SHIZZLE_NODE_LOG_LEVEL must be DEBUG, INFO, WARNING or ERROR (got {level!r})",
+              file=sys.stderr)
+        return 2
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         config = NodeConfig.from_env()
-    except ConfigError as exc:
+    except (ConfigError, ValueError) as exc:
         print(f"shizzle-node: {exc}", file=sys.stderr)
         return 2
     client = NodeClient(config.api_base, config.node_id, config.token)
     agent = Agent(config, client, s3_factory=_s3_factory(config.aws_region))
 
     def _stop(signum, _frame):  # noqa: ARG001
-        logging.getLogger("shizzle_node").info("signal %s: stopping after the current job", signum)
+        log = logging.getLogger("shizzle_node")
+        if agent.stop_requested:
+            # Second signal while a job runs: the operator means now. The
+            # assignment is left to the orchestrator's stall watchdog (B16).
+            log.warning("signal %s again: exiting now, abandoning the current job", signum)
+            os._exit(130)
+        log.info("signal %s: stopping after the current job (send again to exit now)", signum)
         agent.request_stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):

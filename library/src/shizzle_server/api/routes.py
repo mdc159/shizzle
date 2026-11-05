@@ -309,7 +309,14 @@ async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Pro
         artist=metadata.artist,
         profile_version=_settings(request).processing_profile_version,
     )
-    return {"jobId": job.id.hex, "title": job.title, "artist": job.artist}
+    # The client polls at least this long before calling the job lost: the
+    # node wait window plus an hour of processing (the limit is configurable).
+    return {
+        "jobId": job.id.hex,
+        "title": job.title,
+        "artist": job.artist,
+        "maxWaitSeconds": int(_settings(request).node_download_wait_seconds) + 3600,
+    }
 
 
 # --- jobs --------------------------------------------------------------------

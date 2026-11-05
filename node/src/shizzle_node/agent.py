@@ -75,6 +75,10 @@ class Agent:
     def request_stop(self) -> None:
         self._stop.set()
 
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop.is_set()
+
     def heartbeat_once(self) -> bool:
         try:
             self.client.heartbeat(
@@ -145,6 +149,12 @@ class Agent:
             logger.warning("ack of %s failed (%s); retrying after a pause", assignment.id, exc)
             self._sleep(self.config.ack_retry_seconds)
             return
+        except Exception as exc:
+            # A transport failure must not take the agent down: the lease is
+            # still ours and the next poll offers the assignment again.
+            logger.warning("ack of %s failed (%s); retrying after a pause", assignment.id, exc)
+            self._sleep(self.config.ack_retry_seconds)
+            return
         self._busy = assignment.id
         self.heartbeat_once()
         workdir = self.config.workdir / assignment.job_id / assignment.kind
@@ -176,7 +186,6 @@ class Agent:
         except AssignmentLost as exc:
             # Nothing to report: the 409 already told us the orchestrator moved on.
             logger.info("%s; abandoning the run", exc)
-            shutil.rmtree(workdir, ignore_errors=True)
         except DownloadError as exc:
             self._fail(assignment, exc.code, exc.detail)
         except Exception as exc:
@@ -191,8 +200,9 @@ class Agent:
             except Exception as exc:
                 # The S3 markers are written; the orchestrator will see them.
                 logger.warning("completion report failed for %s: %s", assignment.id, exc)
-            shutil.rmtree(workdir, ignore_errors=True)
         finally:
+            # Success or failure, the staged source/package leaves the disk.
+            shutil.rmtree(workdir, ignore_errors=True)
             self._busy = None
             self.heartbeat_once()
 

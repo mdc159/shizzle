@@ -20,6 +20,7 @@ from ..db.models import Job, JobStage, SourceType, utcnow
 from ..db.repository import (
     InvalidTransition,
     JobRepository,
+    NodeRepository,
     PublishRefusedError,
     pending_runpod_dispatch,
     track_id_for_job,
@@ -127,7 +128,7 @@ class StageContext:
     runpod: RunPodClient
     worker_id: str
     # Worker-node registry (docs/WORKER-NODES.md); None in lightweight unit contexts.
-    nodes: Any = None
+    nodes: NodeRepository | None = None
     # Set by handle_publishing when it commits the track+ready transaction
     # itself; the loop then skips its own advance() call.
     published: bool = False

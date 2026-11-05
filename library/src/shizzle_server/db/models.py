@@ -112,7 +112,8 @@ class Job(Base):
     runpod_job_id: Mapped[str | None] = mapped_column(String(128))
     # Who holds the current attempt: "runpod" or "node:<node-id>". Null until
     # the orchestrator routes the job (docs/WORKER-NODES.md).
-    executor: Mapped[str | None] = mapped_column(String(64))
+    # "runpod" or "node:<node id>" (node ids are up to 64 chars, so 96 is ample).
+    executor: Mapped[str | None] = mapped_column(String(96))
     # Latest worker progress heartbeat; phase changes are also kept in job_events.
     worker_phase: Mapped[str | None] = mapped_column(String(256))
     worker_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -304,7 +305,11 @@ class Node(Base):
     agent_version: Mapped[str | None] = mapped_column(String(64))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # One job at a time per node: the open assignment it holds, if any.
-    busy_assignment_id: Mapped[uuid.UUID | None] = mapped_column(sa_Uuid())
+    busy_assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        sa_Uuid(),
+        ForeignKey("node_assignments.id", ondelete="SET NULL", use_alter=True,
+                   name="fk_nodes_busy_assignment"),
+    )
     # Operator kill switch: a disabled node is never assigned work.
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(

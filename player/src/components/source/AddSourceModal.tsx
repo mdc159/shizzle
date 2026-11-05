@@ -33,9 +33,10 @@ const STEPS = [
 const BASE_POLL_INTERVAL = 3000;
 const MAX_POLL_INTERVAL = 30000;
 const MAX_POLL_DURATION = 60 * 60 * 1000; // 1 hour (Demucs can be slow)
-// A URL job waits for a worker node to come online (up to the server's
-// node_download_wait_seconds, 24 h by default), so its poll window is longer.
-const MAX_URL_POLL_DURATION = 24 * 60 * 60 * 1000;
+// A URL job waits for a worker node to come online (the server's
+// node_download_wait_seconds, 24 h by default). The server returns the
+// effective window with the job; this is only the fallback.
+const DEFAULT_URL_POLL_DURATION = 25 * 60 * 60 * 1000;
 
 /** The node id from an executor string ("node:mac-mini" -> "mac-mini"), else null. */
 const executorNode = (executor?: string | null): string | null =>
@@ -95,6 +96,10 @@ export const AddSourceModal: React.FC = () => {
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
   const [artistUncertain, setArtistUncertain] = useState(false);
+  // Title/artist typed by the user, as opposed to prefilled from a file name.
+  // Only typed values are sent with a link; a file's guessed metadata must
+  // not override what the video itself says.
+  const [metadataTyped, setMetadataTyped] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -184,6 +189,7 @@ export const AddSourceModal: React.FC = () => {
     setTitle(parsed.title);
     setArtist(parsed.artist);
     setArtistUncertain(!parsed.confident);
+    setMetadataTyped(false);
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -204,13 +210,17 @@ export const AddSourceModal: React.FC = () => {
       setJobStatus(null);
       try {
         const result = await submitUrl(sourceUrl, {
-          title: title.trim() || undefined,
-          artist: artist.trim() || undefined,
+          title: metadataTyped ? title.trim() || undefined : undefined,
+          artist: metadataTyped ? artist.trim() || undefined : undefined,
         });
         setJobId(result.jobId);
         setJobStatus({ jobId: result.jobId, status: 'pending', sourceType: 'url' });
         toast.success('Link submitted');
-        startPolling(result.jobId, MAX_URL_POLL_DURATION);
+        const waitMs =
+          typeof result.maxWaitSeconds === 'number' && result.maxWaitSeconds > 0
+            ? result.maxWaitSeconds * 1000
+            : DEFAULT_URL_POLL_DURATION;
+        startPolling(result.jobId, Math.max(waitMs, MAX_POLL_DURATION));
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to submit link');
         setLoading(false);
@@ -248,6 +258,7 @@ export const AddSourceModal: React.FC = () => {
     setTitle('');
     setArtist('');
     setArtistUncertain(false);
+    setMetadataTyped(false);
     setLoading(false);
     setError(null);
     setJobId(null);
@@ -380,7 +391,7 @@ export const AddSourceModal: React.FC = () => {
                     id="source-title"
                     type="text"
                     value={title}
-                    onChange={(e) => setTitle(e.target.value)}
+                    onChange={(e) => { setTitle(e.target.value); setMetadataTyped(true); }}
                     placeholder={urlMode ? 'From the video if left blank' : 'Track title'}
                     className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                   />
@@ -395,6 +406,7 @@ export const AddSourceModal: React.FC = () => {
                     value={artist}
                     onChange={(e) => {
                       setArtist(e.target.value);
+                      setMetadataTyped(true);
                       // Once the user types an artist the quiet guess hint
                       // has served its purpose.
                       if (e.target.value.trim()) setArtistUncertain(false);

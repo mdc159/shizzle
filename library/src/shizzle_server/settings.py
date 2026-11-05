@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -130,10 +131,19 @@ class Settings(BaseSettings):
     # Signed-cookie validity. Refreshed by /api/media/session.
     media_ttl_seconds: int = 24 * 3600
 
+    @field_validator("shizzle_node_routing")
+    @classmethod
+    def _routing_mode(cls, value: str) -> str:
+        # Fail at startup, not silently as "prefer": a typo here would make
+        # URL jobs wait a day instead of failing fast.
+        mode = value.strip().lower()
+        if mode not in ("prefer", "only", "off"):
+            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        return mode
+
     @property
     def node_routing(self) -> str:
-        value = self.shizzle_node_routing.strip().lower()
-        return value if value in ("prefer", "only", "off") else "prefer"
+        return self.shizzle_node_routing
 
     @property
     def node_routing_enabled(self) -> bool:

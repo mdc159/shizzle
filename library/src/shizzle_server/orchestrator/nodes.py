@@ -20,8 +20,11 @@ Reports from nodes are hints; S3 markers are the truth (``source.json`` here,
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import logging
+import math
 import re
 import uuid
 from datetime import UTC, datetime
@@ -38,7 +41,7 @@ from ..db.models import (
     NodeAssignmentStatus,
     utcnow,
 )
-from ..db.repository import track_id_for_job
+from ..db.repository import NodeRepository, track_id_for_job
 from ..errors import ErrorCode, StageError
 from ..metadata import resolve_track_metadata
 from . import cloud
@@ -114,6 +117,13 @@ def _age_seconds(since: datetime | None) -> float | None:
     if since.tzinfo is None:
         since = since.replace(tzinfo=UTC)
     return (utcnow() - since).total_seconds()
+
+
+def _repo(ctx: StageContext) -> NodeRepository:
+    """The node registry; every caller here runs only when routing is on."""
+    if ctx.nodes is None:  # pragma: no cover - guarded by the stage dispatch
+        raise RuntimeError("node routing invoked without a NodeRepository")
+    return ctx.nodes
 
 
 def _event_age(events: list[JobEvent], name: str, **match: Any) -> float | None:
@@ -200,7 +210,7 @@ async def _expire_and_retry(
     ctx: StageContext, assignment: NodeAssignment, reason: str
 ) -> StageError:
     """Close a silent assignment and build the retryable error that redispatches."""
-    await ctx.nodes.expire(assignment.id, reason=reason)
+    await _repo(ctx).expire(assignment.id, reason=reason)
     await ctx.jobs.append_event(
         ctx.job.id,
         NODE_EXPIRED_EVENT,
@@ -242,7 +252,7 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         )
     track_id = track_id_for_job(job.id)
     events = await ctx.jobs.list_events(job.id)
-    assignment = await ctx.nodes.latest_for_job(job.id, kind=NodeAssignmentKind.download)
+    assignment = await _repo(ctx).latest_for_job(job.id, kind=NodeAssignmentKind.download)
 
     if assignment is not None and assignment.status in NODE_ASSIGNMENT_OPEN:
         # The S3 marker is the truth: a download whose completion report was
@@ -256,10 +266,10 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         except StageError as exc:
             logger.warning("job %s: source receipt check failed: %s", job.id, exc)
         if verified:
-            await ctx.nodes.complete(
+            await _repo(ctx).complete(
                 assignment.id, node_id=assignment.node_id, detail={"completed_by": "s3-marker"}
             )
-            assignment = await ctx.nodes.get_assignment(assignment.id) or assignment
+            assignment = await _repo(ctx).get_assignment(assignment.id) or assignment
         else:
             reason = _assignment_is_stale(assignment, ctx)
             if reason is not None:
@@ -281,6 +291,9 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
             return None
         problem = await _verify_source_receipt(ctx, track_id, receipt)
         if problem is not None:
+            # Close the assignment too: left "completed", every retry would
+            # re-verify the same receipt and fail the same way.
+            await _repo(ctx).reject(assignment.id, reason=problem)
             await ctx.jobs.append_event(
                 job.id,
                 NODE_FAILED_EVENT,
@@ -356,13 +369,13 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
 
     # No usable assignment (none yet, or the last one expired): assign or wait.
     candidates = _prefer_untried(
-        await ctx.nodes.available(
+        await _repo(ctx).available(
             NodeAssignmentKind.download, online_seconds=ctx.settings.node_online_seconds
         ),
         _nodes_tried(events),
     )
     for node in candidates:
-        created = await ctx.nodes.create_assignment(
+        created = await _repo(ctx).create_assignment(
             job.id,
             worker_id=ctx.worker_id,
             node_id=node.id,
@@ -377,7 +390,9 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
             ctx.park_seconds = ctx.settings.node_poll_seconds
             return None
 
-    waited = _event_age(events, NODE_WAIT_EVENT, kind="download")
+    # Scoped to this attempt, like the separation wait: a new outage after a
+    # retry earns a full window.
+    waited = _event_age(events, NODE_WAIT_EVENT, kind="download", attempt=job.attempt)
     if waited is not None and waited > ctx.settings.node_download_wait_seconds:
         raise StageError(
             ErrorCode.NO_NODE_AVAILABLE,
@@ -444,14 +459,21 @@ async def _verify_source_receipt(
     if size > ctx.settings.max_upload_bytes:
         return f"source is {size} bytes, above the {ctx.settings.max_upload_bytes} byte limit"
     duration = receipt.get("duration_seconds")
-    if isinstance(duration, int | float) and duration > ctx.settings.max_duration_seconds:
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int | float)
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
+        return "duration_seconds must be a positive number"
+    if duration > ctx.settings.max_duration_seconds:
         return (
             f"source is {duration:.0f}s, above the "
             f"{ctx.settings.max_duration_seconds}s limit"
         )
     try:
         head = await asyncio.to_thread(
-            cloud._head_or_none, s3_client(ctx.settings), ctx.settings.s3_media_bucket, expected_key
+            _head_with_checksum, s3_client(ctx.settings), ctx.settings.s3_media_bucket, expected_key
         )
     except Exception as exc:
         raise StageError(
@@ -463,7 +485,30 @@ async def _verify_source_receipt(
         return "source.mp4 is not in S3"
     if int(head.get("ContentLength", -1)) != size:
         return f"source.mp4 is {head.get('ContentLength')} bytes, receipt says {size}"
+    # The node uploads with an S3 SHA-256 checksum (S3 verified the bytes on
+    # the way in), so the receipt's digest is checked against the object
+    # itself, not just for shape: same-sized altered bytes do not pass.
+    stored = head.get("ChecksumSHA256")
+    if not isinstance(stored, str) or not stored:
+        return "source.mp4 carries no SHA-256 checksum (not uploaded by a node)"
+    try:
+        stored_hex = base64.b64decode(stored, validate=True).hex()
+    except (ValueError, binascii.Error):
+        return "source.mp4 checksum is unreadable"
+    if stored_hex != sha:
+        return f"source.mp4 sha256 is {stored_hex}, receipt says {sha}"
     return None
+
+
+def _head_with_checksum(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
+    """HEAD with the object's stored SHA-256 checksum, or None when absent."""
+    try:
+        head: dict[str, Any] = s3.head_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
+        return head
+    except Exception as exc:
+        if cloud._is_not_found(exc):
+            return None
+        raise
 
 
 # --- dispatched: separation on a node, RunPod as fallback ---------------------
@@ -473,7 +518,7 @@ async def poll_node_separation(ctx: StageContext, *, dispatch_key: str | None) -
     """Reconcile a separation that was handed to a node (executor id in runpod_job_id)."""
     job = ctx.job
     assignment_id = _assignment_id_from_executor(job.runpod_job_id)
-    assignment = await ctx.nodes.get_assignment(assignment_id) if assignment_id else None
+    assignment = await _repo(ctx).get_assignment(assignment_id) if assignment_id else None
     if assignment is None:
         await ctx.jobs.record_worker_progress(job.id, phase="failed", worker_id=ctx.worker_id)
         raise StageError(
@@ -487,10 +532,10 @@ async def poll_node_separation(ctx: StageContext, *, dispatch_key: str | None) -
         if await cloud.package_ready(ctx, idempotency_key=dispatch_key):
             # handoff.json is the truth (A1): a lost completion report must not
             # stall a finished package until the stall window.
-            await ctx.nodes.complete(
+            await _repo(ctx).complete(
                 assignment.id, node_id=assignment.node_id, detail={"completed_by": "s3-marker"}
             )
-            assignment = await ctx.nodes.get_assignment(assignment.id) or assignment
+            assignment = await _repo(ctx).get_assignment(assignment.id) or assignment
         else:
             reason = _assignment_is_stale(assignment, ctx)
             if reason is not None:
@@ -573,7 +618,7 @@ async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str
     settings = ctx.settings
     if not settings.node_routing_enabled:
         return "runpod"
-    candidates = await ctx.nodes.available(
+    candidates = await _repo(ctx).available(
         NodeAssignmentKind.separate, online_seconds=settings.node_online_seconds
     )
     events = await ctx.jobs.list_events(ctx.job.id)
@@ -587,7 +632,7 @@ async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str
     if settings.node_routing == "prefer" and runpod_configured:
         # No node has ever registered: nothing to wait for, RunPod right away.
         # (A registered-but-offline node earns the wait window: it may wake.)
-        registered = await ctx.nodes.list_nodes()
+        registered = await _repo(ctx).list_nodes()
         if not any(
             isinstance(n.capabilities, dict) and n.capabilities.get("separate")
             for n in registered
@@ -634,7 +679,7 @@ async def assign_separation(
     ``cloud.accepted_dispatch_id`` reconciles it exactly like a RunPod id.
     Returns False when the node was taken in between (caller parks).
     """
-    assignment = await ctx.nodes.create_assignment(
+    assignment = await _repo(ctx).create_assignment(
         ctx.job.id,
         worker_id=ctx.worker_id,
         node_id=node_id,
@@ -665,7 +710,7 @@ async def expire_superseded_assignments(ctx: StageContext, *, dispatch_key: str)
     history; nothing else would ever expire it, and its node would stay
     marked busy with it forever.
     """
-    for assignment in await ctx.nodes.list_for_job(ctx.job.id):
+    for assignment in await _repo(ctx).list_for_job(ctx.job.id):
         if (
             assignment.kind != NodeAssignmentKind.separate
             or assignment.status not in NODE_ASSIGNMENT_OPEN
@@ -673,7 +718,7 @@ async def expire_superseded_assignments(ctx: StageContext, *, dispatch_key: str)
         ):
             continue
         reason = f"superseded by attempt {ctx.job.attempt}"
-        if await ctx.nodes.expire(assignment.id, reason=reason):
+        if await _repo(ctx).expire(assignment.id, reason=reason):
             await ctx.jobs.append_event(
                 ctx.job.id,
                 NODE_EXPIRED_EVENT,
@@ -692,7 +737,7 @@ async def adopt_existing_separation(ctx: StageContext, *, dispatch_key: str) -> 
 
     Returns True after confirming it (the caller parks and polls it next).
     """
-    existing = await ctx.nodes.latest_for_job(ctx.job.id, kind=NodeAssignmentKind.separate)
+    existing = await _repo(ctx).latest_for_job(ctx.job.id, kind=NodeAssignmentKind.separate)
     if (
         existing is None
         or existing.idempotency_key != dispatch_key

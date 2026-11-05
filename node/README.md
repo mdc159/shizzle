@@ -30,10 +30,11 @@ GPU (`mps`); Docker Desktop cannot reach it.
 
 ```sh
 cd /path/to/shizzle          # a checkout of mdc159/shizzle (this repo)
-uv sync --directory node --python 3.11
+uv sync --locked --directory node --python 3.11
 ```
 
-That pulls torch/torchaudio (the default macOS build has Metal support),
+That installs exactly what `node/uv.lock` pins: torch/torchaudio 2.2.2 (the
+same version as the RunPod image; the macOS build has Metal support),
 `demucs==4.1.0`, yt-dlp, boto3 and httpx into `node/.venv`. The first
 separation downloads the `htdemucs_6s` weights (~80 MB) into the torch cache.
 
@@ -65,6 +66,31 @@ Then paste a YouTube link into the player's Add Source dialog.
 
 ### Keep it running (launchd)
 
+The secrets live in one root-only env file that a wrapper script sources;
+the plist itself holds nothing sensitive. Replace `<you>` and the checkout
+path with your own.
+
+`~/.config/shizzle-node/env` (`chmod 600`), written from the vault:
+
+```sh
+SHIZZLE_API_BASE=https://shizzle.systems
+SHIZZLE_NODE_ID=mac-mini
+SHIZZLE_NODE_TOKEN=<long random token>
+SHIZZLE_NODE_DISPLAY_NAME="Mac mini"
+SHIZZLE_NODE_DEVICE=mps
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+```
+
+`~/.config/shizzle-node/run.sh` (`chmod 700`):
+
+```sh
+#!/bin/sh
+set -a; . "$HOME/.config/shizzle-node/env"; set +a
+exec "$HOME/.local/bin/uv" run --directory "$HOME/Projects/shizzle/node" shizzle-node
+```
+
 `~/Library/LaunchAgents/com.shizzle.node.plist`, then
 `launchctl load ~/Library/LaunchAgents/com.shizzle.node.plist`:
 
@@ -74,21 +100,12 @@ Then paste a YouTube link into the player's Add Source dialog.
 <plist version="1.0"><dict>
   <key>Label</key><string>com.shizzle.node</string>
   <key>ProgramArguments</key>
-  <array>
-    <string>/Users/seabass/.local/bin/uv</string>
-    <string>run</string><string>--directory</string>
-    <string>/Users/seabass/Documents/Projects/shizzle/node</string>
-    <string>shizzle-node</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>SHIZZLE_API_BASE</key><string>https://shizzle.systems</string>
-    <key>SHIZZLE_NODE_ID</key><string>mac-mini</string>
-    <key>SHIZZLE_NODE_DEVICE</key><string>mps</string>
-    <!-- token and AWS keys: inject from the vault, do not paste here -->
-  </dict>
+  <array><string>/Users/<you>/.config/shizzle-node/run.sh</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- The agent finishes its current job on SIGTERM (a second signal exits
+       at once); launchd's default 20 s would cut that short. -->
+  <key>ExitTimeOut</key><integer>1800</integer>
   <key>StandardOutPath</key><string>/tmp/shizzle-node.log</string>
   <key>StandardErrorPath</key><string>/tmp/shizzle-node.log</string>
 </dict></plist>
@@ -102,7 +119,7 @@ build on Windows is CPU-only):
 ```powershell
 cd C:\path\to\shizzle
 uv sync --directory node --python 3.11
-uv pip install --directory node --python node\.venv --reinstall `
+uv pip install --directory node --python .venv --reinstall `
   --index-url https://download.pytorch.org/whl/cu121 torch==2.2.2+cu121 torchaudio==2.2.2+cu121
 $env:SHIZZLE_NODE_ID = "dell-9530"; $env:SHIZZLE_NODE_DEVICE = "cuda"   # plus the rest
 uv run --directory node --no-sync shizzle-node
@@ -166,7 +183,7 @@ credentials ever live on a node.
 ## Tests
 
 ```sh
-uv sync --directory node --no-default-groups --group dev   # no torch needed
+uv sync --locked --directory node --no-default-groups --group dev   # no torch needed
 uv run --directory node pytest -q
 uv run --directory node ruff check src tests
 ```

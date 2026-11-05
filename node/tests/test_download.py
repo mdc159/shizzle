@@ -3,6 +3,7 @@ classification, the S3 upload order (source.mp4, verify, source.json LAST)."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -69,10 +70,13 @@ class _FakeS3:
         self.objects: dict[str, bytes] = {}
         self.order: list[str] = []
 
-    def put_object(self, *, Bucket, Key, Body, ContentType, IfNoneMatch=None):  # noqa: N803, ARG002
+    def put_object(self, *, Bucket, Key, Body, ContentType, IfNoneMatch=None, ChecksumSHA256=None):  # noqa: N803, ARG002
         if IfNoneMatch == "*" and Key in self.objects:
             raise _Precondition()
         data = Body.read() if hasattr(Body, "read") else Body
+        if ChecksumSHA256 is not None:
+            # S3 verifies the upload against the declared digest.
+            assert base64.b64decode(ChecksumSHA256) == hashlib.sha256(data).digest()
         self.objects[Key] = data
         self.order.append(f"put:{Key}:{ContentType}:{IfNoneMatch}")
 
@@ -174,9 +178,13 @@ def test_upload_size_mismatch_is_a_structured_failure(tmp_path):
             return {"ContentLength": 1}
 
     source = _source(tmp_path)
+    s3 = Shrinking()
     with pytest.raises(DownloadError, match="UPLOAD_FAILED"):
         upload_source(
-            Shrinking(), bucket="b", source=source,
+            s3, bucket="b", source=source,
             receipt={"track_id": "t", "object_key": "k", "sha256": source.sha256},
             progress=lambda _m: None,
         )
+    # No receipt for an object that failed its size check (A12: receipt LAST).
+    assert "sources/t/source.json" not in s3.objects
+    assert [o for o in s3.order if "source.json" in o] == []

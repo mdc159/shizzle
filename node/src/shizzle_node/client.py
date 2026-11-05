@@ -83,9 +83,10 @@ class NodeClient:
             self._http.post(
                 f"{self._base}/heartbeat",
                 json={
-                    "displayName": display_name,
+                    # Clamped to the server's field limits, like progress/fail.
+                    "displayName": display_name[:128],
                     "capabilities": capabilities,
-                    "agentVersion": agent_version,
+                    "agentVersion": agent_version[:64],
                     "busyAssignmentId": str(busy_assignment_id) if busy_assignment_id else None,
                 },
             )

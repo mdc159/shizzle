@@ -57,6 +57,7 @@ interface PipelinePanelProps {
 export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant }) => {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
+  const [nodesError, setNodesError] = useState<string | null>(null);
   const [orchestratorAlive, setOrchestratorAlive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [jobsLoaded, setJobsLoaded] = useState(false);
@@ -66,33 +67,30 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const eventRequest = useRef(0);
-  const refreshAbort = useRef<{ jobs: AbortController; health: AbortController; nodes: AbortController } | null>(null);
+  const refreshAbort = useRef<{ jobs: AbortController; health: AbortController } | null>(null);
+  const nodesAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async (replaceInFlight = false) => {
     if (refreshAbort.current) {
       if (!replaceInFlight) return;
       refreshAbort.current.jobs.abort();
       refreshAbort.current.health.abort();
-      refreshAbort.current.nodes.abort();
     }
     const controllers = {
       jobs: new AbortController(),
       health: new AbortController(),
-      nodes: new AbortController(),
     };
     refreshAbort.current = controllers;
     setLoading(true);
     const jobsTimeout = window.setTimeout(() => controllers.jobs.abort(), REQUEST_TIMEOUT_MS);
     const healthTimeout = window.setTimeout(() => controllers.health.abort(), REQUEST_TIMEOUT_MS);
-    const nodesTimeout = window.setTimeout(() => controllers.nodes.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const [jobsResult, healthResult, nodesResult] = await Promise.allSettled([
+      const [jobsResult, healthResult] = await Promise.allSettled([
         getJobs(controllers.jobs.signal),
         fetch('/api/health', { signal: controllers.health.signal }).then(async response => {
           if (!response.ok) throw new Error(`Health check failed: ${response.statusText}`);
           return response.json() as Promise<{ orchestratorAlive: boolean }>;
         }),
-        getNodes(controllers.nodes.signal),
       ]);
       if (refreshAbort.current !== controllers) return;
 
@@ -107,13 +105,10 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
         setOrchestratorAlive(false);
         errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
       }
-      if (nodesResult.status === 'fulfilled') setNodes(nodesResult.value);
-      else errors.push(nodesResult.reason instanceof Error ? nodesResult.reason.message : 'Failed to load nodes');
       setError(errors.length > 0 ? errors.join('; ') : null);
     } finally {
       window.clearTimeout(jobsTimeout);
       window.clearTimeout(healthTimeout);
-      window.clearTimeout(nodesTimeout);
       if (refreshAbort.current === controllers) {
         refreshAbort.current = null;
         setLoading(false);
@@ -121,18 +116,45 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
     }
   }, []);
 
+  // Node telemetry is fetched on its own: a slow or failing /api/nodes must
+  // never delay or blank the job board, and its failure is reported as such
+  // rather than as stale or empty node data.
+  const refreshNodes = useCallback(async () => {
+    if (nodesAbort.current) return;
+    const controller = new AbortController();
+    nodesAbort.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const next = await getNodes(controller.signal);
+      if (nodesAbort.current !== controller) return;
+      setNodes(next);
+      setNodesError(null);
+    } catch (err) {
+      if (nodesAbort.current !== controller) return;
+      setNodesError(err instanceof Error ? err.message : 'Failed to load nodes');
+    } finally {
+      window.clearTimeout(timeout);
+      if (nodesAbort.current === controller) nodesAbort.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!active) return;
     void refresh();
-    const timer = window.setInterval(() => void refresh(), POLL_MS);
+    void refreshNodes();
+    const timer = window.setInterval(() => {
+      void refresh();
+      void refreshNodes();
+    }, POLL_MS);
     return () => {
       window.clearInterval(timer);
       refreshAbort.current?.jobs.abort();
       refreshAbort.current?.health.abort();
-      refreshAbort.current?.nodes.abort();
       refreshAbort.current = null;
+      nodesAbort.current?.abort();
+      nodesAbort.current = null;
     };
-  }, [active, refresh]);
+  }, [active, refresh, refreshNodes]);
 
   const showEvents = async (job: JobStatus) => {
     const request = ++eventRequest.current;
@@ -173,12 +195,17 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
     </div>
   );
 
-  const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'} — ${onlineNodes}/${nodes.length} node${nodes.length === 1 ? '' : 's'} online`;
+  const nodesSummary = nodesError
+    ? 'node status unavailable'
+    : `${onlineNodes}/${nodes.length} node${nodes.length === 1 ? '' : 's'} online`;
+  const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'} — ${nodesSummary}`;
 
   const nodesStrip = (
     <section className="mt-6" aria-label="Worker nodes">
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h3>
-      {nodes.length === 0 ? (
+      {nodesError ? (
+        <p className="text-sm text-amber-400">Node status unavailable: {nodesError}</p>
+      ) : nodes.length === 0 ? (
         <p className="text-sm text-zinc-600">No worker nodes registered</p>
       ) : (
         <div className="flex flex-wrap gap-2">
@@ -195,6 +222,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                 title={`${node.id}${node.agentVersion ? ` · agent ${node.agentVersion}` : ''}`}
               >
                 <span
+                  role="img"
                   className={cn('h-2 w-2 rounded-full', node.online ? 'bg-green-400' : 'bg-zinc-600')}
                   aria-label={node.online ? 'online' : 'offline'}
                 />
@@ -204,7 +232,8 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                 {device && <span className="text-zinc-500">{device}</span>}
                 {node.busyAssignmentId && <span className="text-amber-400">busy</span>}
                 {node.disabled && <span className="text-red-400">disabled</span>}
-                <span className={seen.color}>{seen.label}</span>
+                {/* Coloured by the server's online verdict, not by the client's own clock. */}
+                <span className={node.online ? seen.color : 'text-zinc-500'}>{seen.label}</span>
               </div>
             );
           })}
@@ -296,7 +325,12 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                     className="flex items-center justify-between rounded border border-zinc-800 p-2 text-left text-sm hover:bg-zinc-900"
                   >
                     <span className="truncate text-zinc-300">{title(job)}</span>
-                    <span className={job.status === 'ready' ? 'text-green-400' : 'text-red-400'}>{job.status}</span>
+                    <span className="ml-2 flex shrink-0 items-center gap-2 text-xs">
+                      {executorLabel(job.executor) && (
+                        <span className="text-zinc-500">{executorLabel(job.executor)}</span>
+                      )}
+                      <span className={job.status === 'ready' ? 'text-green-400' : 'text-red-400'}>{job.status}</span>
+                    </span>
                   </button>
                 ))}
               </div>

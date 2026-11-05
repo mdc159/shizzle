@@ -10,7 +10,9 @@ the same repository the API uses.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -387,6 +389,56 @@ async def test_rejected_source_receipt_is_a_retryable_checksum_failure(
     assert retry.detail["error_code"] == "CHECKSUM_MISMATCH"
     assert "receipt rejected" in retry.detail["error_detail"]
     assert (await job_repo.get_job(job.id)).input_checksum is None
+    # The rejected assignment is closed (not left "completed" to be re-verified
+    # forever) and the node is free again.
+    rejected = await node_repo.get_assignment(first.id)
+    assert rejected.status == NodeAssignmentStatus.failed
+    assert rejected.detail["rejected_reason"].startswith("source.mp4 is 9 bytes")
+    assert (await node_repo.get(MAC)).busy_assignment_id is None
+
+
+async def test_source_receipt_is_checked_against_the_objects_stored_checksum(
+    cloud_settings, monkeypatch
+):
+    """A12: the sha256 in the receipt must be the S3 object's own SHA-256."""
+    import base64
+
+    from shizzle_server.orchestrator import nodes as nodes_mod
+
+    track_id = uuid.uuid4()
+    sha = "ab" * 32
+    receipt = {
+        "interface": nodes_mod.SOURCE_INTERFACE,
+        "object_key": cloud.source_key(track_id),
+        "track_id": str(track_id),
+        "sha256": sha,
+        "bytes": 10,
+        "duration_seconds": 12.5,
+    }
+    heads = {}
+
+    def fake_head(s3, bucket, key):
+        return heads.get(key)
+
+    monkeypatch.setattr(nodes_mod, "_head_with_checksum", fake_head)
+    monkeypatch.setattr(nodes_mod, "s3_client", lambda _settings: object())
+    ctx = SimpleNamespace(settings=cloud_settings)
+    key = cloud.source_key(track_id)
+
+    heads[key] = {"ContentLength": 10, "ChecksumSHA256": base64.b64encode(bytes.fromhex(sha)).decode()}
+    assert await nodes_mod._verify_source_receipt(ctx, track_id, receipt) is None
+    heads[key] = {"ContentLength": 10, "ChecksumSHA256": base64.b64encode(bytes.fromhex("cd" * 32)).decode()}
+    assert "sha256 is" in await nodes_mod._verify_source_receipt(ctx, track_id, receipt)
+    heads[key] = {"ContentLength": 10}
+    assert "no SHA-256 checksum" in await nodes_mod._verify_source_receipt(ctx, track_id, receipt)
+    heads[key] = {"ContentLength": 11, "ChecksumSHA256": "x"}
+    assert "11 bytes" in await nodes_mod._verify_source_receipt(ctx, track_id, receipt)
+    del heads[key]
+    assert "not in S3" in await nodes_mod._verify_source_receipt(ctx, track_id, receipt)
+    for bad in (None, 0, -1.0, float("inf"), True, "12"):
+        assert "duration_seconds" in await nodes_mod._verify_source_receipt(
+            ctx, track_id, {**receipt, "duration_seconds": bad}
+        )
 
 
 # --- dispatched: separation routing ------------------------------------------
@@ -430,7 +482,7 @@ async def test_separation_falls_back_to_runpod_after_the_wait_window(
     assert len(fake.dispatched) == 1
     assert fake.dispatched[0][1] == f"{upload_job.id.hex}:0"
     assert ready.runpod_job_id == "rp-1"
-    assert ready.executor is None  # RunPod attempts carry no node executor
+    assert ready.executor == "runpod"  # the fallback replaces the node executor
     events = await job_repo.list_events(upload_job.id)
     names = [e.event for e in events]
     assert names.index("node_wait") < names.index("fallback_runpod") < names.index(

@@ -8,6 +8,7 @@ written, which the node's IAM policy is scoped to.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -23,6 +24,8 @@ from urllib.parse import parse_qs, urlsplit
 
 SOURCE_INTERFACE = "shizzle-source-v1"
 Progress = Callable[[str], None]
+REMUX_TIMEOUT_SECONDS = 600.0
+TRANSCODE_TIMEOUT_SECONDS = 3600.0
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
@@ -241,23 +244,30 @@ def _to_mp4(source: Path, target: Path, *, ffmpeg: str = "ffmpeg") -> None:
     """Remux (or, failing that, transcode) a non-MP4 download into MP4."""
     if shutil.which(ffmpeg) is None:
         raise DownloadError("DOWNLOAD_FAILED", "ffmpeg is not on PATH to produce an MP4")
-    copy = subprocess.run(
-        [ffmpeg, "-y", "-i", str(source), "-c", "copy", "-movflags", "+faststart", str(target)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if copy.returncode != 0:
-        encode = subprocess.run(
-            [ffmpeg, "-y", "-i", str(source), "-c:v", "libx264", "-preset", "veryfast",
-             "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
-             "-movflags", "+faststart", str(target)],
+    # Bounded like probe(): a hung ffmpeg must not stall the one-at-a-time
+    # assignment loop until someone restarts the agent.
+    try:
+        copy = subprocess.run(
+            [ffmpeg, "-y", "-i", str(source), "-c", "copy", "-movflags", "+faststart", str(target)],
             capture_output=True,
             text=True,
             check=False,
+            timeout=REMUX_TIMEOUT_SECONDS,
         )
-        if encode.returncode != 0:
-            raise DownloadError("DOWNLOAD_FAILED", encode.stderr.strip()[-300:])
+        if copy.returncode != 0:
+            encode = subprocess.run(
+                [ffmpeg, "-y", "-i", str(source), "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k",
+                 "-movflags", "+faststart", str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=TRANSCODE_TIMEOUT_SECONDS,
+            )
+            if encode.returncode != 0:
+                raise DownloadError("DOWNLOAD_FAILED", encode.stderr.strip()[-300:])
+    except subprocess.TimeoutExpired as exc:
+        raise DownloadError("DOWNLOAD_FAILED", f"ffmpeg timed out after {exc.timeout:.0f}s") from exc
     source.unlink(missing_ok=True)
 
 
@@ -312,8 +322,16 @@ def upload_source(
     progress("upload: source.mp4")
     try:
         with source.path.open("rb") as body:
+            # The SHA-256 rides along: S3 rejects a corrupted upload, and the
+            # orchestrator reads the stored checksum back to prove the receipt
+            # describes these exact bytes (A12).
             s3.put_object(
-                Bucket=bucket, Key=key, Body=body, ContentType="video/mp4", IfNoneMatch="*"
+                Bucket=bucket,
+                Key=key,
+                Body=body,
+                ContentType="video/mp4",
+                IfNoneMatch="*",
+                ChecksumSHA256=_sha256_b64(source.sha256),
             )
     except Exception as exc:
         if not _precondition_failed(exc):
@@ -393,6 +411,10 @@ def _receipt_for_existing_object(
     if size <= 0:
         raise DownloadError("SOURCE_INVALID", "the existing source.mp4 is empty")
     return {**receipt, "bytes": size, "sha256": digest.hexdigest(), "completed_orphan": True}
+
+
+def _sha256_b64(hex_digest: str) -> str:
+    return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
 
 
 def _precondition_failed(exc: Exception) -> bool:
