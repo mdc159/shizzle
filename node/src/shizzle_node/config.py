@@ -87,7 +87,11 @@ class NodeConfig:
         api_base = need("SHIZZLE_API_BASE").rstrip("/")
         if not api_base.startswith(("https://", "http://")):
             raise ConfigError("SHIZZLE_API_BASE must be an http(s) URL")
-        parts = urlsplit(api_base)
+        try:
+            parts = urlsplit(api_base)
+            _ = parts.port  # a malformed port raises here, not on the first request
+        except ValueError as exc:
+            raise ConfigError(f"SHIZZLE_API_BASE is not a valid URL: {exc}") from exc
         if parts.username or parts.password or not parts.hostname:
             raise ConfigError("SHIZZLE_API_BASE must not carry credentials and must name a host")
         if parts.scheme == "http":

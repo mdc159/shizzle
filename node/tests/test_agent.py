@@ -139,6 +139,8 @@ def test_config_requires_https_except_for_local_development():
     with pytest.raises(ConfigError, match="credentials"):
         NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "https://user:pw@shizzle.systems"})
     assert NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "http://[::1]:8000"}).api_base == "http://[::1]:8000"
+    with pytest.raises(ConfigError, match="not a valid URL"):
+        NodeConfig.from_env({**base, "SHIZZLE_API_BASE": "https://shizzle.systems:not-a-port"})
     allowed = NodeConfig.from_env(
         {**base, "SHIZZLE_API_BASE": "http://dev.example:8000", "SHIZZLE_NODE_ALLOW_HTTP": "1"}
     )
