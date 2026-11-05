@@ -9,7 +9,7 @@
  *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
-import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse } from '@/types/karaoke';
+import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse, NodeInfo, NodeListResponse } from '@/types/karaoke';
 import { authFetch, setToken } from '@/lib/auth';
 
 interface AuthResult {
@@ -73,6 +73,46 @@ export async function uploadFile(file: File, metadata?: SourceMetadata): Promise
   }
 
   return response.json();
+}
+
+/**
+ * Submit a video URL for download and stem separation by a worker node
+ * (docs/WORKER-NODES.md). Title/artist are optional: the node fills them
+ * from the video's metadata when omitted.
+ */
+export async function submitUrl(url: string, metadata?: SourceMetadata): Promise<{ jobId: string }> {
+  const body: Record<string, string> = { url: url.trim() };
+  const title = metadata?.title?.trim();
+  const artist = metadata?.artist?.trim();
+  if (title) body.title = title;
+  if (artist) body.artist = artist;
+
+  const response = await authFetch('/api/submit-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === 'string') detail = payload.detail;
+    } catch {
+      // keep statusText
+    }
+    throw new Error(`Submit failed: ${detail}`);
+  }
+
+  return response.json();
+}
+
+/** Fetch the worker-node registry for the pipeline dashboard. */
+export async function getNodes(signal?: AbortSignal): Promise<NodeInfo[]> {
+  const response = await authFetch('/api/nodes', { signal });
+  if (!response.ok) throw new Error(`Failed to fetch nodes: ${response.statusText}`);
+  const data: NodeListResponse = await response.json();
+  return data.nodes;
 }
 
 /**

@@ -9,17 +9,19 @@ import {
   DialogFooter
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Loader2, Check, X, AlertCircle, Upload, Download } from 'lucide-react';
-import { uploadFile, getJobStatus } from '@/lib/api';
+import { Loader2, Check, X, AlertCircle, Upload, Download, Link as LinkIcon } from 'lucide-react';
+import { uploadFile, submitUrl, getJobStatus } from '@/lib/api';
 import { parseSourceTitle } from '@/lib/sourceTitle';
 import { toast } from 'sonner';
 import type { JobStatus } from '@/types/karaoke';
 import { cn } from '@/lib/utils';
 
-// Processing steps for progress display (Phase 2 job stages)
+// Processing steps for progress display (Phase 2 job stages). Labels for
+// `downloading` and `dispatched` depend on who holds the job: a worker node
+// (docs/WORKER-NODES.md) or the cloud. See stepLabel().
 const STEPS = [
   { status: 'pending', label: 'Queued' },
-  { status: 'downloading', label: 'Fetching Source' },
+  { status: 'downloading', label: 'Fetching source' },
   { status: 'dispatched', label: 'Separating (cloud)' },
   { status: 'splitting', label: 'Separating Stems' },
   { status: 'verifying', label: 'Verifying' },
@@ -31,11 +33,37 @@ const STEPS = [
 const BASE_POLL_INTERVAL = 3000;
 const MAX_POLL_INTERVAL = 30000;
 const MAX_POLL_DURATION = 60 * 60 * 1000; // 1 hour (Demucs can be slow)
+// A URL job waits for a worker node to come online (up to the server's
+// node_download_wait_seconds, 24 h by default), so its poll window is longer.
+const MAX_URL_POLL_DURATION = 24 * 60 * 60 * 1000;
+
+/** The node id from an executor string ("node:mac-mini" -> "mac-mini"), else null. */
+const executorNode = (executor?: string | null): string | null =>
+  executor && executor.startsWith('node:') ? executor.slice('node:'.length) : null;
+
+/** Stage label, node-aware for the separation step. */
+const stepLabel = (status: string, label: string, job: JobStatus | null): string => {
+  if (status !== 'dispatched') return label;
+  const node = executorNode(job?.executor);
+  return node ? `Separating on ${node}` : label;
+};
+
+/** Human copy for a structured failure; falls back to the server's detail. */
+const failureMessage = (status: JobStatus): string => {
+  if (status.errorCode === 'NO_NODE_AVAILABLE') {
+    return 'No download node was online within the wait window. Start the node agent and try again.';
+  }
+  return status.error || 'Processing failed';
+};
+
+/** Lenient check that the pasted text looks like an http(s) link. */
+const looksLikeUrl = (value: string): boolean => /^https?:\/\/\S+$/i.test(value.trim());
 
 export const AddSourceModal: React.FC = () => {
   const { activeDrawer, setActiveDrawer, setActiveJob } = useStore();
   const isOpen = activeDrawer === 'source';
 
+  const [sourceUrl, setSourceUrl] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [artist, setArtist] = useState('');
@@ -48,9 +76,12 @@ export const AddSourceModal: React.FC = () => {
 
   const pollIntervalRef = useRef<number | null>(null);
   const pollStartTimeRef = useRef<number>(0);
+  const pollDurationRef = useRef<number>(MAX_POLL_DURATION);
   const consecutiveErrorsRef = useRef<number>(0);
   const currentPollIntervalRef = useRef<number>(BASE_POLL_INTERVAL);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const urlMode = looksLikeUrl(sourceUrl);
 
   const stopPolling = () => {
     if (pollIntervalRef.current) {
@@ -72,7 +103,7 @@ export const AddSourceModal: React.FC = () => {
   const schedulePoll = (id: string) => {
     pollIntervalRef.current = window.setTimeout(async () => {
       const elapsed = Date.now() - pollStartTimeRef.current;
-      if (elapsed > MAX_POLL_DURATION) {
+      if (elapsed > pollDurationRef.current) {
         stopPolling();
         setError('Processing timeout — job may be stuck.');
         setLoading(false);
@@ -93,7 +124,7 @@ export const AddSourceModal: React.FC = () => {
           toast.success('Track ready!');
         } else if (status.status === 'failed') {
           stopPolling();
-          setError(status.error || 'Processing failed');
+          setError(failureMessage(status));
           setLoading(false);
           toast.error('Processing failed');
         } else {
@@ -110,9 +141,10 @@ export const AddSourceModal: React.FC = () => {
     }, currentPollIntervalRef.current);
   };
 
-  const startPolling = (id: string) => {
+  const startPolling = (id: string, maxDuration: number) => {
     stopPolling();
     pollStartTimeRef.current = Date.now();
+    pollDurationRef.current = maxDuration;
     schedulePoll(id);
   };
 
@@ -138,6 +170,27 @@ export const AddSourceModal: React.FC = () => {
   }, [handleFileSelect]);
 
   const handleSubmit = async () => {
+    if (urlMode) {
+      setLoading(true);
+      setError(null);
+      setJobStatus(null);
+      try {
+        const result = await submitUrl(sourceUrl, {
+          title: title.trim() || undefined,
+          artist: artist.trim() || undefined,
+        });
+        setJobId(result.jobId);
+        setJobStatus({ jobId: result.jobId, status: 'pending', sourceType: 'url' });
+        toast.success('Link submitted');
+        startPolling(result.jobId, MAX_URL_POLL_DURATION);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to submit link');
+        setLoading(false);
+        toast.error('Failed to submit link');
+      }
+      return;
+    }
+
     if (!selectedFile || !title.trim() || !artist.trim()) return;
 
     setLoading(true);
@@ -152,7 +205,7 @@ export const AddSourceModal: React.FC = () => {
       setJobId(result.jobId);
       setJobStatus({ jobId: result.jobId, status: 'pending' });
       toast.success('Processing started');
-      startPolling(result.jobId);
+      startPolling(result.jobId, MAX_POLL_DURATION);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload');
       setLoading(false);
@@ -162,6 +215,7 @@ export const AddSourceModal: React.FC = () => {
 
   const handleClose = () => {
     stopPolling();
+    setSourceUrl('');
     setSelectedFile(null);
     setTitle('');
     setArtist('');
@@ -188,7 +242,11 @@ export const AddSourceModal: React.FC = () => {
 
   const currentStepIndex = getCurrentStepIndex();
 
-  const canSubmit = !!selectedFile && !!title.trim() && !!artist.trim() && !loading;
+  const canSubmit = urlMode
+    ? !loading
+    : !!selectedFile && !!title.trim() && !!artist.trim() && !loading;
+
+  const showMetadata = urlMode || !!selectedFile;
 
   const downloadUrl = jobId ? `/api/tracks/${jobId}/download` : null;
 
@@ -198,26 +256,56 @@ export const AddSourceModal: React.FC = () => {
         <DialogHeader>
           <DialogTitle>Add Source</DialogTitle>
           <DialogDescription className="text-zinc-500">
-            {jobStatus ? 'Processing your track...' : 'Drop a video file to split stems.'}
+            {jobStatus ? 'Processing your track...' : 'Paste a YouTube link or drop a video file to split stems.'}
           </DialogDescription>
         </DialogHeader>
 
         {!jobStatus ? (
-          // File Drop Zone
+          // Source input: URL field above the file drop zone
           <div className="space-y-4 py-4">
+            <div className="space-y-1.5">
+              <label htmlFor="source-url" className="text-xs font-medium text-zinc-400">
+                YouTube link
+              </label>
+              <div className="relative">
+                <LinkIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+                <input
+                  id="source-url"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="off"
+                  value={sourceUrl}
+                  onChange={(e) => { setSourceUrl(e.target.value); setError(null); }}
+                  placeholder="Paste a YouTube link"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900 py-2 pl-9 pr-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+                />
+              </div>
+              {urlMode && (
+                <p className="text-xs text-zinc-500">
+                  A worker node downloads and separates the link. The file drop below is ignored.
+                </p>
+              )}
+              {sourceUrl.trim() && !urlMode && (
+                <p className="text-xs text-amber-400">Enter a full http(s) link.</p>
+              )}
+            </div>
+
             <div
               className={cn(
-                "border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer",
-                dragOver
-                  ? "border-white bg-white/5"
-                  : selectedFile
-                    ? "border-green-500/50 bg-green-500/5"
-                    : "border-zinc-700 hover:border-zinc-500"
+                "border-2 border-dashed rounded-lg p-8 text-center transition-colors",
+                urlMode
+                  ? "border-zinc-800 opacity-40 cursor-not-allowed"
+                  : dragOver
+                    ? "border-white bg-white/5 cursor-pointer"
+                    : selectedFile
+                      ? "border-green-500/50 bg-green-500/5 cursor-pointer"
+                      : "border-zinc-700 hover:border-zinc-500 cursor-pointer"
               )}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              aria-disabled={urlMode}
+              onDragOver={(e) => { e.preventDefault(); if (!urlMode) setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
+              onDrop={(e) => { if (urlMode) { e.preventDefault(); return; } handleDrop(e); }}
+              onClick={() => { if (!urlMode) fileInputRef.current?.click(); }}
             >
               <input
                 ref={fileInputRef}
@@ -249,24 +337,24 @@ export const AddSourceModal: React.FC = () => {
               )}
             </div>
 
-            {selectedFile && (
+            {showMetadata && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <label htmlFor="source-title" className="text-xs font-medium text-zinc-400">
-                    Title
+                    Title{urlMode && <span className="text-zinc-600"> (optional)</span>}
                   </label>
                   <input
                     id="source-title"
                     type="text"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
-                    placeholder="Track title"
+                    placeholder={urlMode ? 'From the video if left blank' : 'Track title'}
                     className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                   />
                 </div>
                 <div className="space-y-1.5">
                   <label htmlFor="source-artist" className="text-xs font-medium text-zinc-400">
-                    Artist
+                    Artist{urlMode && <span className="text-zinc-600"> (optional)</span>}
                   </label>
                   <input
                     id="source-artist"
@@ -278,10 +366,10 @@ export const AddSourceModal: React.FC = () => {
                       // has served its purpose.
                       if (e.target.value.trim()) setArtistUncertain(false);
                     }}
-                    placeholder="Artist name"
+                    placeholder={urlMode ? 'From the video if left blank' : 'Artist name'}
                     className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                   />
-                  {artistUncertain && (
+                  {artistUncertain && !urlMode && (
                     <p className="text-xs text-zinc-500">
                       Couldn't tell the artist from the file name
                     </p>
@@ -303,8 +391,14 @@ export const AddSourceModal: React.FC = () => {
                 disabled={!canSubmit}
                 className="w-full"
               >
-                {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                {loading ? "Uploading..." : "Split Stems"}
+                {loading
+                  ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  : urlMode
+                    ? <LinkIcon className="mr-2 h-4 w-4" />
+                    : <Upload className="mr-2 h-4 w-4" />}
+                {loading
+                  ? (urlMode ? 'Submitting...' : 'Uploading...')
+                  : (urlMode ? 'Fetch & Split Stems' : 'Split Stems')}
               </Button>
             </DialogFooter>
           </div>
@@ -322,7 +416,7 @@ export const AddSourceModal: React.FC = () => {
                   <div
                     key={step.status}
                     className={cn(
-                      "flex items-center gap-3 text-sm transition-colors",
+                      "flex items-start gap-3 text-sm transition-colors",
                       isComplete && "text-green-400",
                       isCurrent && !isFailed && "text-white font-medium",
                       isFailed && "text-red-400",
@@ -330,7 +424,7 @@ export const AddSourceModal: React.FC = () => {
                     )}
                   >
                     <div className={cn(
-                      "h-6 w-6 rounded-full flex items-center justify-center border",
+                      "h-6 w-6 shrink-0 rounded-full flex items-center justify-center border",
                       isComplete && "bg-green-500/20 border-green-500",
                       isCurrent && !isFailed && "bg-white/10 border-white animate-pulse",
                       isFailed && "bg-red-500/20 border-red-500",
@@ -340,7 +434,14 @@ export const AddSourceModal: React.FC = () => {
                       {isCurrent && !isFailed && <Loader2 className="h-3 w-3 animate-spin" />}
                       {isFailed && <X className="h-3 w-3" />}
                     </div>
-                    <span>{step.label}</span>
+                    <div className="min-w-0 flex-1 pt-0.5">
+                      <span>{stepLabel(step.status, step.label, jobStatus)}</span>
+                      {isCurrent && !isFailed && jobStatus.workerPhase && (
+                        <p className="mt-0.5 truncate text-xs font-normal text-zinc-500" title={jobStatus.workerPhase}>
+                          {jobStatus.workerPhase}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 );
               })}

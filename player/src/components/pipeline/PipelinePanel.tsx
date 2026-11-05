@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
-import { getJobEvents, getJobs } from '@/lib/api';
-import type { JobEvent, JobStatus } from '@/types/karaoke';
+import { getJobEvents, getJobs, getNodes } from '@/lib/api';
+import type { JobEvent, JobStatus, NodeInfo } from '@/types/karaoke';
 import { Button } from '@/components/ui/button';
 import { SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { cn } from '@/lib/utils';
 
 const BASELINE_S = 40; // Dashboard v0 placeholder until job duration is exposed.
 const POLL_MS = 5000;
@@ -17,7 +18,7 @@ const STAGES: JobStatus['status'][] = [
   'publishing',
 ];
 
-const heartbeat = (value?: string) => {
+const heartbeat = (value?: string | null) => {
   if (!value) return { label: 'no heartbeat', color: 'text-zinc-500' };
   const age = Math.max(0, (Date.now() - Date.parse(value)) / 1000);
   if (!Number.isFinite(age)) return { label: 'invalid heartbeat', color: 'text-red-400' };
@@ -30,6 +31,17 @@ const heartbeat = (value?: string) => {
 
 const title = (job: JobStatus) => job.title || job.message || job.jobId.slice(0, 8);
 
+/** "node:mac-mini" -> "mac-mini"; "runpod" stays; null/undefined -> null. */
+const executorLabel = (executor?: string | null): string | null => {
+  if (!executor) return null;
+  return executor.startsWith('node:') ? executor.slice('node:'.length) : executor;
+};
+
+const nodeDevice = (node: NodeInfo): string | null => {
+  const device = node.capabilities?.device;
+  return typeof device === 'string' && device ? device : null;
+};
+
 interface PipelinePanelProps {
   /** Polling runs only while active (drawer open / page mounted). */
   active: boolean;
@@ -38,12 +50,13 @@ interface PipelinePanelProps {
 }
 
 /**
- * The pipeline board: stage columns of in-flight jobs with heartbeats,
- * recent outcomes, and a per-job event timeline. Rendered by both the
- * PipelineDrawer and the standalone /dashboard page.
+ * The pipeline board: worker nodes, stage columns of in-flight jobs with
+ * heartbeats, recent outcomes, and a per-job event timeline. Rendered by
+ * both the PipelineDrawer and the standalone /dashboard page.
  */
 export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant }) => {
   const [jobs, setJobs] = useState<JobStatus[]>([]);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [orchestratorAlive, setOrchestratorAlive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [jobsLoaded, setJobsLoaded] = useState(false);
@@ -53,26 +66,33 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const eventRequest = useRef(0);
-  const refreshAbort = useRef<{ jobs: AbortController; health: AbortController } | null>(null);
+  const refreshAbort = useRef<{ jobs: AbortController; health: AbortController; nodes: AbortController } | null>(null);
 
   const refresh = useCallback(async (replaceInFlight = false) => {
     if (refreshAbort.current) {
       if (!replaceInFlight) return;
       refreshAbort.current.jobs.abort();
       refreshAbort.current.health.abort();
+      refreshAbort.current.nodes.abort();
     }
-    const controllers = { jobs: new AbortController(), health: new AbortController() };
+    const controllers = {
+      jobs: new AbortController(),
+      health: new AbortController(),
+      nodes: new AbortController(),
+    };
     refreshAbort.current = controllers;
     setLoading(true);
     const jobsTimeout = window.setTimeout(() => controllers.jobs.abort(), REQUEST_TIMEOUT_MS);
     const healthTimeout = window.setTimeout(() => controllers.health.abort(), REQUEST_TIMEOUT_MS);
+    const nodesTimeout = window.setTimeout(() => controllers.nodes.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const [jobsResult, healthResult] = await Promise.allSettled([
+      const [jobsResult, healthResult, nodesResult] = await Promise.allSettled([
         getJobs(controllers.jobs.signal),
         fetch('/api/health', { signal: controllers.health.signal }).then(async response => {
           if (!response.ok) throw new Error(`Health check failed: ${response.statusText}`);
           return response.json() as Promise<{ orchestratorAlive: boolean }>;
         }),
+        getNodes(controllers.nodes.signal),
       ]);
       if (refreshAbort.current !== controllers) return;
 
@@ -87,10 +107,13 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
         setOrchestratorAlive(false);
         errors.push(healthResult.reason instanceof Error ? healthResult.reason.message : 'Health check failed');
       }
+      if (nodesResult.status === 'fulfilled') setNodes(nodesResult.value);
+      else errors.push(nodesResult.reason instanceof Error ? nodesResult.reason.message : 'Failed to load nodes');
       setError(errors.length > 0 ? errors.join('; ') : null);
     } finally {
       window.clearTimeout(jobsTimeout);
       window.clearTimeout(healthTimeout);
+      window.clearTimeout(nodesTimeout);
       if (refreshAbort.current === controllers) {
         refreshAbort.current = null;
         setLoading(false);
@@ -106,6 +129,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
       window.clearInterval(timer);
       refreshAbort.current?.jobs.abort();
       refreshAbort.current?.health.abort();
+      refreshAbort.current?.nodes.abort();
       refreshAbort.current = null;
     };
   }, [active, refresh]);
@@ -130,6 +154,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
 
   const inFlight = jobs.filter(job => STAGES.includes(job.status));
   const terminal = jobs.filter(job => job.status === 'failed' || job.status === 'ready');
+  const onlineNodes = nodes.filter(node => node.online).length;
 
   const heading = (
     <div className="flex items-center justify-between pr-8">
@@ -148,7 +173,45 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
     </div>
   );
 
-  const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'}`;
+  const summary = `${inFlight.length} job${inFlight.length === 1 ? '' : 's'} in flight — orchestrator ${orchestratorAlive ? 'alive' : 'not responding'} — ${onlineNodes}/${nodes.length} node${nodes.length === 1 ? '' : 's'} online`;
+
+  const nodesStrip = (
+    <section className="mt-6" aria-label="Worker nodes">
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h3>
+      {nodes.length === 0 ? (
+        <p className="text-sm text-zinc-600">No worker nodes registered</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {nodes.map(node => {
+            const seen = heartbeat(node.lastSeenAt);
+            const device = nodeDevice(node);
+            return (
+              <div
+                key={node.id}
+                className={cn(
+                  'flex items-center gap-2 rounded-full border px-3 py-1 text-xs',
+                  node.online ? 'border-zinc-700 bg-zinc-900' : 'border-zinc-800 bg-zinc-950/50'
+                )}
+                title={`${node.id}${node.agentVersion ? ` · agent ${node.agentVersion}` : ''}`}
+              >
+                <span
+                  className={cn('h-2 w-2 rounded-full', node.online ? 'bg-green-400' : 'bg-zinc-600')}
+                  aria-label={node.online ? 'online' : 'offline'}
+                />
+                <span className={node.online ? 'font-medium text-zinc-200' : 'text-zinc-500'}>
+                  {node.displayName}
+                </span>
+                {device && <span className="text-zinc-500">{device}</span>}
+                {node.busyAssignmentId && <span className="text-amber-400">busy</span>}
+                {node.disabled && <span className="text-red-400">disabled</span>}
+                <span className={seen.color}>{seen.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <>
@@ -175,6 +238,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
       ) : (
         <>
           {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+          {nodesStrip}
           <div className="mt-6 overflow-x-auto">
             <div className="grid min-w-[1080px] grid-cols-6 gap-3">
               {STAGES.map(stage => {
@@ -188,6 +252,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                     {stageJobs.map(job => {
                       const beat = heartbeat(job.workerHeartbeatAt);
                       const baseline = BASELINE_S;
+                      const executor = executorLabel(job.executor);
                       return (
                         <button
                           key={job.jobId}
@@ -198,6 +263,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                           <p className="truncate font-medium text-zinc-200">{title(job)}</p>
                           <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-zinc-500">
                             <span>attempt {job.attempt ?? 0}</span>
+                            {executor && <span className="text-zinc-400">{executor}</span>}
                             <span>{job.workerPhase || job.status}</span>
                             <span className={beat.color}>{beat.label}</span>
                           </div>
