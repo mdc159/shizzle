@@ -1,7 +1,8 @@
 # Worker nodes: Mac mini and Dell 9530 as first-choice executors
 
-Written 2026-11-05 against master `0415ed2`. This is a plan, not a record of
-implemented behavior. Nothing in it has been started. It replaces the
+Written 2026-11-05 against master `0415ed2`, decisions recorded the same
+day. This is a plan, not a record of implemented behavior. Nothing in it has
+been started. It replaces the
 uncommitted `docs/NODE_ROUTING_PLAN.md` referenced from the next-phase
 draft (PR #62) and is written to be executed phase by phase through the
 normal PR workflow.
@@ -39,8 +40,8 @@ Restated as rules the orchestrator will enforce:
 | Need | Exists | Where | Reuse |
 |---|---|---|---|
 | URL job creation | yes, unused by the UI | `POST /api/submit-url` in `library/src/shizzle_server/api/routes.py` | keep; wire the player to it |
-| URL download | yes, Mac only, not integrated | `ingest/` on `cbassist/m-shizzle` branch `codex/mac-youtube-ingest` (yt-dlp, ffprobe, sha256, local queue) | becomes the node's download executor |
-| Separation core with explicit device | yes | `stemsplit/lossless_worker.py` `run(..., device=)` | node calls it with `mps` (Mac) or `cuda` (Dell) |
+| URL download | yes, Mac only, not integrated | `ingest/` on `cbassist/m-shizzle` branch `codex/mac-youtube-ingest`: a Docker image with yt-dlp, ffprobe, sha256, local queue | the node's download container, used as is |
+| Separation image | yes, in production | `ghcr.io/mdc159/shizzle/worker` from `stemsplit/Dockerfile.lossless`, already has `--local` mode | the node's separation container, same image RunPod pulls |
 | Attempt claim, receipt heartbeat, handoff-last, post-write verification | yes, RunPod-bound | `stemsplit/lossless_handler.py` `handler()` | extract into an executor module both RunPod and nodes call |
 | Mac GPU separation proof | yes | `evidence/spikes/mac-stem-separation/` on the Mac fork: 255.9 s track separated in 18.2 s on `mps:0` | evidence that rule 3 is worth doing |
 | Dispatch reservation, confirmation, reconciliation, stall watchdogs | yes, RunPod-bound | `orchestrator/stages.py` `handle_dispatched`, `db/repository.py` `reserve_dispatch`/`confirm_dispatch`, `orchestrator/cloud.py` receipts | generalize the executor; keep the bookkeeping |
@@ -241,46 +242,63 @@ requirement: the S3 copy is always the source of record, and
 `cloud_verifying` still checks `source.object_key` and `source.sha256`
 against the job.
 
-## Node agent
+## Node runtime: containers, not a checkout
 
-One Python package, `node/`, in this repo, run with `uv` on both machines so
-the Mac and the Dell execute the same code. Rough shape:
+Owner decision, 2026-11-05: services on the local nodes run as containers.
+Both machines already carry containers for YouTube download, FFmpeg and stem
+splitting. The node design therefore treats **images as the interface** and
+does not require copying pipeline code into a second place.
 
-```text
-node/
-  pyproject.toml, uv.lock          (torch/torchaudio/demucs pinned per platform)
-  src/shizzle_node/
-    agent.py        register, heartbeat task, long-poll loop, one job at a time
-    download.py     from the Mac fork's ingest/download.py: yt-dlp + ffprobe +
-                    sha256, then upload source.mp4 and source.json (last)
-    separate.py     calls stemsplit.attempt.execute(payload, device, heartbeat)
-    config.py       SHIZZLE_API_BASE, SHIZZLE_NODE_ID, SHIZZLE_NODE_TOKEN,
-                    SHIZZLE_NODE_DEVICE, AWS_* (scoped), capabilities
-  README.md         install, launchd (Mac) and Task Scheduler/NSSM (Windows)
-```
+Each node runs one small compose stack:
 
-The separation refactor is the one change to `stemsplit/`: move the body of
-`lossless_handler.handler()` into `stemsplit/attempt.py` as
-`execute(payload, *, executor_id, device, heartbeat, worker_image) -> dict`.
-`lossless_handler.handler` becomes a thin RunPod wrapper that passes
-`runpod.serverless.progress_update` as `heartbeat`; the node passes a
-function that posts `/progress`. The receipt keeps its shape; the node
-writes its assignment id into the `runpod_job_id` field's successor,
-`executor_job_id` (the orchestrator's `accepted_dispatch_id` accepts both
-during the transition). All of #32's guards (A1, A6, B12) apply unchanged
-because the code is the same code.
+| Container | Image | Role |
+|---|---|---|
+| `agent` | built from `node/` in this repo, published to GHCR | holds the node token; heartbeats; long-polls assignments; starts one job container at a time through the Docker socket; relays progress; reports completion |
+| `downloader` | the Mac fork's existing `shizzle-ingest` image (yt-dlp, yt-dlp-ejs, Deno, FFmpeg), published to GHCR from wherever that code lives | one-shot run per assignment: `python -m shizzle_ingest.download <video_id> <dir>`, then the agent uploads `source.mp4` and writes `source.json` last |
+| `separator` | `ghcr.io/mdc159/shizzle/worker:sha-...`, the **same image RunPod pulls** | one-shot run per assignment in a new `--assignment` mode: same claim, receipt heartbeat, six uploads and handoff-last path as the RunPod handler |
 
-Devices: `mps` on the M4 Pro Mac mini (measured 18.2 s for a 4:16 track),
-`cuda` on the Dell 9530's RTX 4070 (the August spikes ran there). The
-`separate()` function already takes `device`; nothing else in the core
-changes. The Dell runs the agent natively on Windows with a CUDA torch
-wheel; WSL2 or Docker is not required.
+What that means for code:
 
-Download executor: the Mac fork's `ingest/` already proves yt-dlp with
-`yt-dlp-ejs` and Deno on arm64 in Docker. For the agent, run yt-dlp in the
-agent's own venv with ffmpeg on PATH on both machines; keep the Docker image
-as the fallback if YouTube's JavaScript challenges require Deno. Reuse its
-`urls.py` normalization and `download.py` inspection unchanged.
+- **No new separation code and no copy.** The production worker image already
+  exists, is built by `worker-image.yml`, and already has a local mode
+  (`lossless_handler.py --local`). The only change is in `stemsplit/`: move the
+  body of `handler()` into `stemsplit/attempt.py` as
+  `execute(payload, *, executor_id, device, heartbeat, worker_image)`, call it
+  from the RunPod wrapper as today, and add `--assignment <json>` so the same
+  container runs one node assignment and prints progress as JSON lines for the
+  agent to relay. All of #32's guards (A1, A6, B12) apply because it is the
+  same code in the same image.
+- **No copy of the downloader either.** The fork's `ingest/` image is used as
+  is; it needs a GHCR publish workflow where it lives. Whether that directory
+  later moves upstream is a housekeeping question, not a Phase 2 dependency.
+- **The agent is the one new component**, about 300 lines of Python: HTTP
+  client for the node API, Docker SDK calls, upload of the downloaded source,
+  marker writes. It lives in `node/` here so one image serves both machines.
+
+### Inventory first
+
+The containers already on the Mac and the Dell must be inventoried in Phase 1
+(image name, digest, entrypoint, output format). A separator image counts as
+a node executor only if it emits `lossless-stem-v1`. The retired combined
+worker (`ghcr.io/mdc159/shizzle-worker:v2`, the k25 lineage) emits AAC stems
+and a browser manifest instead; it can keep serving local use but cannot be
+the node's separator, because the VPS verifies the lossless handoff. The
+current `ghcr.io/mdc159/shizzle/worker` image is the drop-in.
+
+### GPU access per machine
+
+- **Dell 9530 (Windows, RTX 4070):** Docker Desktop with the WSL2 backend
+  passes the NVIDIA GPU to Linux containers (`--gpus all`). The CUDA worker
+  image runs unchanged; this is the same image and device path RunPod uses.
+- **Mac mini (M4 Pro):** Docker Desktop cannot expose Apple's GPU to a Linux
+  container, and the worker image is amd64 CUDA. Containerized separation on
+  the Mac is CPU-only, on an arm64 build that does not exist yet, at an
+  unmeasured speed. The fork proved native MPS separation at 18.2 s for a
+  4:16 track. **Open decision for Phase 3:** measure CPU-in-container on the
+  Mac; if it is acceptable, the Mac runs both containers like the Dell; if
+  not, the Mac's agent calls a native MPS helper (the fork's `prove.py` path)
+  for separation only, and downloads stay in the container. Until measured,
+  the working default is: Mac downloads in a container and separates natively.
 
 ### Credentials on a node
 
@@ -292,10 +310,13 @@ s3:PutObject, s3:GetObject, s3:HeadObject on
   arn:aws:s3:::karaoke-pimpshizzle/tracks/*/1/separation/attempts/*
 ```
 
-Keys come from the Studio54 vault the Mac fork already documents, never
-from `.env` in a checkout (E3). Nodes never hold RunPod, CloudFront,
-database or deploy credentials. A later phase can replace the IAM user with
-STS credentials vended per assignment, which is what PR #50 argued for.
+The agent receives the node token and these keys as environment at container
+start, from the Studio54 vault the Mac fork already documents, never from a
+`.env` in a checkout (E3). It passes the AWS keys into each one-shot job
+container the way RunPod passes them to the worker today. Nodes never hold
+RunPod, CloudFront, database or deploy credentials. A later phase can replace
+the IAM user with STS credentials vended per assignment, which is what PR #50
+argued for.
 
 ## Player and dashboard
 
@@ -345,14 +366,17 @@ through the human-approved gate as usual.
 ### Phase 1: node registry and heartbeat
 
 Migration 0006, `nodes` and `node_assignments`, node-token auth, heartbeat
-and list routes, dashboard strip, agent skeleton that registers and beats
-from both machines. No routing yet. Done when both nodes show online on
-`/dashboard` and a bad token is rejected (E6 test).
+and list routes, dashboard strip, agent image that registers and beats from
+the Mac mini. Inventory the containers already on the Mac and the Dell
+(image, digest, output format). No routing yet. Done when the Mac shows
+online on `/dashboard`, a bad token is rejected (E6 test), and the inventory
+is recorded under `evidence/`.
 
 ### Phase 2: URL download through a node
 
 `downloading` stage routing, download assignment flow, `source.json`
-marker, agent download executor, player URL field. RunPod still separates.
+marker, agent runs the ingest container per assignment, player URL field.
+RunPod still separates.
 Done when a YouTube URL pasted into the web app plays as a published track
 with the Mac doing the download and RunPod doing the split, and the job
 events show `node_assigned`, `node_completed`, `runpod_dispatched`. This
@@ -360,33 +384,34 @@ phase alone makes "drop a URL" work.
 
 ### Phase 3: separation on a node, RunPod as fallback
 
-`stemsplit/attempt.py` refactor, agent separate executor on `mps` and
-`cuda`, `dispatched` stage routing with `NODE_SEPARATE_WAIT_SECONDS`,
-stall and reclaim, `fallback_runpod` event, B16/B17 tests. Done when the
-same URL job completes with zero RunPod calls while a node is online, and
-completes through RunPod when both agents are stopped. Record both runs
-under `evidence/`.
+`stemsplit/attempt.py` refactor and `--assignment` mode in the worker
+image, agent runs the worker container per assignment, `dispatched` stage
+routing with `NODE_SEPARATE_WAIT_SECONDS`, stall and reclaim,
+`fallback_runpod` event, B16/B17 tests. Measure Mac CPU-in-container
+separation and decide native MPS or container. Install the Dell agent
+(CUDA in Docker Desktop/WSL2). Done when the same URL job completes with
+zero RunPod calls while a node is online, and completes through RunPod when
+the agents are stopped. Record both runs under `evidence/`.
 
 ### Phase 4: polish
 
 Source-cache affinity, concurrency (one job per node today; a node may
-advertise `slots`), node-side disk and model-weight checks in the
-heartbeat, Windows service install for the Dell, STS credentials per
-assignment, and optionally moving the delivery transform onto nodes if the
+advertise `slots`), node-side disk and image-digest checks in the
+heartbeat, STS credentials per assignment, and optionally moving the delivery transform onto nodes if the
 VPS's 4 vCPU ffmpeg step becomes the ceiling (next-phase draft measured it
 at three to four parallel songs).
 
-## Open questions for the owner
+## Decisions taken 2026-11-05
 
-- Is the Dell 9530 reachable and powered often enough to count as a node,
-  or is it the Mac mini first and the Dell later? The plan supports either;
-  it changes nothing in the code, only in which agent is installed first.
-- RunPod `workers_max`: leave it so the fallback works, or set it to zero
-  until Phase 3 proves node separation? With `SHIZZLE_NODE_ROUTING=only`
-  the orchestrator never calls RunPod regardless.
-- Should an upload job (file dropped in the browser) also prefer a node for
-  separation? The plan says yes, since rule 3 is about load, not source
-  type. Say so if you want uploads to stay on RunPod.
-- Where does the Mac fork's work go? Recommendation: upstream its
-  `ingest/download.py` and `urls.py` into `node/` here, keep the native
-  player work on the fork, and stop treating the fork as a second pipeline.
+Asked and answered by the owner on 2026-11-05:
+
+| Question | Decision |
+|---|---|
+| Dell from day one? | **Mac mini first, Dell later.** Install order only; the code is the same. |
+| RunPod `workers_max` during rollout | **Leave it as is.** `SHIZZLE_NODE_ROUTING=prefer` keeps RunPod idle while a node is online. |
+| Do uploads also prefer a node? | **Yes.** Rule 3 is about load, not source type. Upload jobs go to S3 as today, then a node separates if one is online. |
+| Mac fork and PR #50 | **Nodes run the existing containers; no code copy required.** Images are the interface: the production worker image for separation, the fork's ingest image for download. PR #50's import API is not the node path and stays parked. |
+
+Still open, to be settled by measurement in Phase 3: Mac separation in a
+CPU-only container versus the native MPS helper (see "GPU access per
+machine").
