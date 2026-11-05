@@ -28,12 +28,13 @@ local job directory.
 | Source / mode | Current behavior |
 | --- | --- |
 | Upload, `SHIZZLE_PIPELINE=cloud` | `pending → downloading → dispatched → verifying → publishing → ready`, subject to configuration and validation gates. |
-| URL submission | Accepted as a job, then fails with `YTDLP_BLOCKED`; URL acquisition is not implemented. |
+| URL submission (one YouTube video), `cloud` | A worker node downloads it (`downloading`), then the same path as an upload. With no node online it waits up to 24 h, then fails `NO_NODE_AVAILABLE`; with `SHIZZLE_NODE_ROUTING=off` it fails `YTDLP_BLOCKED`. |
 | Local reference pipeline | Runs local FFmpeg/Demucs through verification; publication of its `local/` location is refused by invariant C7. It is not an end-to-end library startup path. |
 | Test pipeline | Deterministic fault-injection stages; requires `SHIZZLE_ALLOW_TEST_PIPELINE=1`, produces no playable media, and publication is refused. |
 
-Cloud ingestion needs working RunPod configuration and available worker
-capacity. The presence of implementation and passing unit tests does not
+Cloud ingestion needs an online worker node or a working RunPod
+configuration with available capacity; separation tries a node first
+([Worker nodes](../docs/WORKER-NODES.md)). The presence of implementation and passing unit tests does not
 prove a deployment has those prerequisites.
 
 ## Code map
@@ -43,11 +44,12 @@ prove a deployment has those prerequisites.
 - `src/shizzle_server/db/` — jobs, append-only events, tracks, generation
   activation, playback sessions/events, and orchestrator heartbeats.
 - `src/shizzle_server/orchestrator/` — leases, stage transitions, retry/park
-  behavior, RunPod polling/reconciliation, and cloud publication integration.
+  behavior, node assignment and routing (`nodes.py`), RunPod
+  polling/reconciliation, and cloud publication integration.
 - `src/shizzle_server/publish/` — lossless intake, drop-box import, delivery policy, media/audio
   audits, immutable S3 promotion, and generation migration tooling.
 - `alembic/` — Postgres schema migrations. The current linear chain ends at
-  `0005_job_artist`; production migrations belong to the deploy transaction.
+  `0006_worker_nodes`; production migrations belong to the deploy transaction.
 - `tests/` — isolated unit/media tests and the real-Postgres contract suite.
 
 ## Development setup

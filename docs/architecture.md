@@ -9,9 +9,10 @@ Known deviations and bugs are tracked in [Review](REVIEW.md).
 | Component | Implementation | Responsibility |
 |---|---|---|
 | API | `library/src/shizzle_server/api/` | Uploads, passcode/token authentication, jobs, library, manifests with signed media URLs, telemetry, WebSocket relay |
-| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats |
-| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, submits/polls RunPod, reconciles dispatch receipts, verifies and publishes |
-| GPU worker | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source, extracts audio, separates with htdemucs_6s, writes lossless package and progress |
+| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats, nodes and node assignments |
+| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, assigns downloads and separations to worker nodes, submits/polls RunPod as fallback, reconciles dispatch receipts, verifies and publishes |
+| GPU separation | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source from S3, extracts audio, separates with htdemucs_6s, writes lossless package and progress; run by a worker node or the RunPod image |
+| Worker nodes | `node/` (`shizzle-node`) on the Mac mini and the Dell 9530 | Poll the node API over HTTPS; download YouTube links with yt-dlp; run the separation above on their own GPU ([Worker nodes](WORKER-NODES.md)) |
 | Delivery policy | `library/src/shizzle_server/publish/` | Verifies lossless bytes, derives AAC/video, measures common attenuation, audits, stages and promotes |
 | Media storage | Private S3 | Sources, per-dispatch packages, staged and published generations |
 | Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
@@ -23,6 +24,13 @@ the VPS; CloudFront is the media origin. Same-origin `/cdn` proxy delivery is a
 retained fallback, not the normal seven-object media path.
 
 ## Upload to publication
+
+This lane shows RunPod as the executor. When a worker node takes the
+separation, the node polls `/api/nodes/*` for its assignment instead of
+RunPod delivering a job, and writes the same `dispatch.json`, stems and
+`handoff.json` under the same attempt prefix; the orchestrator's
+reconciliation and everything from verification on are identical. Routing
+and the URL download lane are in [Worker nodes](WORKER-NODES.md).
 
 ```mermaid
 sequenceDiagram
@@ -125,15 +133,16 @@ otherwise the drop is refused as `TRACK_CONFLICT` without touching the row.
 stateDiagram-v2
     [*] --> pending
     pending --> downloading
-    downloading --> dispatched: cloud upload saved to S3
-    dispatched --> dispatched: park while queued or running
+    downloading --> dispatched: source in S3 (upload copied, or node source.json)
+    downloading --> downloading: park while a node downloads or none is online
+    dispatched --> dispatched: park while queued or running on a node or RunPod
     dispatched --> verifying: complete package selected
     downloading --> splitting: local or test mode only
     splitting --> verifying: reference pipeline result
     verifying --> publishing: verification passed
     publishing --> ready: cloud publication transaction
     ready --> [*]
-    downloading --> failed: URL stub or terminal source error
+    downloading --> failed: NO_NODE_AVAILABLE, YTDLP_BLOCKED, or terminal source error
     dispatched --> failed: terminal error or retry budget exhausted
     splitting --> failed: terminal error or retry budget exhausted
     verifying --> failed: invalid package or retry budget exhausted
@@ -159,6 +168,7 @@ the [review findings](REVIEW.md) cover stale-owner and liveness defects.
 
 ```text
 sources/<track-id>/source.mp4
+sources/<track-id>/source.json        (node downloads only, written last)
 tracks/<track-id>/1/separation/attempts/<sha256-idempotency-key>/
   dispatch.json
   handoff.json
