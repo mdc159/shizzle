@@ -314,6 +314,11 @@ rollback against a real Docker stack.
 Current checked-in limits:
 
 - `mypy src` in the library job is informational (`continue-on-error: true`).
+- CI jobs run on the pinned `ubuntu-24.04` image and `stemsplit` pins its
+  interpreter to 3.11 (the worker image's Python). The `ubuntu-latest` label
+  moved to 26.04 / Python 3.14 on 2026-11-05 and broke both the stemsplit
+  tests (numpy 1.26.4 built from source) and the Playwright install;
+  retiring the pin needs both checked again.
 - Player `knip` is configured but not run in CI.
 - The player check installs Chromium from the Playwright browser CDN on each
   run; that dependency can block CI during an outage.
