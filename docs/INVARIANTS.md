@@ -382,7 +382,7 @@ Guard: `library/tests/test_nodes_api.py`
 `test_only_the_named_node_can_report`);
 `library/tests/test_node_routing.py`
 (`test_unacknowledged_download_expires_and_is_reassigned`,
-`test_stalled_node_separation_is_expired_and_redispatched`).
+`test_stalled_node_separation_is_expired_and_redispatched_to_another_node`).
 
 ### B17 — RunPod is the fallback, not the default
 

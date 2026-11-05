@@ -208,7 +208,8 @@ async def test_only_the_named_node_can_report(node_client):
     r = await c.post(f"/api/nodes/dell-9530/assignments/{assignment.id}/ack", headers=DELL)
     assert r.status_code == 409
     assert (await c.get("/api/nodes/dell-9530/assignments/next", headers=DELL)).status_code == 204
-    # And an unknown assignment id is a 404, not a 500.
+    # An unknown assignment id is a 409 (not open for this node); a malformed
+    # id is a 404. Neither is a 500.
     r = await c.post(f"/api/nodes/mac-mini/assignments/{uuid.uuid4()}/ack", headers=MAC)
     assert r.status_code == 409
     r = await c.post("/api/nodes/mac-mini/assignments/not-a-uuid/ack", headers=MAC)

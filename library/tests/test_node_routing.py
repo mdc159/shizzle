@@ -39,7 +39,10 @@ def cloud_settings(settings):
     settings.runpod_poll_seconds = 0.02
     settings.node_poll_seconds = 0.05
     settings.node_online_seconds = 45.0
-    settings.node_ack_seconds = 0.3
+    # Generous ack window by default so a scripted node's ack cannot lose a
+    # race against the orchestrator on a slow runner; the two expiry tests
+    # that need a short ack window set it themselves.
+    settings.node_ack_seconds = 5.0
     settings.node_stall_seconds = 0.3
     settings.node_separate_wait_seconds = 0.3
     settings.node_download_wait_seconds = 0.5
@@ -313,6 +316,7 @@ async def test_routing_off_keeps_the_ytdlp_blocked_contract(cloud_settings, job_
 async def test_unacknowledged_download_expires_and_is_reassigned(
     cloud_settings, job_repo, node_repo
 ):
+    cloud_settings.node_ack_seconds = 0.3
     await _register(node_repo)
     job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c")
     orch, task = await _run(cloud_settings)
@@ -516,6 +520,7 @@ async def test_only_node_that_stalled_this_job_yields_to_runpod(
     job, so the wait window runs and RunPod takes the retry (B17)."""
     _stub_cloud_intake(monkeypatch)
     _stub_package_ready(monkeypatch, False)
+    cloud_settings.node_ack_seconds = 0.3
     await _register(node_repo)
     fake = FakeRunPodClient([
         {"status": "COMPLETED", "output": {"separation": {"sample_count": 44100}}},
@@ -549,6 +554,7 @@ async def test_lost_download_report_completes_from_the_s3_marker(
     cloud_settings, job_repo, node_repo, monkeypatch
 ):
     _stub_source_receipt(monkeypatch, sha256="e" * 64)
+    _stub_package_ready(monkeypatch, False)  # the separation that follows stays S3-free too
     await _register(node_repo)
     job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ")
     orch, task = await _run(cloud_settings)

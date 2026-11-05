@@ -248,12 +248,14 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         # The S3 marker is the truth: a download whose completion report was
         # lost still completes once source.json is there (A12). An S3 read
         # error here is "unknown", never a burned attempt.
+        verified = False
         try:
             receipt = await _read_source_receipt(ctx, track_id)
+            if receipt is not None:
+                verified = await _verify_source_receipt(ctx, track_id, receipt) is None
         except StageError as exc:
             logger.warning("job %s: source receipt check failed: %s", job.id, exc)
-            receipt = None
-        if receipt is not None and await _verify_source_receipt(ctx, track_id, receipt) is None:
+        if verified:
             await ctx.nodes.complete(
                 assignment.id, node_id=assignment.node_id, detail={"completed_by": "s3-marker"}
             )
@@ -656,6 +658,35 @@ async def assign_separation(
     return True
 
 
+async def expire_superseded_assignments(ctx: StageContext, *, dispatch_key: str) -> None:
+    """Close any open separation assignment from an earlier attempt (B16).
+
+    A fresh dispatch under ``dispatch_key`` makes an older open assignment
+    history; nothing else would ever expire it, and its node would stay
+    marked busy with it forever.
+    """
+    for assignment in await ctx.nodes.list_for_job(ctx.job.id):
+        if (
+            assignment.kind != NodeAssignmentKind.separate
+            or assignment.status not in NODE_ASSIGNMENT_OPEN
+            or assignment.idempotency_key == dispatch_key
+        ):
+            continue
+        reason = f"superseded by attempt {ctx.job.attempt}"
+        if await ctx.nodes.expire(assignment.id, reason=reason):
+            await ctx.jobs.append_event(
+                ctx.job.id,
+                NODE_EXPIRED_EVENT,
+                {
+                    "assignment_id": str(assignment.id),
+                    "node_id": assignment.node_id,
+                    "kind": assignment.kind.value,
+                    "reason": reason,
+                },
+                worker_id=ctx.worker_id,
+            )
+
+
 async def adopt_existing_separation(ctx: StageContext, *, dispatch_key: str) -> bool:
     """Crash recovery: an assignment created under this key but never confirmed.
 
@@ -686,6 +717,7 @@ async def adopt_existing_separation(ctx: StageContext, *, dispatch_key: str) -> 
 
 __all__ = [
     "adopt_existing_separation",
+    "expire_superseded_assignments",
     "assign_separation",
     "choose_separation_node",
     "download_via_node",

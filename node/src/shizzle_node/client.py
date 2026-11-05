@@ -58,7 +58,9 @@ class NodeClient:
         self._http.close()
 
     def _check(self, response: httpx.Response) -> dict[str, Any]:
-        if response.status_code >= 400:
+        # Redirects are not followed: a 3xx here is a misconfigured API base,
+        # not an empty answer, so anything outside 2xx is an error.
+        if response.status_code >= 300:
             try:
                 detail = str(response.json().get("detail", response.text))
             except ValueError:

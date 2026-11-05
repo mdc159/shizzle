@@ -61,4 +61,6 @@ def run_separation(
     module.WORKER_IMAGE = worker_image
     job = {"id": executor_job_id, "input": {**payload, "device": device}}
     result = module.handler(job, progress=progress)
-    return dict(result) if isinstance(result, dict) else {"status": str(result)}
+    if not isinstance(result, dict):
+        raise RuntimeError(f"lossless_handler.handler returned {type(result).__name__}, expected dict")
+    return dict(result)

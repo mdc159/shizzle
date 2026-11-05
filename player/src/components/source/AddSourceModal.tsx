@@ -16,8 +16,8 @@ import { toast } from 'sonner';
 import type { JobStatus } from '@/types/karaoke';
 import { cn } from '@/lib/utils';
 
-// Processing steps for progress display (Phase 2 job stages). Labels for
-// `downloading` and `dispatched` depend on who holds the job: a worker node
+// Processing steps for progress display (Phase 2 job stages). The
+// `dispatched` label depends on who holds the separation: a worker node
 // (docs/WORKER-NODES.md) or the cloud. See stepLabel().
 const STEPS = [
   { status: 'pending', label: 'Queued' },
@@ -59,6 +59,33 @@ const failureMessage = (status: JobStatus): string => {
 /** Lenient check that the pasted text looks like an http(s) link. */
 const looksLikeUrl = (value: string): boolean => /^https?:\/\/\S+$/i.test(value.trim());
 
+/** Mirrors the server's `youtube_video_id`: one YouTube video (watch, youtu.be,
+ * shorts, live or embed form). Anything else is refused by POST /api/submit-url
+ * with a 400, so the button stays disabled and the hint explains why. */
+const looksLikeYouTubeVideo = (value: string): boolean => {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
+  const host = url.hostname.toLowerCase();
+  const id = /^[A-Za-z0-9_-]{11}$/;
+  if (host === 'youtu.be' || host === 'www.youtu.be') {
+    return id.test(url.pathname.replace(/^\//, '').split('/')[0] ?? '');
+  }
+  if (!/^(www\.|m\.|music\.)?youtube\.com$/.test(host) && host !== 'youtube-nocookie.com' && host !== 'www.youtube-nocookie.com') {
+    return false;
+  }
+  if (url.pathname === '/watch') {
+    const values = url.searchParams.getAll('v');
+    return values.length === 1 && id.test(values[0]);
+  }
+  const segments = url.pathname.split('/');
+  return segments.length === 3 && ['shorts', 'live', 'embed'].includes(segments[1]) && id.test(segments[2]);
+};
+
 export const AddSourceModal: React.FC = () => {
   const { activeDrawer, setActiveDrawer, setActiveJob } = useStore();
   const isOpen = activeDrawer === 'source';
@@ -82,6 +109,7 @@ export const AddSourceModal: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const urlMode = looksLikeUrl(sourceUrl);
+  const youtubeOk = urlMode && looksLikeYouTubeVideo(sourceUrl);
 
   const stopPolling = () => {
     if (pollIntervalRef.current) {
@@ -243,12 +271,14 @@ export const AddSourceModal: React.FC = () => {
   const currentStepIndex = getCurrentStepIndex();
 
   const canSubmit = urlMode
-    ? !loading
+    ? youtubeOk && !loading
     : !!selectedFile && !!title.trim() && !!artist.trim() && !loading;
 
   const showMetadata = urlMode || !!selectedFile;
 
-  const downloadUrl = jobId ? `/api/tracks/${jobId}/download` : null;
+  // The track id is derived from the job id server-side, so the link needs
+  // the polled trackId; the raw job id would 404.
+  const downloadUrl = jobStatus?.trackId ? `/api/tracks/${jobStatus.trackId}/download` : null;
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
@@ -280,10 +310,13 @@ export const AddSourceModal: React.FC = () => {
                   className="w-full rounded-md border border-zinc-700 bg-zinc-900 py-2 pl-9 pr-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
                 />
               </div>
-              {urlMode && (
+              {youtubeOk && (
                 <p className="text-xs text-zinc-500">
                   A worker node downloads and separates the link. The file drop below is ignored.
                 </p>
+              )}
+              {urlMode && !youtubeOk && (
+                <p className="text-xs text-amber-400">Only a link to one YouTube video can be fetched.</p>
               )}
               {sourceUrl.trim() && !urlMode && (
                 <p className="text-xs text-amber-400">Enter a full http(s) link.</p>

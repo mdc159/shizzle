@@ -3,6 +3,7 @@ classification, the S3 upload order (source.mp4, verify, source.json LAST)."""
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -118,19 +119,40 @@ def test_upload_writes_source_then_receipt_last_conditionally(tmp_path):
 
 
 def test_stale_node_cannot_overwrite_an_owned_source(tmp_path):
-    """First writer wins: a 412 on source.mp4 adopts the owner's receipt once it
-    exists and is a retryable race while it does not."""
+    """First writer wins: a 412 on source.mp4 adopts the owner's receipt."""
     s3 = _FakeS3()
     source = _source(tmp_path)
     s3.objects["sources/t/source.mp4"] = b"the other node's bytes"
-    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
-    with pytest.raises(DownloadError, match="SOURCE_RACE"):
-        upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
-    assert s3.objects["sources/t/source.mp4"] == b"the other node's bytes"
     s3.objects["sources/t/source.json"] = json.dumps({"sha256": "a" * 64, "bytes": 22}).encode()
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
     adopted = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
     assert adopted == {"sha256": "a" * 64, "bytes": 22}
+    assert s3.objects["sources/t/source.mp4"] == b"the other node's bytes"
     assert s3.order == []  # nothing written by the stale node
+
+
+def test_orphaned_source_without_a_receipt_is_completed_not_overwritten(tmp_path):
+    """A node that died between its two writes leaves source.mp4 with no
+    source.json. The next node must not fail forever on it: it describes the
+    object that is actually there and writes the receipt for it (A12)."""
+    s3 = _FakeS3()
+    source = _source(tmp_path)
+    orphan = b"the dead node's complete upload"
+    s3.objects["sources/t/source.mp4"] = orphan
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256,
+               "bytes": source.bytes, "title": "t"}
+    phases: list[str] = []
+    landed = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=phases.append)
+    assert s3.objects["sources/t/source.mp4"] == orphan  # never overwritten
+    assert s3.order == ["put:sources/t/source.json:application/json:*"]
+    assert landed["sha256"] == hashlib.sha256(orphan).hexdigest()
+    assert landed["bytes"] == len(orphan) and landed["title"] == "t"
+    assert landed["completed_orphan"] is True
+    assert json.loads(s3.objects["sources/t/source.json"]) == landed
+    assert "upload: source.mp4 exists without a receipt; completing it" in phases
+    # The owner, alive after all, writes its receipt next: it adopts ours.
+    adopted = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=phases.append)
+    assert adopted == landed and len(s3.order) == 1
 
 
 @pytest.mark.parametrize(

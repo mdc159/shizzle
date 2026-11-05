@@ -153,15 +153,16 @@ def download_source(
     progress: Progress,
 ) -> SourceFile:
     """yt-dlp the single video at ``url`` into ``workdir/source.mp4``."""
+    # Refuse before anything else: the URL check needs no yt-dlp.
+    video_id = youtube_video_id(url)
+    if video_id is None:
+        raise DownloadError("URL_REFUSED", "only a link to one YouTube video is fetched")
     try:
         import yt_dlp
         from yt_dlp.utils import DownloadError as YtDlpDownloadError
     except ImportError as exc:  # pragma: no cover - environment problem
         raise DownloadError("DOWNLOAD_FAILED", "yt-dlp is not installed") from exc
 
-    video_id = youtube_video_id(url)
-    if video_id is None:
-        raise DownloadError("URL_REFUSED", "only a link to one YouTube video is fetched")
     url = f"https://www.youtube.com/watch?v={video_id}"
     workdir.mkdir(parents=True, exist_ok=True)
     for stale in workdir.glob("source.*"):
@@ -303,7 +304,7 @@ def upload_source(
     and returns it, so the completion report describes what is in S3.
     """
     key = receipt["object_key"]
-    receipt_key = f"sources/{receipt['track_id']}/source.json"
+    receipt_key = _receipt_key(receipt["track_id"])
     existing = _read_json(s3, bucket, receipt_key)
     if existing is not None:
         progress("upload: already complete (adopting the existing source)")
@@ -321,14 +322,38 @@ def upload_source(
         if existing is not None:
             progress("upload: another node finished first; adopting its receipt")
             return existing
-        raise DownloadError(
-            "SOURCE_RACE", "source.mp4 exists but its receipt does not yet; retry later"
-        ) from exc
+        # source.mp4 is owned but has no receipt: either the owner is between
+        # its two writes right now, or it died in between and left an orphan
+        # that no retry could ever complete. Either way the object is whole
+        # (an S3 PUT is atomic), so describe what is actually there and write
+        # the receipt for it; the owner, if alive, adopts ours on its own 412.
+        progress("upload: source.mp4 exists without a receipt; completing it")
+        return _write_receipt(
+            s3, bucket=bucket, receipt_key=receipt_key,
+            receipt=_receipt_for_existing_object(s3, bucket=bucket, key=key, receipt=receipt),
+            progress=progress,
+        )
     head = s3.head_object(Bucket=bucket, Key=key)
     if int(head.get("ContentLength", -1)) != source.bytes:
         raise DownloadError(
             "UPLOAD_FAILED", f"uploaded {head.get('ContentLength')} bytes, expected {source.bytes}"
         )
+    return _write_receipt(s3, bucket=bucket, receipt_key=receipt_key, receipt=receipt, progress=progress)
+
+
+def existing_receipt(s3: Any, *, bucket: str, track_id: str) -> dict[str, Any] | None:
+    """The receipt already in S3 for this track, if the download is done (A12)."""
+    return _read_json(s3, bucket, _receipt_key(track_id))
+
+
+def _receipt_key(track_id: str) -> str:
+    return f"sources/{track_id}/source.json"
+
+
+def _write_receipt(
+    s3: Any, *, bucket: str, receipt_key: str, receipt: dict[str, Any], progress: Progress
+) -> dict[str, Any]:
+    """Conditional write of source.json; first writer wins, the loser adopts."""
     progress("upload: source.json")
     try:
         s3.put_object(
@@ -347,6 +372,27 @@ def upload_source(
         progress("upload: receipt already written by another node; adopting it")
         return existing
     return receipt
+
+
+def _receipt_for_existing_object(
+    s3: Any, *, bucket: str, key: str, receipt: dict[str, Any]
+) -> dict[str, Any]:
+    """Our receipt, re-pointed at the object another node left in S3: its
+    size and sha256 are read back from the object itself, never assumed."""
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"]
+    except Exception as exc:
+        raise DownloadError(
+            "SOURCE_RACE", "source.mp4 was there a moment ago and is gone; retry later"
+        ) from exc
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in iter(lambda: body.read(1024 * 1024), b""):
+        digest.update(chunk)
+        size += len(chunk)
+    if size <= 0:
+        raise DownloadError("SOURCE_INVALID", "the existing source.mp4 is empty")
+    return {**receipt, "bytes": size, "sha256": digest.hexdigest(), "completed_orphan": True}
 
 
 def _precondition_failed(exc: Exception) -> bool:

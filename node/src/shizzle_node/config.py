@@ -49,6 +49,9 @@ class NodeConfig:
     stemsplit_dir: Path
     heartbeat_seconds: float = 15.0
     poll_wait_seconds: int = 25
+    # Pause after an ack the API answered with a non-409 error, before the
+    # next poll offers the same open assignment again.
+    ack_retry_seconds: float = 5.0
     cookies_file: Path | None = None
     aws_region: str = "us-east-1"
     agent_version: str = field(default=__version__)
@@ -91,7 +94,7 @@ class NodeConfig:
             capabilities=capabilities,
             stemsplit_dir=stemsplit_dir,
             heartbeat_seconds=float(env.get("SHIZZLE_NODE_HEARTBEAT_SECONDS", "15") or 15),
-            poll_wait_seconds=max(0, min(30, int(env.get("SHIZZLE_NODE_POLL_WAIT_SECONDS", "25") or 25))),
+            poll_wait_seconds=max(1, min(30, int(env.get("SHIZZLE_NODE_POLL_WAIT_SECONDS", "25") or 25))),
             cookies_file=Path(cookies) if cookies else None,
             aws_region=env.get("AWS_REGION", "").strip() or "us-east-1",
         )

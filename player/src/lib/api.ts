@@ -111,8 +111,9 @@ export async function submitUrl(url: string, metadata?: SourceMetadata): Promise
 export async function getNodes(signal?: AbortSignal): Promise<NodeInfo[]> {
   const response = await authFetch('/api/nodes', { signal });
   if (!response.ok) throw new Error(`Failed to fetch nodes: ${response.statusText}`);
-  const data: NodeListResponse = await response.json();
-  return data.nodes;
+  const data: Partial<NodeListResponse> = await response.json();
+  // An unexpected body (e.g. a stub returning `{}`) must not crash the panel.
+  return Array.isArray(data.nodes) ? data.nodes : [];
 }
 
 /**

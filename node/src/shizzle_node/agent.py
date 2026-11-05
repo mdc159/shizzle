@@ -20,10 +20,21 @@ from typing import Any
 
 from .client import ApiError, Assignment, NodeClient
 from .config import NodeConfig
-from .download import DownloadError, build_receipt, download_source, upload_source
+from .download import (
+    DownloadError,
+    build_receipt,
+    download_source,
+    existing_receipt,
+    upload_source,
+)
 from .separate import resolve_device, run_separation
 
 logger = logging.getLogger("shizzle_node")
+
+
+class AssignmentLost(RuntimeError):
+    """The orchestrator answered 409 mid-job: it expired or reassigned this
+    assignment, so finishing the work would only be refused."""
 
 
 class Agent:
@@ -35,6 +46,7 @@ class Agent:
         s3_factory: Callable[[], Any],
         downloader: Callable[..., Any] = download_source,
         uploader: Callable[..., Any] = upload_source,
+        receipt_reader: Callable[..., Any] = existing_receipt,
         separator: Callable[..., dict[str, Any]] = run_separation,
         device_resolver: Callable[[str], str] = resolve_device,
         sleep: Callable[[float], None] = time.sleep,
@@ -44,6 +56,7 @@ class Agent:
         self._s3_factory = s3_factory
         self._download = downloader
         self._upload = uploader
+        self._existing_receipt = receipt_reader
         self._separate = separator
         self._device = device_resolver(config.device) if "separate" in config.capabilities else "none"
         self._sleep = sleep
@@ -76,9 +89,14 @@ class Agent:
             return False
 
     def _heartbeat_forever(self) -> None:
-        while not self._stop.is_set():
+        # Keep beating through a stop request while a job is in flight: the
+        # node is still working and must not look offline to the orchestrator.
+        while not self._stop.is_set() or self._busy is not None:
             self.heartbeat_once()
             self._stop.wait(self.config.heartbeat_seconds)
+            if self._stop.is_set() and self._busy is not None:
+                # The event is set, so wait() returned at once: pace by hand.
+                time.sleep(self.config.heartbeat_seconds)
 
     def run(self) -> None:
         """Block until stopped: one heartbeat thread, one assignment at a time."""
@@ -117,8 +135,15 @@ class Agent:
         try:
             self.client.ack(assignment.id)
         except ApiError as exc:
-            # 409: the orchestrator expired or reassigned it; nothing to do.
-            logger.info("assignment %s not acknowledged (%s); skipping", assignment.id, exc)
+            if exc.status == 409:
+                # The orchestrator expired or reassigned it; nothing to do.
+                logger.info("assignment %s not acknowledged (%s); skipping", assignment.id, exc)
+                return
+            # Anything else is the API misbehaving; the assignment is still
+            # open and will be offered again on the next poll. Back off so a
+            # failing API is not hammered.
+            logger.warning("ack of %s failed (%s); retrying after a pause", assignment.id, exc)
+            self._sleep(self.config.ack_retry_seconds)
             return
         self._busy = assignment.id
         self.heartbeat_once()
@@ -132,6 +157,12 @@ class Agent:
             logger.info("[%s] %s", assignment.id, msg)
             try:
                 self.client.progress(assignment.id, msg)
+            except ApiError as exc:
+                if exc.status == 409:
+                    # Expired or reassigned under us: stop the work, the
+                    # orchestrator will not accept it.
+                    raise AssignmentLost(f"assignment {assignment.id} is no longer ours") from exc
+                logger.debug("progress report failed: %s", exc)
             except Exception as exc:  # progress is best-effort
                 logger.debug("progress report failed: %s", exc)
 
@@ -142,6 +173,10 @@ class Agent:
                 detail = self._do_separate(assignment, workdir, progress)
             else:
                 raise RuntimeError(f"unknown assignment kind {assignment.kind}")
+        except AssignmentLost as exc:
+            # Nothing to report: the 409 already told us the orchestrator moved on.
+            logger.info("%s; abandoning the run", exc)
+            shutil.rmtree(workdir, ignore_errors=True)
         except DownloadError as exc:
             self._fail(assignment, exc.code, exc.detail)
         except Exception as exc:
@@ -175,6 +210,18 @@ class Agent:
         for key in ("url", "track_id", "bucket", "source_key"):
             if not payload.get(key):
                 raise DownloadError("BAD_PAYLOAD", f"assignment payload lacks {key}")
+        # Already done (an earlier node's receipt is in S3): adopt it without
+        # fetching the video again.
+        try:
+            existing = self._existing_receipt(
+                self._s3_factory(), bucket=str(payload["bucket"]), track_id=str(payload["track_id"])
+            )
+        except Exception as exc:  # unknown, not a failure: upload_source re-checks
+            logger.warning("could not check for an existing receipt: %s", exc)
+            existing = None
+        if existing is not None:
+            progress("upload: already complete (adopting the existing source)")
+            return self._report(existing, adopted=True)
         source = self._download(
             str(payload["url"]),
             workdir,
@@ -195,6 +242,10 @@ class Agent:
         ) or receipt
         # Report what is in S3 (possibly another node's earlier download of
         # the same video), never what this run would have written.
+        return self._report(landed, adopted=landed is not receipt)
+
+    @staticmethod
+    def _report(landed: dict[str, Any], *, adopted: bool) -> dict[str, Any]:
         return {
             "sha256": landed.get("sha256"),
             "bytes": landed.get("bytes"),
@@ -202,7 +253,7 @@ class Agent:
             "title": landed.get("title"),
             "uploader": landed.get("uploader"),
             "video_id": landed.get("video_id"),
-            "adopted": landed is not receipt,
+            "adopted": adopted,
         }
 
     def _do_separate(

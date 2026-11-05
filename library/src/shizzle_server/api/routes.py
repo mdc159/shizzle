@@ -286,8 +286,12 @@ async def upload_file(
 
 @router.post("/submit-url")
 async def submit_url(request: Request, body: SubmitUrlRequest, _auth: None = Protected) -> dict:
-    """Create a url-sourced job. Phase 2: it will fail at the downloading stub
-    with a structured YTDLP_BLOCKED error (Phase 3 implements yt-dlp ingest)."""
+    """Create a url-sourced job for one YouTube video.
+
+    Anything that is not a single YouTube video is refused here with a 400,
+    before a job exists. The job's download runs on a worker node
+    (docs/WORKER-NODES.md); with node routing off it fails at the downloading
+    stage with a structured YTDLP_BLOCKED error, as before."""
     parsed = urlparse(body.url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise HTTPException(400, "A valid http(s) URL is required")

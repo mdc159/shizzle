@@ -541,6 +541,8 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
     dispatch_key = f"{job.id.hex}:{job.attempt}"
     payload["idempotency_key"] = dispatch_key
     if ctx.nodes and ctx.settings.node_routing_enabled:
+        # A previous attempt's open assignment is history now: free its node.
+        await nodes.expire_superseded_assignments(ctx, dispatch_key=dispatch_key)
         # Routing (B17): a node first, RunPod only after the wait window.
         if await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
             ctx.park_seconds = ctx.settings.node_poll_seconds

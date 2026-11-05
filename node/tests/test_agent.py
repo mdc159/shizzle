@@ -27,6 +27,7 @@ class FakePlane:
         self.queue: list[dict] = []
         self.calls: list[tuple[str, str, dict | None]] = []
         self.ack_status = 200
+        self.progress_status = 200
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -41,7 +42,12 @@ class FakePlane:
             return httpx.Response(204)
         if path.endswith("/ack"):
             return httpx.Response(self.ack_status, json={"detail": "nope"} if self.ack_status >= 400 else {"ok": True})
-        if path.endswith(("/progress", "/complete", "/fail")):
+        if path.endswith("/progress"):
+            return httpx.Response(
+                self.progress_status,
+                json={"detail": "gone"} if self.progress_status >= 400 else {"ok": True},
+            )
+        if path.endswith(("/complete", "/fail")):
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"detail": "unknown"})
 
@@ -283,6 +289,60 @@ def test_unsupported_kind_and_lost_ack_do_not_run_work(config, client, plane, tm
         "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
     })))
     assert ran == [] and len(plane.sent("/fail")) == 1
+
+
+def test_ack_hit_by_an_api_error_backs_off_instead_of_dropping_the_job(config, client, plane, tmp_path):
+    """Only a 409 means the assignment is gone; a 500 leaves it open and it will
+    be offered again, so the agent pauses rather than hammering the API."""
+    ran, slept = [], []
+    agent = Agent(
+        config, client, s3_factory=lambda: None,
+        downloader=lambda *a, **k: ran.append("download") or _source(tmp_path),
+        uploader=lambda *a, **k: None, separator=lambda *a, **k: {},
+        device_resolver=lambda d: d, sleep=slept.append,
+    )
+    plane.ack_status = 500
+    agent.execute(Assignment.from_json(_assignment("download", {
+        "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
+    })))
+    assert ran == [] and plane.sent("/fail") == [] and slept == [config.ack_retry_seconds]
+
+
+def test_a_409_on_progress_aborts_the_run_without_a_failure_report(config, client, plane, tmp_path):
+    """The orchestrator expired or reassigned the job mid-run: stop working on it."""
+    uploaded = []
+
+    def slow_download(url, workdir, *, progress, **_k):
+        progress("download: 10%")  # the plane answers 409 here
+        raise AssertionError("the download must stop once the assignment is lost")
+
+    agent = Agent(
+        config, client, s3_factory=lambda: None, downloader=slow_download,
+        uploader=lambda *a, **k: uploaded.append(1), separator=lambda *a, **k: {},
+        device_resolver=lambda d: d, receipt_reader=lambda *a, **k: None,
+    )
+    plane.progress_status = 409
+    agent.execute(Assignment.from_json(_assignment("download", {
+        "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
+    })))
+    assert uploaded == [] and plane.sent("/fail") == [] and plane.sent("/complete") == []
+
+
+def test_an_existing_receipt_skips_the_download_entirely(config, client, plane, tmp_path):
+    ran = []
+    existing = {"sha256": "c" * 64, "bytes": 7, "title": "Done Before", "video_id": "dQw4w9WgXcQ"}
+    agent = Agent(
+        config, client, s3_factory=lambda: None,
+        downloader=lambda *a, **k: ran.append("download") or _source(tmp_path),
+        uploader=lambda *a, **k: ran.append("upload"), separator=lambda *a, **k: {},
+        device_resolver=lambda d: d, receipt_reader=lambda *a, **k: existing,
+    )
+    agent.execute(Assignment.from_json(_assignment("download", {
+        "url": "u", "track_id": "t", "bucket": "b", "source_key": "k",
+    })))
+    assert ran == []
+    report = plane.sent("/complete")[0]
+    assert report["detail"]["sha256"] == "c" * 64 and report["detail"]["adopted"] is True
 
 
 # --- receipt ---------------------------------------------------------------------
