@@ -7,6 +7,42 @@ uncommitted `docs/NODE_ROUTING_PLAN.md` referenced from the next-phase
 draft (PR #62) and is written to be executed phase by phase through the
 normal PR workflow.
 
+## Open question 2026-11-05: which container runs on the Dell
+
+Owner, 2026-11-05: "For creating the files, we've got that nailed down. We
+shouldn't change anything. We put a lot of work into optimizing the
+multi-track file." Later: "The 6 should be named shizzle.m4a, not other."
+
+This plan assumes the Dell runs the production lossless worker image
+(`ghcr.io/mdc159/shizzle/worker`, `stemsplit/Dockerfile.lossless`), which is
+what RunPod runs today. Under that assumption nothing about file creation
+changes: the node emits the lossless package and the VPS derives the browser
+files, with the sixth stem named `shizzle.m4a`, exactly as it does for a
+browser upload now.
+
+Two facts do not fit that assumption and are unresolved from this session:
+
+- The web path has never produced `multi-track.mp4` (open issue #29 is that
+  the website's Download Multi-Track button cannot succeed for cloud
+  uploads). The only code in the four reviewed repos that writes
+  `multi-track.mp4` is the retired all-in-one worker in
+  `mdc159/shizzle-worker`, which also names the sixth stem `other.m4a` and
+  encodes stems at 320 kb/s.
+- The owner reports a local container that downloads, splits and writes the
+  optimized multi-track file, with the sixth stem named `shizzle.m4a`. That
+  combination matches no code in the reviewed repos.
+
+Until the Dell's image is identified (`docker images`, `docker ps -a`, or a
+Remote Control session), the node design stays as written below. If the Dell
+runs a newer all-in-one container that emits finished browser media, the
+handoff moves to the drop-box (`imports/{source_ref}/`, invariant C8), the
+agent adds only the two manifest fields that contract requires
+(`delivery_profile`, `integrity.objects`), and the 2.5 Mb/s budget (D4) must
+be measured on one real package first. If it runs the production worker
+image, the plan applies unchanged and a multi-track archive file is an
+optional add-on step on the node, assembled from finished stems without
+re-encoding.
+
 ## Goal
 
 The owner, 2026-11-05:
