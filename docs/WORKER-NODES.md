@@ -43,6 +43,28 @@ image, the plan applies unchanged and a multi-track archive file is an
 optional add-on step on the node, assembled from finished stems without
 re-encoding.
 
+## Status 2026-11-05: Phases 1–3 implemented, awaiting the first live run
+
+Implemented on this branch (see the PR for the commits):
+
+- `library/`: migration `0006_worker_nodes`, `NodeRepository`, `/api/nodes`
+  routes, orchestrator routing in `orchestrator/nodes.py` (download via node,
+  separation node-first with RunPod fallback, stall/expire/redispatch),
+  `jobs.executor`, invariants A12, B16, B17, E6 with their tests.
+- `stemsplit/lossless_handler.py`: `handler(job, progress=...)` and an explicit
+  `device` so a node runs the production separation code unchanged.
+- `node/`: the agent (`shizzle-node`), with its README covering the Mac mini
+  install (native `mps`), the Dell (CUDA), the VPS `.env` and the IAM policy.
+- `player/`: URL input in Add Source, node-aware progress, nodes strip on
+  `/dashboard`.
+
+Not yet done: a live run (one URL through shizzle.systems with the Mac online),
+the IAM user for the node, `SHIZZLE_NODE_TOKENS` in the production `.env`,
+and the Mac's launchd service. The Mac inventory (2026-11-05) showed no
+separator container there: separation runs natively on the Apple GPU, which
+is what the agent does; the downloader container stays as is for the native
+app and is not used by the agent.
+
 ## Goal
 
 The owner, 2026-11-05:

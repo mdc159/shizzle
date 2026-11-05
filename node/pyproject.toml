@@ -1,0 +1,68 @@
+# Shizzle worker-node agent (docs/WORKER-NODES.md).
+#
+# One agent serves both the Mac mini (separation on Apple's GPU, "mps") and
+# the Dell 9530 (CUDA). It pulls assignments from the control plane over
+# HTTPS, downloads YouTube sources with yt-dlp, and runs the production
+# separation code from ../stemsplit unchanged (same handler RunPod runs).
+#
+#   uv sync --directory node            # everything, including torch/demucs
+#   uv sync --directory node --no-default-groups --group dev   # tests only (CI)
+#   uv run --directory node shizzle-node
+
+[project]
+name = "shizzle-node"
+version = "0.1.0"
+description = "Shizzle worker-node agent: pulls download and separation work from the control plane"
+requires-python = ">=3.11,<3.13"
+authors = [{ name = "Mike" }]
+dependencies = [
+    "httpx>=0.28",
+    "boto3>=1.34",
+    "yt-dlp>=2025.1.1",
+]
+
+[project.scripts]
+shizzle-node = "shizzle_node.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+# The separation stack: identical pins to stemsplit/Dockerfile.lossless where
+# a platform wheel exists. The PyPI torch build has Metal/MPS on macOS; on the
+# Dell install the CUDA build afterwards (see README.md, "Install on the Dell").
+separate = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "demucs==4.1.0",
+    "soundfile==0.14.0",
+    "numpy==1.26.4",
+]
+
+[tool.uv]
+default-groups = ["dev", "separate"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shizzle_node"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test stubs take the executor signatures and ignore most of them.
+"tests/*" = ["ARG"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q", "--tb=short"]

@@ -589,6 +589,21 @@ class JobRepository:
             job.input_checksum = checksum
             job.updated_at = utcnow()
 
+    async def set_metadata(
+        self, job_id: uuid.UUID, *, worker_id: str, title: str | None, artist: str | None
+    ) -> None:
+        """Fill title/artist a node learned from the source; never overwrite user text."""
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.downloading)
+            _require_lease(job, worker_id, job.status, utcnow())
+            if title and not job.title:
+                job.title = title
+            if artist and not job.artist:
+                job.artist = artist
+            job.updated_at = utcnow()
+
     async def owns_lease(self, job_id: uuid.UUID, worker_id: str) -> bool:
         """B2 predicate: does this worker own the job's unexpired lease now?
 

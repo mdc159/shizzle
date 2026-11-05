@@ -40,6 +40,7 @@ from ..db.models import (
 )
 from ..db.repository import track_id_for_job
 from ..errors import ErrorCode, StageError
+from ..metadata import resolve_track_metadata
 from . import cloud
 from .runpod_client import NotConfiguredRunPodClient
 
@@ -254,6 +255,18 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
         await ctx.jobs.set_input_checksum(
             job.id, worker_id=ctx.worker_id, checksum=str(receipt["sha256"])
         )
+        if not job.title or not job.artist:
+            # The node saw the video's own title/uploader; clean them the same
+            # way the upload path cleans a filename, never over user-typed text.
+            resolved = resolve_track_metadata(
+                job.title, job.artist, str(receipt.get("title") or "")
+            )
+            await ctx.jobs.set_metadata(
+                job.id,
+                worker_id=ctx.worker_id,
+                title=resolved.title or None,
+                artist=resolved.artist or str(receipt.get("uploader") or ""),
+            )
         if not any(e.event == NODE_COMPLETED_EVENT and (e.detail or {}).get("kind") == "download"
                    for e in events):
             await ctx.jobs.append_event(
