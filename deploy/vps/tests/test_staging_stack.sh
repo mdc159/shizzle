@@ -68,8 +68,13 @@ fi
 # Production compose publishes the admin listener only on host loopback and
 # keeps the public ports; api and caddy see the admin secret.
 grep -Fq '"127.0.0.1:18081:18081"' "$COMPOSE_PROD"
-grep -Fq '"80:80"' "$COMPOSE_PROD"
-grep -Fq '"443:443"' "$COMPOSE_PROD"
+# Public ports bind the public address only, never every address: Tailscale
+# Serve owns tailnet:443 and a 0.0.0.0 bind fails after a reboot (2026-11-17).
+grep -Fq '"${SHIZZLE_PUBLIC_IP:-72.60.173.171}:80:80"' "$COMPOSE_PROD"
+grep -Fq '"${SHIZZLE_PUBLIC_IP:-72.60.173.171}:443:443"' "$COMPOSE_PROD"
+if grep -Eq '^[[:space:]]*-[[:space:]]*"(80:80|443:443(/udp)?)"' "$COMPOSE_PROD"; then
+  echo "production Caddy publishes a public port on every address" >&2; exit 1
+fi
 [ "$(count -F 'SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}' "$COMPOSE_PROD")" -ge 2 ]
 
 # Staging compose: isolated project name, only 127.0.0.1:18080 published
