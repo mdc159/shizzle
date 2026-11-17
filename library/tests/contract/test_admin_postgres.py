@@ -10,7 +10,6 @@ cleanly when Postgres is unreachable).
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 import pytest_asyncio
