@@ -25,7 +25,9 @@ shizzle.systems, www.shizzle.systems {
 
 	# Defense in depth for every public request: a forged admin header must
 	# never reach the api container, whatever route it targets.
-	header >-X-Shizzle-Admin
+	# request_header (unlike header) edits the INCOMING request before any
+	# routing, so this covers /api, /ws and the /cdn CloudFront proxy alike.
+	request_header -X-Shizzle-Admin
 
 	# Admin API and admin page are not public. These handles precede the
 	# /api/* and static handles on purpose: handle blocks are mutually
