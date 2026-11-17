@@ -2172,7 +2172,10 @@ async def _recover_handoff_reservation(
 async def _retry_job(
     request: Request, job_id: uuid.UUID, *, restore: bool = False
 ) -> AdminRetryResponse:
-    job, events = await _jobs(request).get_retry_snapshot(job_id)
+    try:
+        job, events = await _jobs(request).get_retry_snapshot(job_id)
+    except InvalidTransition:
+        raise HTTPException(409, "The job is being processed or is no longer retryable") from None
     if job is None:
         raise HTTPException(404, "Job not found")
     if job.status != JobStage.failed:

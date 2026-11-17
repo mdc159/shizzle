@@ -436,8 +436,15 @@ class JobRepository:
         terminal action takes this row lock, so the short snapshot is coherent.
         """
         async with self._sf() as session, session.begin():
-            job = await session.get(Job, job_id, with_for_update=True)
+            job = await session.get(Job, job_id, with_for_update={"skip_locked": True})
             if job is None:
+                # A live competitor must produce retry's normal 409, not wait
+                # behind a test/request that is itself awaiting this response.
+                # Jobs are never hard-deleted, so the unlocked read safely
+                # distinguishes that case from an unknown id.
+                existing = await session.get(Job, job_id)
+                if existing is not None:
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
                 return None, []
             events = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
