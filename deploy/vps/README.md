@@ -143,6 +143,17 @@ listener published only on `127.0.0.1:18081`, which injects
 is `https://shizzle.tailfedd3b.ts.net:8444` — tailnet only, real TLS.
 Undo with `tailscale serve --https=8444 off`.
 
+Note for integration review: cookies are host-scoped, not port-scoped, so a
+`Secure` cookie set on 8443 is also sent to 8444 on the same tailnet host.
+Both listeners are tailnet-only and the player authenticates primarily with
+an origin-scoped bearer token, but keep this in mind when adding new
+cookie-bearing routes on either port.
+
+The listener appears only after a production release carrying the new
+`compose.prod.yml` and `Caddyfile.prod` has deployed through the approved
+production workflow (see the staging bring-up checklist for the one-time
+`.env` + recreate step that follows it).
+
 ## Staging stack
 
 A full copy of the site runs beside production in `/opt/shizzle/staging`
@@ -158,13 +169,22 @@ Do not disturb the pre-existing `tailscale serve` on 443 (proxy to
 
 Staging deploys run from the manual
 [deploy-staging workflow](../../.github/workflows/deploy-staging.yml): pick a
-branch or commit, it reuses `api-image.yml` for the digest-pinned image,
-ships the player/compose/Caddyfile plus `deploy-staging.sh`, and runs the
-transaction on the box (pull, validate, migrate, start, health check on
-`127.0.0.1:18080`). Rollback is simple: on failure the script restores the
-prior files and restarts the previous image or stops the app services; the
-database is never downgraded, so an old image may meet a newer schema on
-staging — acceptable there, repaired by redeploying the newer ref.
+branch or commit; the player is built from that ref in a job with no VPS
+credentials, the digest-pinned image comes from the reused `api-image.yml`,
+and the deploy job ships the player artifact plus `deploy-staging.sh`,
+`compose.staging.yml` and `Caddyfile.staging` taken from the **default
+branch** (a change to those deploy assets reaches staging only after it is
+merged). The deploy job runs under the `staging` GitHub environment, which
+holds the SSH secrets and can carry a required reviewer. The transaction on
+the box is pull, validate, migrate, start, health check on
+`127.0.0.1:18080`; the first run bootstraps a fresh directory. Rollback stops
+the failed services while their config is still active, then restores the
+prior files and restarts the previous image (or returns a fresh directory to
+its fresh state); the database is never downgraded, so an old image may meet
+a newer schema on staging — acceptable there, repaired by redeploying the
+newer ref. Honest boundary: the chosen ref's image still runs on this
+production host, and the staging SSH identity is root here — see
+[AUTOMATION §3b](../../docs/AUTOMATION.md) before assuming isolation.
 
 Data isolation, in one paragraph each:
 
@@ -191,56 +211,126 @@ Data isolation, in one paragraph each:
 
 ### Bringing staging up (ordered, one-time)
 
-On AWS:
+On AWS (order matters — the signing key exists before its public key is
+registered, and the bucket policy is applied after the distribution exists
+because it is scoped to the distribution ARN):
 
-1. Create the staging bucket (e.g. `shizzle-staging-media`, private,
-   block-public-access on) in `us-east-1`; add bucket CORS allowing GET/HEAD
-   from `https://shizzle.tailfedd3b.ts.net:8443` and `:8444`.
-2. Create an RSA CloudFront signing key pair (or reuse the production key
-   material as a *new* public-key resource with its own key-pair id); create
-   a key group containing it.
-3. Create the staging CloudFront distribution: origin = the staging bucket
-   via OAC, default behavior `tracks/*` (or default `*`) with Origin Request
-   and Cache policies like production, Restrict Viewer Access = trusted key
-   group from step 2, Range/GET/HEAD only. Note its `dXXXX.cloudfront.net`
-   domain and key-pair id.
-4. Ensure the RunPod endpoint worker's IAM policy covers the staging bucket
-   (read source, write attempts) if staging will separate uploads.
-5. Give the staging `.env` an IAM key (new staging user, or widen the existing
-   one) allowed on the staging bucket only.
+1. Create the staging bucket (e.g. `shizzle-staging-media`) in `us-east-1`,
+   private, with all four block-public-access flags on.
+2. Generate the signing key pair NOW (before step 3 registers its public
+   key), and keep the private key for the VPS step below:
+   ```sh
+   openssl genrsa -out cf-staging-private-key.pem 2048
+   openssl rsa -in cf-staging-private-key.pem -pubout -out cf-staging-public-key.pem
+   ```
+3. CloudFront → Public keys: upload `cf-staging-public-key.pem`; note the
+   **key-pair id** (`K…`). Create a key group (e.g. `staging-media-signing`)
+   containing that public key.
+4. Create the staging CloudFront distribution: origin = the staging bucket
+   **via Origin Access Control** (create the OAC setting, origin type S3,
+   sigv4); default behavior allowed methods GET/HEAD (Range included
+   automatically), Restrict Viewer Access = Yes with the trusted key group
+   from step 3. Cache configuration: create (or choose) a cache policy that
+   includes the headers `Origin`, `Access-Control-Request-Method` and
+   `Access-Control-Request-Headers` in the cache key (a CORS-safe choice;
+   `CachingDisabled` also works for a small staging library); do NOT attach a
+   response-headers policy that overrides CORS — the bucket's own CORS
+   answers. Note the distribution **domain** (`dXXXX.cloudfront.net`) and
+   its **ARN** (`arn:aws:cloudfront::<account-id>:distribution/<id>`).
+5. Apply the OAC bucket policy on the staging bucket (S3 still denies
+   CloudFront without it — signed viewer requests would get origin 403s).
+   Substitute your bucket name and distribution ARN:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Sid": "AllowCloudFrontStagingRead",
+       "Effect": "Allow",
+       "Principal": { "Service": "cloudfront.amazonaws.com" },
+       "Action": "s3:GetObject",
+       "Resource": "arn:aws:s3:::shizzle-staging-media/tracks/*",
+       "Condition": { "StringEquals": { "AWS:SourceArn": "arn:aws:cloudfront::YOUR_ACCOUNT:distribution/YOUR_DISTRIBUTION_ID" } }
+     }]
+   }
+   ```
+6. Bucket CORS (exact configuration — both tailnet origins, because media
+   elements use `crossOrigin="anonymous"` and the admin listener at :8444
+   plays media too):
+   ```json
+   [
+     {
+       "AllowedHeaders": ["*"],
+       "AllowedMethods": ["GET", "HEAD"],
+       "AllowedOrigins": [
+         "https://shizzle.tailfedd3b.ts.net:8443",
+         "https://shizzle.tailfedd3b.ts.net:8444"
+       ],
+       "ExposeHeaders": ["ETag", "Content-Range", "Content-Length"],
+       "MaxAgeSeconds": 3000
+     }
+   ]
+   ```
+7. Ensure the RunPod endpoint worker's IAM policy covers the staging bucket
+   (read `sources/*`, write `tracks/*`) if staging will separate uploads.
+8. Give the staging `.env` an IAM key (a new staging-only user is cleanest)
+   allowed on the staging bucket only (`s3:*` on
+   `arn:aws:s3:::shizzle-staging-media/*` plus `s3:ListBucket`).
 
-On the VPS (as root):
+On the VPS (as root; `CHECKOUT` is your absolute path to a checkout of this
+repository — use an absolute path, the commands `cd` first):
 
 ```sh
+CHECKOUT=/root/shizzle   # absolute path to a checkout of this repo
 mkdir -p /opt/shizzle/staging/secrets
 cd /opt/shizzle/staging
-# from a checkout of this repo at the deployed ref:
-cp deploy/vps/.env.staging.example .env        # then edit secrets/values below
+cp "$CHECKOUT/deploy/vps/.env.staging.example" .env   # then edit as below
 chmod 600 .env
-# set: POSTGRES_PASSWORD, SHIZZLE_PASSCODE, TOKEN_SIGNING_SECRET,
-#      SHIZZLE_ADMIN_PROXY_SECRET, AWS keys, S3_MEDIA_BUCKET,
-#      CLOUDFRONT_DOMAIN + CLOUDFRONT_KEY_PAIR_ID, RUNPOD_*
-#      (SHIZZLE_NODE_TOKENS stays empty)
-openssl genrsa -out secrets/cloudfront_private_key.pem 2048   # if a new key pair
-chmod 600 secrets/cloudfront_private_key.pem
-# (its public key is what you registered in the key group in AWS)
+# set in .env: POSTGRES_PASSWORD, SHIZZLE_PASSCODE, TOKEN_SIGNING_SECRET,
+#      SHIZZLE_ADMIN_PROXY_SECRET, AWS keys, S3_MEDIA_BUCKET=shizzle-staging-media,
+#      CLOUDFRONT_DOMAIN=<dXXX from step 4>, CLOUDFRONT_KEY_PAIR_ID=<K… from step 3>,
+#      RUNPOD_* if staging separates (SHIZZLE_NODE_TOKENS stays empty)
+install -m 600 /path/to/cf-staging-private-key.pem secrets/cloudfront_private_key.pem
 tailscale serve --bg --https=8443 http://127.0.0.1:18080
-tailscale serve --bg --https=8444 http://127.0.0.1:18081   # admin; also add
-#   SHIZZLE_ADMIN_PROXY_SECRET to /opt/shizzle/prod/.env and recreate caddy:
-#   cd /opt/shizzle/prod && docker compose -p shizzle -f compose.prod.yml up -d --force-recreate --no-deps caddy api
+tailscale serve --bg --https=8444 http://127.0.0.1:18081
 ```
 
-In GitHub (repository settings, not the production environment):
+Production's admin listener (`:8444`) exists only after a production release
+carrying the new `compose.prod.yml` and `Caddyfile.prod` has been deployed
+through the normal approved workflow — until then `tailscale serve …8444`
+fronts nothing on 18081. After such a release, also add
+`SHIZZLE_ADMIN_PROXY_SECRET` to `/opt/shizzle/prod/.env` and recreate the
+services:
 
-6. Add repository secrets `VPS_STAGING_HOST` (`72.60.173.171`),
-   `VPS_STAGING_SSH_KEY` (same key material as production unless a dedicated
-   account exists), `VPS_STAGING_SSH_HOST_KEY` (same pinned host key:
-   `ssh-keyscan -t ed25519 72.60.173.171`).
+```sh
+cd /opt/shizzle/prod && docker compose -p shizzle -f compose.prod.yml \
+  up -d --force-recreate --no-deps caddy api
+```
+
+In GitHub (repository settings → Environments — NOT the production
+environment):
+
+9. Create an environment named `staging` (optionally add a required reviewer
+   if staging deploys should pause for approval — see AUTOMATION.md §3b) and
+   add environment secrets `VPS_STAGING_HOST` (`72.60.173.171`),
+   `VPS_STAGING_SSH_KEY` (root key material — the same trust level as the
+   production deploy key, not a lesser one), `VPS_STAGING_SSH_HOST_KEY`
+   (same pinned host key: `ssh-keyscan -t ed25519 72.60.173.171`).
 
 Then dispatch the `deploy-staging` workflow with `master` (or any branch);
 it bootstraps postgres, migrates, starts, health-checks, and staging is
 live at `https://shizzle.tailfedd3b.ts.net:8443`. The player's API base is
 relative, so no application setting names the tailnet origin.
+
+Confirm media end to end once a track exists: from an authenticated browser
+tab on staging, copy a file URL out of
+`https://shizzle.tailfedd3b.ts.net:8443/api/tracks/<id>/manifest`, then
+
+```sh
+curl -so /dev/null -w '%{http_code}\n' -H 'Range: bytes=0-1023' '<signed-url>'
+```
+
+must print `206` (signed Range through the staging distribution; `403` means
+the bucket policy from step 5 or the key group from step 3 is wrong).
 
 ## Health and media acceptance
 

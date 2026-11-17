@@ -52,7 +52,10 @@ update, the new template is preserved pending reconciliation.
 
 `deploy-staging.yml` is a separate manual-dispatch path (any branch or
 commit) onto the staging stack that lives beside production on the same VPS;
-see §3b. It never touches the production project or the public site.
+see §3b. Only the image and the player bundle come from the chosen ref; the
+root-executed deploy assets come from the default branch, and staging deploys
+run under the `staging` GitHub environment. It never touches the production
+project or the public site.
 
 ## 2. Secrets inventory
 
@@ -62,9 +65,9 @@ see §3b. It never touches the production project or the public site.
 | `VPS_HOST` | Environment `production` | Hostname/IP the deploy targets | Update when the box moves |
 | `VPS_SSH_HOST_KEY` | Environment `production` | Pinned ed25519 host key so deploy-vps verifies the box (no `StrictHostKeyChecking=no`) | Regenerate with `ssh-keyscan -t ed25519 <host>`; update after any host key change |
 | `RUNPOD_API_KEY` | Repo | RunPod API access for `runpod-repoint.yml` (create templates and update endpoints); image publishing uses `GITHUB_TOKEN` | Rotate in the RunPod console, update the repo secret |
-| `VPS_STAGING_HOST` | Repo | Hostname/IP the staging deploy (`deploy-staging.yml`) targets; normally the same VPS as production | Update when the box moves |
-| `VPS_STAGING_SSH_KEY` | Repo | SSH private key for the staging deploy SSH user (today the same root key as production) | Rotate like `VPS_SSH_KEY`, keeping the authorized_keys entry in sync |
-| `VPS_STAGING_SSH_HOST_KEY` | Repo | Pinned ed25519 host key for the staging deploy (same value as `VPS_SSH_HOST_KEY` unless a separate account/host is introduced) | Regenerate with `ssh-keyscan -t ed25519 <host>` |
+| `VPS_STAGING_HOST` | Environment `staging` | Hostname/IP the staging deploy (`deploy-staging.yml`) targets; normally the same VPS as production | Update when the box moves |
+| `VPS_STAGING_SSH_KEY` | Environment `staging` | SSH private key for the staging deploy (today root on the shared production host — the same trust level as `VPS_SSH_KEY`, not a lesser one; a dedicated restricted identity is future hardening, see §3b) | Rotate like `VPS_SSH_KEY`, keeping the authorized_keys entry in sync |
+| `VPS_STAGING_SSH_HOST_KEY` | Environment `staging` | Pinned ed25519 host key for the staging deploy (same value as `VPS_SSH_HOST_KEY` unless a separate account/host is introduced) | Regenerate with `ssh-keyscan -t ed25519 <host>` |
 
 Runtime secrets (passcode, `POSTGRES_*`, `AWS_*`, CloudFront private key) are
 NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
@@ -174,26 +177,56 @@ two host-side `tailscale serve` frontings (§3c).
 
 **Deploying:** run the `deploy-staging` workflow (Actions → deploy-staging →
 Run workflow) with a branch or commit SHA — this is how a pull-request branch
-gets onto staging before merge. It resolves the ref to a full SHA, reuses
-`api-image.yml` to build and publish the digest-pinned image for that ref,
-builds the player, ships `compose.staging.yml`, `Caddyfile.staging`,
-`deploy-staging.sh` and the player tarball over SSH (pinned host key), and
-runs `deploy-staging.sh` on the box: pull, `config -q`, `up -d --wait
-postgres`, `alembic upgrade head`, recreate api/orchestrator/caddy, then a
-health check on `127.0.0.1:18080/api/health`. It uses repository secrets
-(`VPS_STAGING_HOST/SSH_KEY/SSH_HOST_KEY`), never the `production`
-environment, is not callable from `ci.yml`, and its script refuses to operate
-on `/opt/shizzle/prod` or the `shizzle` project. The first run against an
-empty directory bootstraps the database (there is deliberately no prior-image
-requirement, unlike production).
+gets onto staging before merge. Job split and what it means for trust:
 
-**Rollback:** staging rollback is deliberately simpler — on any failure after
-the snapshot the script restores the prior `.env`/compose/Caddyfile/player and
-either restarts the previous image or stops the application services; the
-database is never downgraded. An old image may therefore start against a
-newer schema on staging; that is acceptable there (redeploy the newer ref to
-repair) and is the main way staging rollback differs from the production
-transaction in §3.
+- `resolve` turns the ref into a full SHA; `build-image` reuses `api-image.yml`
+  for the digest-pinned image; `build-player` builds the player **from the
+  chosen ref** in its own job that holds no VPS credentials and uploads the
+  bundle as an artifact.
+- `deploy` checks out the **default branch** — never the chosen ref — and
+  ships `deploy-staging.sh`, `compose.staging.yml`, `Caddyfile.staging` and
+  the player artifact over SSH (pinned host key), then runs the transaction
+  on the box: pull, `config -q`, `up -d --wait postgres`,
+  `alembic upgrade head`, recreate api/orchestrator/caddy, health check on
+  `127.0.0.1:18080/api/health`. So the only things a feature branch controls
+  are its image contents and its player bundle; the root-executed deploy
+  assets come from the reviewed default branch, and a change to
+  `deploy-staging.sh`, `compose.staging.yml` or `Caddyfile.staging` reaches
+  staging only after it is merged.
+- `deploy` uses the GitHub environment **`staging`**, which holds the
+  `VPS_STAGING_HOST/SSH_KEY/SSH_HOST_KEY` secrets. Configure a required
+  reviewer on that environment if staging deploys should pause for approval;
+  by default they do not. The workflow is not callable from `ci.yml`, and its
+  script always refuses `/opt/shizzle/prod` (and anything under it) and the
+  `shizzle` project, overridable by nothing.
+
+**The boundary that does NOT exist, stated plainly:** the chosen ref's image
+still executes on the production VPS host (inside the staging project, with
+CPU/memory limits but ordinary Docker isolation), and the staging SSH
+identity is **root** on the same box that runs production. Reusing the
+production key material is therefore exactly the same trust level as a
+production deploy, not a lesser one — it is documented here as a known gap,
+not a safety claim. The supported hardening path is a dedicated, restricted
+staging SSH identity (and ideally a staging-only Docker context such as a
+rootless daemon) so a compromised deploy cannot read `/opt/shizzle/prod/.env`
+or touch production volumes; that is future work, and until it exists a
+malicious chosen ref running as the staging image can reach the host's
+Docker socket-adjacent surface like any container on that box.
+
+The first run against a fresh directory (`.env` plus `incoming/` assets)
+bootstraps the database — prior `compose.staging.yml`/`Caddyfile`/`player`
+can be absent on that first run only, and a failed first deploy stops the
+started services and returns the directory to its fresh state.
+
+**Rollback:** staging rollback is deliberately simpler — on any failure the
+script first stops the failed services while the failed release's own config
+is still active, then restores the prior `.env`/compose/Caddyfile/player and
+either restarts the previous image (existing releases) or returns a fresh
+directory to its fresh state (first deploy); a stop failure is surfaced, not
+swallowed. The database is never downgraded. An old image may therefore
+start against a newer schema on staging; that is acceptable there (redeploy
+the newer ref to repair) and is the main way staging rollback differs from
+the production transaction in §3.
 
 **Data and work isolation:**
 
@@ -425,11 +458,11 @@ Current checked-in limits:
 - RunPod repoint tests mock the API, so live template/endpoint API behavior
   requires a separate authorized validation.
 - `deploy/vps/tests/test_staging_stack.sh` (staging transaction, compose
-  publication/limits, Caddy admin routing) passes its stubbed parts anywhere
-  and its Docker-gated parts where a daemon answers, but it is **not yet
-  wired into a required CI check** — `ci.yml` was intentionally left
-  untouched when the suite was added; add it to the library job's
-  automation-contracts step to make it required.
+  publication/limits, Caddy admin routing) runs in the `library` job beside
+  the release-transaction suite. Its stubbed parts run anywhere; its
+  Docker-gated parts (compose config JSON, `caddy validate`, live
+  admin-routing probes over stub upstreams) execute only where a Docker
+  daemon answers, which includes the CI runners.
 - The worker-image workflow lacks a concurrency group and uses version-tagged
   Actions, unlike the SHA-pinned application image/deploy workflows.
 - See [INVARIANTS.md](INVARIANTS.md) for explicitly unguarded contracts.
@@ -458,8 +491,8 @@ Set up these external dependencies before the first automated deployment:
    endpoint activation are separate operations.
 7. Bring up staging when wanted: create the staging S3 bucket + CloudFront
    distribution and key group (file-scoped signed URLs, E5), prepare
-   `/opt/shizzle/staging` from `deploy/vps/.env.staging.example`, add the
-   three `VPS_STAGING_*` repository secrets, run the two
-   `tailscale serve` commands in §3c, then dispatch `deploy-staging`. The
-   full ordered checklist lives in
+   `/opt/shizzle/staging` from `deploy/vps/.env.staging.example`, create the
+   `staging` GitHub environment and add the three `VPS_STAGING_*`
+   environment secrets there, run the two `tailscale serve` commands in §3c,
+   then dispatch `deploy-staging`. The full ordered checklist lives in
    [deploy/vps/README.md](../deploy/vps/README.md#staging-stack).
