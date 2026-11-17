@@ -18,6 +18,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from moto import mock_aws
 
+from shizzle_server.api import admin as admin_module
 from shizzle_server.api.media import _s3_client
 from shizzle_server.db.models import (
     Job,
@@ -52,6 +53,26 @@ async def admin_client(settings):
 @pytest_asyncio.fixture
 async def node_repo(session_factory) -> NodeRepository:
     return NodeRepository(session_factory)
+
+
+_REAL_HEAD_BLOCKING = admin_module._head_blocking
+
+
+@pytest.fixture(autouse=True)
+def isolate_admin_s3(monkeypatch):
+    """Keep every admin storage check offline and its client cache isolated.
+
+    Tests exercising the moto or synthetic HEAD paths explicitly replace this
+    default. No ``verify=s3`` request may use or retain an unmocked AWS client.
+    """
+    _s3_client.cache_clear()
+
+    def _absent(_settings, _key):
+        return admin_module._HeadOutcome(None, None)
+
+    monkeypatch.setattr(admin_module, "_head_blocking", _absent)
+    yield
+    _s3_client.cache_clear()
 
 
 async def _make_job(app, *, source_type: SourceType = SourceType.upload, **kwargs):
@@ -491,20 +512,6 @@ async def test_settings_count_jobs_at_runpod(admin_client, session_factory):
 # --- ?verify=s3 (moto) ------------------------------------------------------------------
 
 
-@pytest.fixture
-def aws(monkeypatch):
-    for var, value in {
-        "AWS_ACCESS_KEY_ID": "testing" * 5,
-        "AWS_SECRET_ACCESS_KEY": "testing" * 6,
-        "AWS_SESSION_TOKEN": "testing",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "AWS_REGION": "us-east-1",
-    }.items():
-        monkeypatch.setenv(var, value)
-    for var in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_PROFILE"):
-        monkeypatch.delenv(var, raising=False)
-
-
 async def _published_job(app, session_factory):
     """A job claimed, published (track row + ready) with an active generation."""
     job = await app.state.job_repo.create_job(
@@ -542,9 +549,10 @@ async def _published_job(app, session_factory):
 
 @pytest.mark.asyncio
 async def test_verify_s3_reports_ok_missing_and_mismatch(
-    admin_client, aws, session_factory
+    admin_client, fake_aws_credentials, session_factory, monkeypatch
 ):
     with mock_aws():
+        monkeypatch.setattr(admin_module, "_head_blocking", _REAL_HEAD_BLOCKING)
         await _run_verify_s3_checks(admin_client, session_factory)
 
 
