@@ -26,6 +26,10 @@ on runtime changes.
   for finished `shizzle-browser-v1` packages and its VPS ingest (issue #45).
 - [Worker nodes](WORKER-NODES.md): plan for the Mac mini and Dell 9530 as
   first-choice download and separation executors, RunPod as fallback.
+- [Staging](../deploy/vps/README.md#staging-stack): a tailnet-only copy of the
+  site on the same VPS (project `shizzle-staging`, loopback-only listeners
+  fronted by `tailscale serve`), deployed per branch or commit by the manual
+  `deploy-staging` workflow — see [Automation §3b–3c](AUTOMATION.md).
 - [Lossless handoff](../interfaces/lossless-stem-v1/spec.md) and
   [browser delivery](../interfaces/shizzle-browser-v1/spec.md): format contracts.
 

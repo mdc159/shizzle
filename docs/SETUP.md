@@ -63,6 +63,7 @@ The template is not a live deployment snapshot and contains no usable secrets.
 | Variables | Used for |
 |---|---|
 | `SHIZZLE_PASSCODE`, `TOKEN_SIGNING_SECRET`, `AUTH_VERSION` | Device tokens; empty passcode disables auth. Changing the passcode revokes existing tokens. |
+| `SHIZZLE_ADMIN_PROXY_SECRET` | Admin gate: `/api/admin/*` answers 404 unless Caddy (tailnet-only listener) injects `X-Shizzle-Admin` with this value; empty keeps admin fail-closed everywhere |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Compose Postgres and constructed service DSNs |
 | `DATABASE_URL`, `DATA_DIR` | Native API/orchestrator database and shared job working directory |
 | `SHIZZLE_PIPELINE=cloud`, `SHIZZLE_EMBEDDED_ORCHESTRATOR=false` | Production cloud stages and separate orchestrator process |
@@ -110,6 +111,19 @@ Use `docker compose -p shizzle -f compose.prod.yml` from the production release
 directory for inspection. Do not substitute `up` for the release transaction:
 it does not take a rollback snapshot or migrate the database. API and orchestrator
 must use the same image and shared data volume.
+
+## Staging commissioning
+
+A staging copy of the whole site runs beside production on the same VPS,
+reachable only from the tailnet (`https://shizzle.tailfedd3b.ts.net:8443`;
+an admin listener for production answers on `:8444`). It has its own `.env`
+template (`deploy/vps/.env.staging.example`), its own S3 bucket and CloudFront
+distribution (file-scoped signed URLs, no application change), real RunPod
+separation, and no worker nodes (`SHIZZLE_NODE_TOKENS` stays empty, so URL
+jobs cannot complete there until a node agent is repointed). Deploys are the
+manual `deploy-staging` workflow over any branch or commit. Bring-up order
+and undo steps: [VPS setup — staging](../deploy/vps/README.md#staging-stack)
+and [Automation §3b–3c](AUTOMATION.md).
 
 ## Ingesting a dropped package
 
