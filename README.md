@@ -29,7 +29,7 @@ off the job fails with `YTDLP_BLOCKED`. The player offers file upload.
 `ingest/` documents that boundary; executable ingestion lives in
 `library/src/shizzle_server/api/routes.py` and `orchestrator/`.
 
-Four pages share the passcode gate: `/` plays and mixes tracks, `/remote`
+Three pages share the passcode gate: `/` plays and mixes tracks, `/remote`
 controls a playing browser, and `/dashboard` shows job stages and events.
 The dashboard polls job records and API liveness; it does not query the RunPod
 pool or show a measured capacity model. `/admin` is the owner's console

@@ -28,7 +28,7 @@ local job directory.
 | Source / mode | Current behavior |
 | --- | --- |
 | Upload, `SHIZZLE_PIPELINE=cloud` | `pending → downloading → dispatched → verifying → publishing → ready`, subject to configuration and validation gates. |
-| URL submission | A worker node downloads one YouTube video and proves it with `sources/<track>/source.json` (A12); separation then follows the routing policy (docs/WORKER-NODES.md). With node routing off the job fails `YTDLP_BLOCKED`. |
+| URL submission | A worker node downloads one YouTube video and proves it with `sources/<track>/source.json` (A12); separation then follows the routing policy (docs/WORKER-NODES.md). With node routing `off`, or outside `SHIZZLE_PIPELINE=cloud`, the job fails `YTDLP_BLOCKED`. |
 | Local reference pipeline | Runs local FFmpeg/Demucs through verification; publication of its `local/` location is refused by invariant C7. It is not an end-to-end library startup path. |
 | Test pipeline | Deterministic fault-injection stages; requires `SHIZZLE_ALLOW_TEST_PIPELINE=1`, produces no playable media, and publication is refused. |
 
