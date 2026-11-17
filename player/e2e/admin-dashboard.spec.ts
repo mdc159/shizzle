@@ -353,4 +353,80 @@ test.describe('Admin page (/admin)', () => {
     ).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Connect to Tailscale and refresh.')).toBeVisible();
   });
+
+  test('renders a null dispatch identity without a page error', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/jobs/*', (route) =>
+      route.fulfill({
+        json: {
+          ...detailPayload(false),
+          dispatchAttempt: { idempotencyKey: null, attemptPrefix: null, runpodJobId: null },
+        },
+      })
+    );
+    await page.goto('/admin');
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+
+    const detail = page.locator('section[aria-label="Job detail"]');
+    await expect(detail).toContainText('attempt key unknown / legacy');
+    await expect(detail.getByText('runpod_dispatch_started')).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('renders a job with no events, assignments, track or evidence', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/jobs/*', (route) =>
+      route.fulfill({
+        json: { ...detailPayload(false), events: [], assignments: [], track: null, evidence: [] },
+      })
+    );
+    await page.goto('/admin');
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+
+    const detail = page.locator('section[aria-label="Job detail"]');
+    await expect(detail.getByText('No job events recorded.')).toBeVisible();
+    await expect(detail.getByText('No node assignments.')).toBeVisible();
+    await expect(detail.getByText('No track row.')).toBeVisible();
+    await expect(detail.getByText('No evidence checks recorded.')).toBeVisible();
+    expect(pageErrors).toEqual([]);
+  });
+
+  test('renders an evidence item of every status', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    const pageErrors: string[] = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    routeAdminApi(page, captured);
+    const statuses = ['ok', 'missing', 'mismatch', 'not_yet', 'unknown'] as const;
+    await page.route('**/api/admin/jobs/*', (route) =>
+      route.fulfill({
+        json: {
+          ...detailPayload(false),
+          evidence: statuses.map((status) => ({
+            stage: 'dispatched',
+            name: `evidence_${status}`,
+            expected: `expected ${status}`,
+            observed: `observed ${status}`,
+            proof: 'mocked evidence',
+            checkedAt: NOW(),
+            status,
+          })),
+        },
+      })
+    );
+    await page.goto('/admin');
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+
+    const detail = page.locator('section[aria-label="Job detail"]');
+    for (const status of statuses) {
+      await expect(detail.getByText(`evidence_${status}`)).toBeVisible();
+      await expect(detail.getByText(`dispatched · ${status}`, { exact: true })).toBeVisible();
+    }
+    expect(pageErrors).toEqual([]);
+  });
 });

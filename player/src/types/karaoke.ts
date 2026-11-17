@@ -183,33 +183,56 @@ export interface AdminEvent {
   createdAt: string;
 }
 
+export interface AdminJobColumns {
+  jobId: string;
+  sourceType: string;
+  title?: string | null;
+  artist?: string;
+  status: JobStatus['status'];
+  runpodJobId?: string | null;
+  executor?: string | null;
+  workerPhase?: string | null;
+  workerHeartbeatAt?: string | null;
+  attempt: number;
+  idempotencyKey: string;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
+  nextRetryAt?: string | null;
+  profileVersion: number;
+  inputChecksum?: string | null;
+  outputChecksums?: Record<string, unknown> | null;
+  errorCode?: string | null;
+  errorDetail?: string | null;
+  stageTimings?: Record<string, unknown> | null;
+  trackId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminTrack {
+  id: string;
+  title: string;
+  artist: string;
+  durationSeconds: number;
+  s3Prefix: string;
+  generation: number;
+  manifestKey: string;
+  integrity?: Record<string, unknown> | null;
+  deletedAt?: string | null;
+  createdAt: string;
+}
+
 export interface AdminJobDetail {
-  job: AdminJobRow & {
-    idempotencyKey: string;
-    leaseExpiresAt?: string | null;
-    profileVersion: number;
-    inputChecksum?: string | null;
-    outputChecksums?: Record<string, unknown> | null;
-    stageTimings?: Record<string, number> | null;
-  };
+  job: AdminJobColumns;
   derivedTrackId: string;
   dispatchAttempt: {
-    idempotencyKey: string;
+    idempotencyKey: string | null;
     attemptPrefix?: string | null;
     runpodJobId?: string | null;
   };
   events: AdminEvent[];
   assignments: AdminAssignment[];
-  track?: {
-    id: string;
-    title: string;
-    artist: string;
-    durationSeconds: number;
-    s3Prefix: string;
-    generation: number;
-    manifestKey: string;
-    deletedAt?: string | null;
-  } | null;
+  track?: AdminTrack | null;
   evidence: EvidenceItem[];
 }
 
@@ -234,9 +257,10 @@ export interface AdminNode {
 }
 
 export interface AdminSettings {
-  nodeRouting: { value: string | null; source: 'database' | 'environment'; error?: string | null };
+  // Stored runtime JSON can be invalid; the API reports it with `error`.
+  nodeRouting: { value: unknown; source: 'database' | 'environment'; error?: string | null };
   runpodMaxConcurrent: {
-    value: number | null;
+    value: unknown;
     source: 'database' | 'environment';
     error?: string | null;
   };

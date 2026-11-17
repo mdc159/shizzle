@@ -121,6 +121,8 @@ const jobTitle = (job: Pick<AdminJobRow, 'title' | 'jobId'>) => job.title || job
 const executorLabel = (executor?: string | null) =>
   executor?.startsWith('node:') ? executor.slice('node:'.length) : executor;
 
+const limitDraftValue = (value: unknown) => (value == null ? '' : String(value));
+
 const sortFailedFirst = (jobs: AdminJobRow[]): AdminJobRow[] =>
   [...jobs].sort((a, b) => {
     const aFailed = a.status === 'failed' ? 0 : 1;
@@ -191,11 +193,7 @@ export const AdminPage: React.FC = () => {
       if (nodesResult.status === 'fulfilled') setNodes(nodesResult.value.nodes);
       if (settingsResult.status === 'fulfilled') {
         setSettings(settingsResult.value);
-        setLimitDraft(
-          settingsResult.value.runpodMaxConcurrent.value === null
-            ? ''
-            : String(settingsResult.value.runpodMaxConcurrent.value)
-        );
+        setLimitDraft(limitDraftValue(settingsResult.value.runpodMaxConcurrent.value));
       }
       setLoaded(true);
     } finally {
@@ -241,7 +239,7 @@ export const AdminPage: React.FC = () => {
     try {
       const next = await putAdminSettings(update);
       setSettings(next);
-      setLimitDraft(next.runpodMaxConcurrent.value === null ? '' : String(next.runpodMaxConcurrent.value));
+      setLimitDraft(limitDraftValue(next.runpodMaxConcurrent.value));
       setRoutingMessage('Saved. New jobs pick it up on the next pass.');
     } catch (err) {
       setRoutingMessage(err instanceof Error ? `Save failed: ${err.message}` : 'Save failed');
@@ -250,7 +248,8 @@ export const AdminPage: React.FC = () => {
     }
   };
 
-  const effectiveRouting = settings?.nodeRouting.value ?? null;
+  const storedRouting = settings?.nodeRouting.value;
+  const effectiveRouting = typeof storedRouting === 'string' ? storedRouting : null;
   const sortedJobs = useMemo(() => sortFailedFirst(jobs), [jobs]);
 
   return (
@@ -604,7 +603,7 @@ const JobDetailSection: React.FC<{
         {detail && (
           <span className="ml-2 text-xs text-zinc-500">
             track {detail.derivedTrackId.slice(0, 8)} · attempt key{' '}
-            {detail.dispatchAttempt.idempotencyKey.slice(-4)}
+            {detail.dispatchAttempt.idempotencyKey?.slice(-4) || 'unknown / legacy'}
           </span>
         )}
       </h2>
@@ -622,27 +621,31 @@ const JobDetailSection: React.FC<{
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
             Timeline
           </h3>
-          <ol className="space-y-1.5">
-            {detail.events.map((event, index) => {
-              const previous = detail.events[index - 1];
-              return (
-                <li key={event.id} className="rounded border border-zinc-800 p-2 text-sm">
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="font-medium text-zinc-300">{event.event}</span>
-                    <span className="text-xs text-zinc-600">
-                      {previous && <span className="mr-2 text-zinc-700">{gap(previous.createdAt, event.createdAt)}</span>}
-                      {new Date(event.createdAt).toLocaleTimeString()}
-                    </span>
-                  </div>
-                  {event.detail && Object.keys(event.detail).length > 0 && (
-                    <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs text-zinc-500">
-                      {JSON.stringify(event.detail)}
-                    </pre>
-                  )}
-                </li>
-              );
-            })}
-          </ol>
+          {detail.events.length === 0 ? (
+            <p className="text-sm text-zinc-600">No job events recorded.</p>
+          ) : (
+            <ol className="space-y-1.5">
+              {detail.events.map((event, index) => {
+                const previous = detail.events[index - 1];
+                return (
+                  <li key={event.id} className="rounded border border-zinc-800 p-2 text-sm">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="font-medium text-zinc-300">{event.event}</span>
+                      <span className="text-xs text-zinc-600">
+                        {previous && <span className="mr-2 text-zinc-700">{gap(previous.createdAt, event.createdAt)}</span>}
+                        {new Date(event.createdAt).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    {event.detail && Object.keys(event.detail).length > 0 && (
+                      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs text-zinc-500">
+                        {JSON.stringify(event.detail)}
+                      </pre>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
           <h3 className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-zinc-500">
             Assignments
           </h3>
@@ -697,32 +700,46 @@ const JobDetailSection: React.FC<{
               ))}
             </ul>
           )}
+          <h3 className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Track
+          </h3>
+          {detail.track ? (
+            <p className="text-sm text-zinc-400">
+              {detail.track.title} · generation {detail.track.generation} · {detail.track.id}
+            </p>
+          ) : (
+            <p className="text-sm text-zinc-600">No track row.</p>
+          )}
           {releaseError && <p className="mt-2 text-xs text-red-400">{releaseError}</p>}
         </div>
         <div>
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
             Evidence {verifyS3 && '(with storage checks)'}
           </h3>
-          <ul className="space-y-1">
-            {detail.evidence.map((item) => {
-              const Icon = EVIDENCE_ICONS[item.status];
-              return (
-                <li key={`${item.stage}-${item.name}`} className="rounded border border-zinc-800 p-2 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <Icon className={cn('h-4 w-4 shrink-0', EVIDENCE_COLORS[item.status])} />
-                      <span className="font-medium text-zinc-300">{item.name}</span>
-                    </span>
-                    <span className="text-[11px] uppercase tracking-wide text-zinc-600">
-                      {item.stage} · {item.status}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 text-xs text-zinc-500">expected: {item.expected}</p>
-                  <p className="text-xs text-zinc-400">observed: {item.observed}</p>
-                </li>
-              );
-            })}
-          </ul>
+          {detail.evidence.length === 0 ? (
+            <p className="text-sm text-zinc-600">No evidence checks recorded.</p>
+          ) : (
+            <ul className="space-y-1">
+              {detail.evidence.map((item) => {
+                const Icon = EVIDENCE_ICONS[item.status];
+                return (
+                  <li key={`${item.stage}-${item.name}`} className="rounded border border-zinc-800 p-2 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <Icon className={cn('h-4 w-4 shrink-0', EVIDENCE_COLORS[item.status])} />
+                        <span className="font-medium text-zinc-300">{item.name}</span>
+                      </span>
+                      <span className="text-[11px] uppercase tracking-wide text-zinc-600">
+                        {item.stage} · {item.status}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-zinc-500">expected: {item.expected}</p>
+                    <p className="text-xs text-zinc-400">observed: {item.observed}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       </div>
     )}
