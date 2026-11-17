@@ -668,14 +668,18 @@ def _build_db_evidence(
     selected_key = _selected_dispatch_key(job, events)
     selected_prefix = _selected_package_prefix(job, events, stages)
     current_retry_key = f"{job.id.hex}:{job.attempt}"
+    track_id = track_id_for_job(job.id)
     expected_prefix = (
-        cloud.attempt_prefix(track_id_for_job(job.id), selected_key)
+        cloud.attempt_prefix(track_id, selected_key)
         if selected_key is not None
         else None
     )
     prefix_matches = (
         selected_prefix is not None and selected_prefix == expected_prefix
     )
+    # The pre-attempts layout is supported for legacy transitions, but its
+    # base prefix cannot prove which keyed execution wrote the package.
+    legacy_prefix = selected_prefix == cloud.separation_prefix(track_id)
     if "dispatched" not in stages:
         observed = "job has not reached dispatched"
         status: EvidenceStatus = "not_yet"
@@ -687,6 +691,9 @@ def _build_db_evidence(
         if recovered_key != selected_key:
             observed += f"; expected the selected dispatch {selected_key}"
             status = "mismatch"
+        elif legacy_prefix:
+            observed += "; legacy base package prefix has no attempt binding"
+            status = "unknown"
         elif not prefix_matches:
             observed += f"; selected package prefix {selected_prefix} belongs to another key"
             status = "mismatch"
@@ -701,6 +708,9 @@ def _build_db_evidence(
         if confirmed_key != selected_key:
             observed += f"; expected the selected dispatch {selected_key}"
             status = "mismatch"
+        elif legacy_prefix:
+            observed += "; legacy base package prefix has no attempt binding"
+            status = "unknown"
         elif not prefix_matches:
             observed += f"; selected package prefix {selected_prefix} belongs to another key"
             status = "mismatch"
@@ -709,11 +719,13 @@ def _build_db_evidence(
     elif pending is not None:
         pending_key = str(_event_detail(pending).get("idempotency_key"))
         observed = f"reservation key={pending_key} unconfirmed"
-        status = (
-            "ok"
-            if pending_key == selected_key and prefix_matches
-            else "mismatch"
-        )
+        if pending_key != selected_key:
+            status = "mismatch"
+        elif legacy_prefix:
+            observed += "; legacy base package prefix has no attempt binding"
+            status = "unknown"
+        else:
+            status = "ok" if prefix_matches else "mismatch"
     else:
         observed = "no dispatch recorded yet (waiting for a node or the RunPod cap)"
         status = "not_yet"

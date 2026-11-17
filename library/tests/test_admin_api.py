@@ -866,6 +866,11 @@ async def test_legacy_verifying_transition_uses_the_base_package_prefix(
     assert body["dispatchAttempt"]["attemptPrefix"] == cloud.separation_prefix(
         track_id_for_job(job.id)
     )
+    identity = next(item for item in body["evidence"] if item["name"] == "dispatch_identity")
+    # The supported legacy layout has no attempts/<hash> segment, so it cannot
+    # prove which keyed execution wrote the package; that is not a mismatch.
+    assert identity["status"] == "unknown"
+    assert "no attempt binding" in identity["observed"]
 
 
 async def test_failed_during_verifying_and_publishing_use_the_selected_prefix(
