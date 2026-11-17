@@ -356,8 +356,8 @@ STUB_CADDY="$TMP/stub-api.Caddyfile"
 cat > "$STUB_CADDY" <<'EOF'
 :8001 {
 	@admin header X-Shizzle-Admin test-admin-secret
-	respond @admin 209
-	respond 200
+	respond @admin "admin" 209
+	respond "no-admin" 200
 }
 EOF
 BEHAVIOR_PROD="$TMP/Caddyfile.prod.behavior"
