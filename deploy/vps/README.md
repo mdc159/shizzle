@@ -102,6 +102,10 @@ a list to reconcile against current `Settings`; configure the passcode, token
 signing secret, public origin, Postgres values, S3 bucket/credentials, and
 CloudFront domain/key-pair identity. Both application containers require the
 same `SHIZZLE_API_IMAGE`. Use a retained, published tag-plus-digest reference.
+On any host other than the current VPS, set `SHIZZLE_PUBLIC_IP` in `.env` to
+that host's public IPv4 address: Caddy publishes 80 and 443 on that address
+only, the default is the current VPS (`72.60.173.171`), and `config -q` does
+not catch an address the host does not have; `up -d` then fails to bind.
 Production's Postgres and appdata are persistent named volumes.
 
 The current Compose file requires the external volume
@@ -151,6 +155,13 @@ browser/relay test harness. Only `compose.prod.yml` is the production stack.
 
 - Preserve the Caddy data volume across recreates.
 - Keep Postgres private; only Caddy should publish public ports.
+- Caddy publishes 80 and 443 on the public address only
+  (`SHIZZLE_PUBLIC_IP`, default `72.60.173.171`), not on every address.
+  Tailscale Serve on the same host uses port 443 of the tailnet address and
+  takes it first after a reboot; a `0.0.0.0:443` publish then fails with
+  `address already in use` and the site stays down until Caddy is recreated
+  by hand. After changing either side, reboot the host and confirm the site
+  returns unaided.
 - Docker port publishing bypasses host firewall filtering unless explicitly
   constrained.
 - Migrate routine deployment away from root access when a tested replacement
