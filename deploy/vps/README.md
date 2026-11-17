@@ -287,35 +287,53 @@ because it is scoped to the distribution ARN):
 7. If staging will separate uploads, give the RunPod endpoint worker's IAM
    principal exactly the S3 access the worker code performs on the staging
    bucket (derived from `stemsplit/s3_ops.py` and
-   `stemsplit/lossless_handler.py`): it reads the job source
-   (`head_object` for the size probe, then `download_file`/GetObject); writes
-   the attempt package under
+   `stemsplit/lossless_handler.py`): it reads the job source (boto3
+   `head_object` for the size probe, then `download_file`); writes the
+   attempt package under
    `tracks/<track>/1/separation/attempts/<sha256>/` — conditional receipts
    and handoff (`put_object` with `IfNoneMatch`/`IfMatch`), stems via
    multipart `upload_file` (Create/UploadPart/Complete are all authorized by
    `s3:PutObject`, abort needs its own action), and it re-reads its own
-   receipt/handoff and `head_object`s uploaded stems to verify ETags:
+   receipt/handoff and HEADs uploaded stems to verify ETags. There is no
+   `s3:HeadObject` IAM action: every HEAD above is authorized by
+   `s3:GetObject`. `s3:ListBucket` (prefix-conditioned) is required on the
+   bucket itself: on a first attempt the handler GETs the absent
+   `handoff.json` to detect completion (lossless_handler.py `_is_not_found`
+   accepts only 404/NoSuchKey); without ListBucket S3 answers that probe
+   with 403, `_is_not_found` is false, and the handler re-raises — the first
+   attempt can never start:
    ```json
    {
      "Version": "2012-10-17",
      "Statement": [
        {
+         "Sid": "ListForAbsentHandoffAndSourceChecks",
+         "Effect": "Allow",
+         "Action": ["s3:ListBucket"],
+         "Resource": "arn:aws:s3:::shizzle-staging-media",
+         "Condition": {
+           "StringLike": {
+             "s3:prefix": ["sources/*", "tracks/*/1/separation/attempts/*"]
+           }
+         }
+       },
+       {
          "Sid": "ReadJobSources",
          "Effect": "Allow",
-         "Action": ["s3:GetObject", "s3:HeadObject"],
+         "Action": ["s3:GetObject"],
          "Resource": "arn:aws:s3:::shizzle-staging-media/sources/*"
        },
        {
          "Sid": "WriteSeparationAttempts",
          "Effect": "Allow",
-         "Action": ["s3:GetObject", "s3:HeadObject", "s3:PutObject", "s3:AbortMultipartUpload"],
+         "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
          "Resource": "arn:aws:s3:::shizzle-staging-media/tracks/*/1/separation/attempts/*"
        }
      ]
    }
    ```
-   (The worker never deletes; handoff.json lands last under `IfNoneMatch`,
-   invariant A1.)
+   (Object permissions stay prefix-scoped; the worker never deletes; handoff
+   .json lands last under `IfNoneMatch`, invariant A1.)
 8. Give the staging `.env` an IAM key (a new staging-only user is cleanest)
    allowed on the staging bucket only (`s3:*` on
    `arn:aws:s3:::shizzle-staging-media/*` plus `s3:ListBucket`).
@@ -365,15 +383,30 @@ environment):
    the environment's secrets; the branch rule is the one control such a run
    cannot edit. The workflow's dispatch-ref guard (it fails unless dispatched
    from the default branch) is a convenience that points at correct usage —
-   the rule is the control:
+   the rule is the control. The policy itself is configured on the
+   environment (PUT /repos/{owner}/{repo}/environments/staging with nested
+   JSON); individual branch rules are managed through
+   /deployment-branch-policies (plural), and the settings are read back
+   through the environment GET:
    ```sh
-   gh api -X PUT repos/mdc159/shizzle/environments/staging/deployment-branch-policy \
-     -F protected_branches=false -F custom_branch_policies=true
+   # Configure the policy. This is a create-or-update of the environment:
+   # if it already has reviewers or a wait timer you want to keep, read it
+   # first (the GET below) and include them in this same JSON.
+   gh api -X PUT repos/mdc159/shizzle/environments/staging --input - <<'EOF'
+   {"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+   EOF
+   # Allow exactly the default branch:
    gh api -X POST repos/mdc159/shizzle/environments/staging/deployment-branch-policies \
      -f name=master
-   # read it back (expect protected_branches=false, custom_branch_policies=true,
-   # and one policy branch: master):
-   gh api repos/mdc159/shizzle/environments/staging/deployment-branch-policy
+   # Verify the settings:
+   gh api repos/mdc159/shizzle/environments/staging --jq .deployment_branch_policy
+   # expect: {"custom_branch_policies":true,"protected_branches":false}
+   # Verify the actual default branch is the sole allowed rule (branch rules
+   # match branch/tag names by pattern, so any extra entry widens access):
+   gh api repos/mdc159/shizzle/environments/staging/deployment-branch-policies \
+     --jq '.branch_policies[] | "\(.id) \(.name)"'
+   # expect exactly one line naming master; remove any other rule by id:
+   gh api -X DELETE repos/mdc159/shizzle/environments/staging/deployment-branch-policies/<ID>
    ```
    A required reviewer on the environment is the optional stronger setting —
    every staging deploy then pauses for a human.

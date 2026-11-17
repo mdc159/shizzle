@@ -106,26 +106,79 @@ validate_archive_member_types() {
     echo "Refusing archive $archive: not a readable tar.gz" >&2
     return 1
   fi
-  bad=$(tar -tvzf "$archive" | awk '{print substr($1, 1, 1)}' | grep -vE '^[d-]$' | sort -u | tr '\n' ' ' || true)
+  # awk consumes the complete listing; no consumer exits early, so a valid
+  # large archive cannot die of SIGPIPE (statuses 141 0) under pipefail.
+  bad=$(tar -tvzf "$archive" | awk 'substr($1, 1, 1) != "d" && substr($1, 1, 1) != "-" { print substr($1, 1, 1) }' | sort -u | tr '\n' ' ')
   if [ -n "$bad" ]; then
     echo "Refusing archive $archive: non-regular member types present: $bad" >&2
     return 1
   fi
 }
 
+# Shared path validation: reject absolute member paths and every member
+# containing a '..' path component (including dist/../evil and deeper
+# variants, which a plain top-level prefix check would let through).
+# Applied to the player archive and to the rollback snapshot alike.
+validate_archive_paths() {
+  local archive=$1 verdict
+  verdict=$(tar -tzf "$archive" | awk '
+    /^\// { absolute = 1 }
+    {
+      n = split($0, comp, "/")
+      for (i = 1; i <= n; i++) if (comp[i] == "..") dotdot = 1
+    }
+    END {
+      if (absolute) print "absolute"
+      else if (dotdot) print "dotdot"
+      else print "ok"
+    }
+  ')
+  case "$verdict" in
+    ok) return 0 ;;
+    absolute) echo "Refusing archive $archive: absolute member paths present" >&2; return 1 ;;
+    dotdot) echo "Refusing archive $archive: '..' path components present" >&2; return 1 ;;
+    *) echo "Refusing archive $archive: unreadable listing" >&2; return 1 ;;
+  esac
+}
+
 # The player archive additionally must contain only dist/ at the top level
-# (this also rejects absolute and '..' member paths), and that top level must
-# be a real directory.
+# and that top level must be a real directory. The awk pass reads the WHOLE
+# listing (an early-exiting grep -q under pipefail turns a valid large
+# archive into 141 0 and a false refusal).
 validate_player_archive() {
-  local archive=$1 bad
+  local archive=$1 verdict
   validate_archive_member_types "$archive" || return 1
-  bad=$(tar -tzf "$archive" | grep -vE '^dist/' | head -n 3 | tr '\n' ' ' || true)
-  if [ -n "$bad" ]; then
-    echo "Refusing player archive: members outside dist/ (absolute path, '..', or wrong top level): $bad" >&2
-    return 1
-  fi
-  tar -tvzf "$archive" | grep -Eq '^d[^ ]*[[:space:]].*[[:space:]]dist/$' \
-    || { echo "Refusing player archive: top-level entry is not a real dist/ directory" >&2; return 1; }
+  validate_archive_paths "$archive" || return 1
+  verdict=$(tar -tvzf "$archive" | awk '
+    {
+      # Fields: perms owner/group size date time name... (rebuild the name so
+      # spaces survive).
+      name = $6
+      for (i = 7; i <= NF; i++) name = name " " $i
+      if (name !~ /^dist\//) outside = 1
+      if (substr($1, 1, 1) == "d" && name == "dist/") have_dist = 1
+    }
+    END {
+      if (outside) print "outside"
+      else if (!have_dist) print "no-dist-dir"
+      else print "ok"
+    }
+  ')
+  case "$verdict" in
+    ok) return 0 ;;
+    outside)
+      echo "Refusing player archive: members outside dist/ (wrong top level)" >&2
+      return 1
+      ;;
+    no-dist-dir)
+      echo "Refusing player archive: top-level entry is not a real dist/ directory" >&2
+      return 1
+      ;;
+    *)
+      echo "Refusing player archive: unreadable listing" >&2
+      return 1
+      ;;
+  esac
 }
 
 PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
@@ -179,7 +232,18 @@ restore_previous() {
     rm -rf -- "$restore_dir"
     return 1
   }
-  tar -xzf "$ROLLBACK_ARCHIVE" -C "$restore_dir" --no-same-owner --no-same-permissions 2>/dev/null || true
+  validate_archive_paths "$ROLLBACK_ARCHIVE" || {
+    echo "Rollback snapshot failed path validation; leaving the failed release in place for manual recovery" >&2
+    rm -rf -- "$restore_dir"
+    return 1
+  }
+  # A failed extraction restores nothing: report and leave manual recovery
+  # rather than moving a partial restore into place.
+  if ! tar -xzf "$ROLLBACK_ARCHIVE" -C "$restore_dir" --no-same-owner --no-same-permissions; then
+    echo "Rollback snapshot failed to extract; leaving the failed release in place for manual recovery" >&2
+    rm -rf -- "$restore_dir"
+    return 1
+  fi
   for f in .env compose.staging.yml Caddyfile; do
     if [ -e "$restore_dir/$f" ]; then
       mv -f -- "$restore_dir/$f" "$f"

@@ -392,6 +392,14 @@ with tarfile.open("crafted-player.tar.gz", "w:gz") as tf:
         add(tf, "dist/", b"", tarfile.DIRTYPE)
         add(tf, "dist/index.html", b"<html>")
         add(tf, "../evil", b"evil")
+    elif mode == "dotdot-inside":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/index.html", b"<html>")
+        add(tf, "dist/../evil", b"evil")
+    elif mode == "dotdot-deep":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/a/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/a/../../evil", b"evil")
     else:
         raise SystemExit("unknown mode")
 PY
@@ -407,12 +415,45 @@ PY
     after=$(dir_digest "$STG")
     [ "$before" = "$after" ] || { echo "staging directory changed after refusing $1" >&2; exit 1; }
     test ! -e "$STG/.staging-rollback.tar.gz"
+    # Refusal happens before any pull or Compose command: the stubbed docker
+    # must never have been invoked.
+    [ ! -s "$STG/docker.log" ] || { echo "docker was invoked while refusing $1" >&2; exit 1; }
   }
   refuse_crafted dist-link "non-regular member types"
   refuse_crafted link-inside "non-regular member types"
   refuse_crafted hardlink-inside "non-regular member types"
-  refuse_crafted absolute-member "members outside dist/"
-  refuse_crafted dotdot-member "members outside dist/"
+  refuse_crafted absolute-member "absolute member paths"
+  refuse_crafted dotdot-member "'..' path components"
+  refuse_crafted dotdot-inside "'..' path components"
+  refuse_crafted dotdot-deep "'..' path components"
+
+  # A valid LARGE archive must still deploy: the listing consumers read the
+  # whole stream, so a big regular archive cannot die of SIGPIPE (141 0) and
+  # be falsely refused under pipefail.
+  new_fixture large-archive
+  (cd "$STG/incoming" && "$PY_BIN" - <<'PY'
+import tarfile
+
+with tarfile.open("shizzle-player.tar.gz", "w:gz") as tf:
+    dist = tarfile.TarInfo("dist/")
+    dist.type = tarfile.DIRTYPE
+    tf.addfile(dist)
+    for i in range(2000):
+        data = ("asset-%04d" % i).encode()
+        ti = tarfile.TarInfo("dist/assets/f-%04d.js" % i)
+        ti.size = len(data)
+        tf.addfile(ti, __import__("io").BytesIO(data))
+    html = b"<html>ok</html>"
+    ti = tarfile.TarInfo("dist/index.html")
+    ti.size = len(html)
+    tf.addfile(ti, __import__("io").BytesIO(html))
+PY
+  )
+  run_deploy
+  grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$STG/.env"
+  grep -Fx "<html>ok</html>" "$STG/player/index.html"
+  [ "$(find "$STG/player/assets" -type f | wc -l)" -eq 2000 ]
+  test ! -e "$STG/.staging-rollback.tar.gz"
 else
   echo "NOTE: python3 unavailable; crafted-archive refusals NOT RUN"
 fi
