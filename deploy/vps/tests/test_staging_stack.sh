@@ -116,6 +116,24 @@ fi
 [ "$(count -F 'ref: ${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING")" = 1 ]
 grep -Fq 'ref: ${{ needs.resolve.outputs.target_sha }}' "$WORKFLOW_STAGING"
 grep -Fq 'name: staging' "$WORKFLOW_STAGING"
+# N2: the deploy job guards its dispatch ref (convenience check) before it
+# checks out the default branch; the environment rule is the real control.
+grep -Fq 'DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING"
+grep -Fq 'Dispatched from' "$WORKFLOW_STAGING"
+guard_line=$(grep -n 'Guard dispatch ref' "$WORKFLOW_STAGING" | cut -d: -f1)
+deploy_checkout_line=$(grep -n 'ref: ${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING" | cut -d: -f1)
+[ -n "$guard_line" ] && [ -n "$deploy_checkout_line" ] \
+  && [ "$guard_line" -lt "$deploy_checkout_line" ] \
+  || { echo "deploy job's dispatch-ref guard missing or out of order" >&2; exit 1; }
+# N1 (workflow side): the player build refuses non-regular output before the
+# artifact is made; the deploy script never extracts preserving owners/modes.
+grep -Fq 'Refuse non-regular player output' "$WORKFLOW_STAGING"
+grep -Fq -- '--no-same-owner' "$DEPLOY"
+grep -Fq -- '--no-same-permissions' "$DEPLOY"
+# N3: config persistence is off in both Caddyfiles — the env-substituted
+# admin secret must never land in /config/caddy/autosave.json (E3).
+grep -Fq $'\tpersist_config off' "$CADDY_PROD"
+grep -Fq $'\tpersist_config off' "$CADDY_STAGING"
 printf 'structural staging contracts passed\n'
 
 # --- Part 2: deploy-staging.sh transaction with stubbed docker/curl ----------
@@ -328,6 +346,76 @@ if run_deploy 2> "$TMP/stale.err"; then
   echo "deploy-staging accepted a stale release tree on a first deploy" >&2; exit 1
 fi
 grep -Fq 'Refusing first deployment with stale release file present: compose.staging.yml' "$TMP/stale.err"
+
+# --- N1: crafted player archives must be refused with the staging directory
+# left byte-identical. Archives are crafted with python3's tarfile so member
+# types (symlink, hard link) and hostile names (absolute, ..) are exact on
+# every filesystem — no symlink support required. A normal archive still
+# succeeding is proven by the success and fresh-success cases below.
+PY_BIN=""
+for py_candidate in python3 python; do
+  if "$py_candidate" -c 'import tarfile' >/dev/null 2>&1; then PY_BIN="$py_candidate"; break; fi
+done
+if [ -n "$PY_BIN" ]; then
+  dir_digest() {
+    (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+  }
+  craft_player_archive() {
+    "$PY_BIN" - "$1" <<'PY'
+import io, sys, tarfile
+
+mode = sys.argv[1]
+
+def add(tf, name, data=b"x", typ=tarfile.REGTYPE, link=""):
+    ti = tarfile.TarInfo(name)
+    ti.size = len(data)
+    ti.type = typ
+    ti.linkname = link
+    tf.addfile(ti, io.BytesIO(data) if typ == tarfile.REGTYPE else None)
+
+with tarfile.open("crafted-player.tar.gz", "w:gz") as tf:
+    if mode == "dist-link":
+        add(tf, "dist", typ=tarfile.SYMTYPE, link="/opt/shizzle/prod")
+    elif mode == "link-inside":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/index.html", b"<html>")
+        add(tf, "dist/link", typ=tarfile.SYMTYPE, link="index.html")
+    elif mode == "hardlink-inside":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/a", b"A")
+        add(tf, "dist/b", typ=tarfile.LNKTYPE, link="dist/a")
+    elif mode == "absolute-member":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/index.html", b"<html>")
+        add(tf, "/etc/evil", b"evil")
+    elif mode == "dotdot-member":
+        add(tf, "dist/", b"", tarfile.DIRTYPE)
+        add(tf, "dist/index.html", b"<html>")
+        add(tf, "../evil", b"evil")
+    else:
+        raise SystemExit("unknown mode")
+PY
+  }
+  refuse_crafted() {
+    new_fixture "craft-$1"
+    (cd "$STG/incoming" && craft_player_archive "$1" && mv -f crafted-player.tar.gz shizzle-player.tar.gz)
+    before=$(dir_digest "$STG")
+    if run_deploy 2> "$TMP/craft-$1.err"; then
+      echo "crafted archive ($1) was accepted" >&2; exit 1
+    fi
+    grep -Fq "$2" "$TMP/craft-$1.err"
+    after=$(dir_digest "$STG")
+    [ "$before" = "$after" ] || { echo "staging directory changed after refusing $1" >&2; exit 1; }
+    test ! -e "$STG/.staging-rollback.tar.gz"
+  }
+  refuse_crafted dist-link "non-regular member types"
+  refuse_crafted link-inside "non-regular member types"
+  refuse_crafted hardlink-inside "non-regular member types"
+  refuse_crafted absolute-member "members outside dist/"
+  refuse_crafted dotdot-member "members outside dist/"
+else
+  echo "NOTE: python3 unavailable; crafted-archive refusals NOT RUN"
+fi
 
 # Successful transaction over an existing release.
 new_fixture success
@@ -628,5 +716,16 @@ done
 [ "$(code http://127.0.0.1:18080/api/health)" = 209 ]
 [ "$(code http://127.0.0.1:18080/api/admin/x)" = 209 ]
 [ "$(code http://127.0.0.1:18080/ws/relay)" = 209 ]
+
+# N3: with persist_config off, the env-substituted admin secret must never be
+# written under /config or /data (the prod behavior container runs the
+# sed-derived copy of the real Caddyfile including its global options block;
+# the staging container runs the real file).
+for c in caddy-prod-behavior caddy-staging-behavior; do
+  found=$(docker exec "$c" sh -c 'grep -R -s test-admin-secret /config /data' 2>/dev/null || true)
+  [ -z "$found" ] || { echo "admin secret persisted under /config or /data in $c" >&2; exit 1; }
+  docker exec "$c" sh -c 'test ! -e /config/caddy/autosave.json' \
+    || { echo "autosave.json written in $c despite persist_config off" >&2; exit 1; }
+done
 
 printf 'docker-gated staging and admin-routing checks passed\n'

@@ -16,6 +16,13 @@
 #   SHIZZLE_ADMIN_PROXY_SECRET in /opt/shizzle/prod/.env, invariant E3).
 # - No explicit :80 server, so Caddy's standard HTTP->HTTPS redirect returns.
 
+# Global options: never persist the loaded config (including the env-
+# substituted admin secret) to /config/caddy/autosave.json — secrets stay in
+# the environment only (E3). Certificates in /data are unaffected.
+{
+	persist_config off
+}
+
 shizzle.systems, www.shizzle.systems {
 	tls {
 		protocols tls1.2 tls1.3

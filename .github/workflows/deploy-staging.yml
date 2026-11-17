@@ -13,9 +13,14 @@ name: deploy-staging
 #     from the repository's DEFAULT BRANCH, so a feature branch cannot make
 #     root execute its own deploy assets. A change to those files reaches
 #     staging only after it is merged.
-#   - The deploy job uses the GitHub environment `staging`; configure a
-#     required reviewer there if staging deploys should need approval. The
-#     environment holds the VPS_STAGING_* secrets.
+#   - The deploy job uses the GitHub environment `staging`, which holds the
+#     VPS_STAGING_* secrets. REQUIRED operator step: set that environment's
+#     deployment-branch rule to the default branch only — a workflow_dispatch
+#     run executes the DISPATCHED ref's copy of this file, so a feature
+#     branch could otherwise rewrite this workflow and still reach the
+#     environment's secrets. The workflow's dispatch-ref guard below is a
+#     convenience; that environment rule is the control. A required reviewer
+#     on the environment is the optional stronger setting.
 #   - What remains true: the chosen ref's image still runs on the production
 #     host (inside the staging project), and the SSH identity is root on that
 #     host — the same trust level as a production deploy, not a sandbox.
@@ -86,6 +91,16 @@ jobs:
       - name: Build player
         working-directory: player
         run: npm ci && npm run build
+      - name: Refuse non-regular player output
+        run: |
+          set -euo pipefail
+          test -d player/dist
+          test ! -L player/dist
+          bad=$(find player/dist \( ! -type f -a ! -type d \) -print -quit)
+          if [ -n "$bad" ]; then
+            echo "::error::player dist contains a non-regular entry: $bad"
+            exit 1
+          fi
       - name: Package player
         run: tar -C player -czf shizzle-player.tar.gz dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -107,6 +122,16 @@ jobs:
       IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
       PLAYER_ARTIFACT: ${{ needs.build-player.outputs.artifact }}
     steps:
+      - name: Guard dispatch ref (convenience; the control is the environment rule)
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "$DEFAULT_REF" ]; then
+            echo "::error::Dispatched from $GITHUB_REF, not $DEFAULT_REF. Dispatch the workflow from the default branch and pass the feature ref as the 'ref' input. This guard is a convenience — the real control is the 'staging' environment's deployment-branch rule allowing the default branch only (see docs/AUTOMATION.md 3b)."
+            exit 1
+          fi
       - name: Preflight staging deployment secrets
         env:
           VPS_HOST: ${{ secrets.VPS_STAGING_HOST }}

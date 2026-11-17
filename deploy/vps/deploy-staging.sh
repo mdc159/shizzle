@@ -96,6 +96,38 @@ compose() {
   "$DOCKER_BIN" compose -p "$STAGING_PROJECT" -f compose.staging.yml "$@"
 }
 
+# Owner's rule: no symlinks, anywhere. Refuse any archive that carries a
+# member that is not a regular file or directory (symlink, hard link, device,
+# fifo, socket) — `test -d` follows links and would accept a dist that is a
+# link to somewhere it should never point.
+validate_archive_member_types() {
+  local archive=$1 bad
+  if ! tar -tzf "$archive" >/dev/null 2>&1; then
+    echo "Refusing archive $archive: not a readable tar.gz" >&2
+    return 1
+  fi
+  bad=$(tar -tvzf "$archive" | awk '{print substr($1, 1, 1)}' | grep -vE '^[d-]$' | sort -u | tr '\n' ' ' || true)
+  if [ -n "$bad" ]; then
+    echo "Refusing archive $archive: non-regular member types present: $bad" >&2
+    return 1
+  fi
+}
+
+# The player archive additionally must contain only dist/ at the top level
+# (this also rejects absolute and '..' member paths), and that top level must
+# be a real directory.
+validate_player_archive() {
+  local archive=$1 bad
+  validate_archive_member_types "$archive" || return 1
+  bad=$(tar -tzf "$archive" | grep -vE '^dist/' | head -n 3 | tr '\n' ' ' || true)
+  if [ -n "$bad" ]; then
+    echo "Refusing player archive: members outside dist/ (absolute path, '..', or wrong top level): $bad" >&2
+    return 1
+  fi
+  tar -tvzf "$archive" | grep -Eq '^d[^ ]*[[:space:]].*[[:space:]]dist/$' \
+    || { echo "Refusing player archive: top-level entry is not a real dist/ directory" >&2; return 1; }
+}
+
 PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
 ACTIVATED=0
 if [ -z "$PREV_IMAGE" ]; then
@@ -119,6 +151,10 @@ else
   SNAPSHOT_PATHS=".env compose.staging.yml Caddyfile player"
 fi
 
+# Validate the incoming player archive BEFORE anything is created or
+# snapshotted: a refusal here leaves the staging directory untouched.
+validate_player_archive incoming/shizzle-player.tar.gz
+
 ROLLBACK_ARCHIVE=.staging-rollback.tar.gz
 STAGE_DIR=$(mktemp -d "$STAGING_DIR/.staging-stage.XXXXXX")
 trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
@@ -130,16 +166,20 @@ trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
 # before anything could be stopped. A stop failure is surfaced, not swallowed.
 restore_previous() {
   echo "Staging deploy failed; rolling back" >&2
-  if [ ! -f "$ROLLBACK_ARCHIVE" ]; then
-    echo "No rollback snapshot to restore" >&2
-    return 0
-  fi
   local stop_status=0 restore_dir f
   if [ "$ACTIVATED" -eq 1 ]; then
     compose stop api orchestrator caddy >&2 || stop_status=$?
   fi
   restore_dir=$(mktemp -d "$STAGING_DIR/.staging-restore.XXXXXX") || return 0
-  tar -xzf "$ROLLBACK_ARCHIVE" -C "$restore_dir" 2>/dev/null || true
+  # The rollback archive is unpacked with the same refusal as the player
+  # archive: if the snapshot fails validation, do not restore it — surface
+  # the failure and leave manual recovery.
+  validate_archive_member_types "$ROLLBACK_ARCHIVE" || {
+    echo "Rollback snapshot failed member validation; leaving the failed release in place for manual recovery" >&2
+    rm -rf -- "$restore_dir"
+    return 1
+  }
+  tar -xzf "$ROLLBACK_ARCHIVE" -C "$restore_dir" --no-same-owner --no-same-permissions 2>/dev/null || true
   for f in .env compose.staging.yml Caddyfile; do
     if [ -e "$restore_dir/$f" ]; then
       mv -f -- "$restore_dir/$f" "$f"
@@ -172,7 +212,9 @@ restore_previous() {
 on_error() {
   status=$?
   trap - ERR
-  restore_previous || status=$?
+  if [ -f "$ROLLBACK_ARCHIVE" ]; then
+    restore_previous || status=$?
+  fi
   exit "$status"
 }
 trap on_error ERR
@@ -182,8 +224,18 @@ tar -czf "$ROLLBACK_ARCHIVE.tmp" -- $SNAPSHOT_PATHS
 mv -f "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
 
 "$DOCKER_BIN" pull "$IMAGE_REF"
-tar -xzf incoming/shizzle-player.tar.gz -C "$STAGE_DIR"
-test -d "$STAGE_DIR/dist"
+# Extract without preserving owners or special modes, and verify on disk what
+# the listing check proved about the archive.
+tar -xzf incoming/shizzle-player.tar.gz -C "$STAGE_DIR" --no-same-owner --no-same-permissions
+if [ ! -d "$STAGE_DIR/dist" ] || [ -L "$STAGE_DIR/dist" ]; then
+  echo "Refusing player archive: dist is not a plain directory after extraction" >&2
+  exit 1
+fi
+bad_on_disk=$(find "$STAGE_DIR/dist" \( ! -type f -a ! -type d \) -print -quit)
+if [ -n "$bad_on_disk" ]; then
+  echo "Refusing player archive: non-regular entry on disk: $bad_on_disk" >&2
+  exit 1
+fi
 install -m 600 .env "$STAGE_DIR/.env"
 sed -i '/^SHIZZLE_API_TAG=/d; /^SHIZZLE_API_IMAGE=/d' "$STAGE_DIR/.env"
 printf 'SHIZZLE_API_IMAGE=%s\n' "$IMAGE_REF" >> "$STAGE_DIR/.env"

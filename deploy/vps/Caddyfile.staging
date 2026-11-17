@@ -17,6 +17,13 @@
 # applies when CloudFront is unconfigured, and staging without its own
 # distribution simply has no playable media.
 
+# Global options: never persist the loaded config (including the env-
+# substituted admin secret) to /config/caddy/autosave.json — secrets stay in
+# the environment only (E3).
+{
+	persist_config off
+}
+
 :80 {
 	encode zstd gzip
 
