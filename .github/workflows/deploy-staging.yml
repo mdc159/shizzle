@@ -1,0 +1,123 @@
+name: deploy-staging
+
+# Manual-only deploy of any branch or commit to the staging stack on the
+# production VPS. This is how a pull-request branch reaches staging before
+# merge. It is deliberately NOT callable from ci.yml and does not use the
+# `production` GitHub environment, so it never queues a production approval
+# and never deploys shizzle.systems. The image build is reused from
+# api-image.yml; the host transaction is deploy/vps/deploy-staging.sh, which
+# refuses to act on the production directory or project.
+#
+# Secrets (repository level, NOT the production environment): VPS_STAGING_HOST,
+# VPS_STAGING_SSH_KEY, VPS_STAGING_SSH_HOST_KEY. They may hold the same key
+# material as production; a dedicated staging SSH account is future hardening.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to deploy to staging"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve target commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      target_sha: ${{ steps.resolve.outputs.target_sha }}
+    steps:
+      - name: Resolve ref to a full commit SHA
+        id: resolve
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/$GH_REPO/commits/$REF" --jq .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve '$REF' to a commit"; exit 1; }
+          printf 'Resolved %s to %s\n' "$REF" "$sha"
+          printf 'target_sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+  build-image:
+    name: Reuse the digest-pinned API image build
+    needs: resolve
+    uses: ./.github/workflows/api-image.yml
+    with:
+      target_sha: ${{ needs.resolve.outputs.target_sha }}
+    permissions:
+      contents: read
+      packages: write # Publish the digest-pinned API image.
+
+  deploy:
+    name: Ship and deploy to staging
+    needs: [resolve, build-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_SHA: ${{ needs.resolve.outputs.target_sha }}
+      IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
+    steps:
+      - name: Preflight staging deployment secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_STAGING_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_STAGING_SSH_KEY }}
+          VPS_SSH_HOST_KEY: ${{ secrets.VPS_STAGING_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "$VPS_HOST" ] || missing="$missing VPS_STAGING_HOST"
+          [ -n "$VPS_SSH_KEY" ] || missing="$missing VPS_STAGING_SSH_KEY"
+          [ -n "$VPS_SSH_HOST_KEY" ] || missing="$missing VPS_STAGING_SSH_HOST_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Empty staging deployment secrets:${missing}. Add them as repository secrets."
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.target_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - name: Build player
+        working-directory: player
+        run: npm ci && npm run build
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_STAGING_SSH_KEY }}
+          SSH_HOST_KEY: ${{ secrets.VPS_STAGING_SSH_HOST_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_HOST_KEY" > ~/.ssh/known_hosts
+      - name: Ship release
+        env:
+          VPS_HOST: ${{ secrets.VPS_STAGING_HOST }}
+        run: |
+          set -euo pipefail
+          tar -C player -czf /tmp/shizzle-player.tar.gz dist
+          ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/staging/incoming && mkdir -p /opt/shizzle/staging/incoming'
+          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.staging.yml deploy/vps/Caddyfile.staging \
+            deploy/vps/deploy-staging.sh \
+            root@"$VPS_HOST":/opt/shizzle/staging/incoming/
+      - name: Deploy transaction
+        env:
+          VPS_HOST: ${{ secrets.VPS_STAGING_HOST }}
+        run: |
+          # Arguments intentionally expand on the runner.
+          # shellcheck disable=SC2029
+          ssh root@"$VPS_HOST" bash /opt/shizzle/staging/incoming/deploy-staging.sh \
+            "$IMAGE_REF" "$TARGET_SHA"
