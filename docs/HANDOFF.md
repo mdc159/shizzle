@@ -7,8 +7,9 @@ The code implements upload, S3 source transfer, worker-node URL download,
 node/RunPod routing, RunPod submission and polling, lossless verification,
 browser derivation, immutable publication, playback, remote mixing, the
 pipeline dashboard, and the administrator page (`/admin`: job tracing with
-evidence checks, node use switches, runtime routing and RunPod-limit
-control through the Tailscale-only proxy). URL download needs a worker node:
+evidence checks, separation-only node switches, safe failed-job retry/dismiss,
+soft Library and duplicate cleanup, runtime routing and RunPod-limit control
+through the Tailscale-only proxy). URL download needs a worker node:
 with node routing off, URL jobs fail with `YTDLP_BLOCKED`.
 
 The production URL is <https://shizzle.systems>. Endpoint pool size,

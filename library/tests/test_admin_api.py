@@ -96,7 +96,7 @@ async def test_admin_routes_404_without_the_secret_header(admin_client):
     assert (await c.get("/api/admin/jobs", headers=wrong)).status_code == 404
     assert (await c.get("/api/admin/nodes")).status_code == 404
     assert (await c.get("/api/admin/settings")).status_code == 404
-    assert (await c.post("/api/admin/nodes/mac/enable", headers=wrong)).status_code == 404
+    assert (await c.post("/api/admin/nodes/mac/separation/enable", headers=wrong)).status_code == 404
     assert (await c.get("/api/admin/jobs/{uuid.uuid4()}", headers=wrong)).status_code == 404
 
 
@@ -446,17 +446,19 @@ async def test_nodes_listing_enable_and_disable(admin_client):
     response = await c.get("/api/admin/nodes", headers=HEADERS)
     assert response.status_code == 200
     node = response.json()["nodes"][0]
-    assert node["id"] == "mac-mini" and node["online"] is True and node["enabled"] is True
+    assert node["id"] == "mac-mini" and node["online"] is True and node["separationEnabled"] is True
     assert node["currentAssignment"] is None
 
-    disable = await c.post("/api/admin/nodes/mac-mini/disable", headers=HEADERS)
-    assert disable.status_code == 200 and disable.json()["enabled"] is False
+    disable = await c.post("/api/admin/nodes/mac-mini/separation/disable", headers=HEADERS)
+    assert disable.status_code == 200 and disable.json()["separationEnabled"] is False
+    node_row = await app.state.node_repo.get("mac-mini")
+    assert node_row.separation_disabled_at is not None and node_row.disabled_at is None
     listing = await c.get("/api/admin/nodes", headers=HEADERS)
-    assert listing.json()["nodes"][0]["enabled"] is False
+    assert listing.json()["nodes"][0]["separationEnabled"] is False
 
-    enable = await c.post("/api/admin/nodes/mac-mini/enable", headers=HEADERS)
-    assert enable.status_code == 200 and enable.json()["enabled"] is True
-    assert (await c.post("/api/admin/nodes/ghost/enable", headers=HEADERS)).status_code == 404
+    enable = await c.post("/api/admin/nodes/mac-mini/separation/enable", headers=HEADERS)
+    assert enable.status_code == 200 and enable.json()["separationEnabled"] is True
+    assert (await c.post("/api/admin/nodes/ghost/separation/enable", headers=HEADERS)).status_code == 404
 
 
 async def test_node_listing_reports_the_current_assignment(admin_client):
@@ -1485,8 +1487,8 @@ async def test_every_admin_response_string_uses_the_redaction_choke_point(
             "settings update",
             c.put("/api/admin/settings", json={"nodeRouting": "prefer"}, headers=HEADERS),
         ),
-        ("disable", c.post("/api/admin/nodes/mac-mini/disable", headers=HEADERS)),
-        ("enable", c.post("/api/admin/nodes/mac-mini/enable", headers=HEADERS)),
+        ("disable", c.post("/api/admin/nodes/mac-mini/separation/disable", headers=HEADERS)),
+        ("enable", c.post("/api/admin/nodes/mac-mini/separation/enable", headers=HEADERS)),
         (
             "release",
             c.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),

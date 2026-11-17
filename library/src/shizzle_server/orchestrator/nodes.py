@@ -655,7 +655,9 @@ async def choose_separation_node(
         # (A registered-but-offline node earns the wait window: it may wake.)
         registered = await _repo(ctx).list_nodes()
         if not any(
-            isinstance(n.capabilities, dict) and n.capabilities.get("separate")
+            isinstance(n.capabilities, dict)
+            and n.capabilities.get("separate")
+            and n.separation_disabled_at is None
             for n in registered
         ):
             return "runpod"

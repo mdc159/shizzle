@@ -96,7 +96,10 @@ local development against the recipe above, either set
 `SHIZZLE_ADMIN_OPEN=1` to skip the check (tests use this; never in
 production). Routing and the RunPod concurrency limit can then be changed at
 runtime from the page or `PUT /api/admin/settings`; a missing runtime value
-always falls back to the environment `Settings` value.
+always falls back to the environment `Settings` value. Failed jobs can be
+retried, dismissed/restored and bulk-processed; Library tracks and duplicates
+are cleaned only through reversible dismiss/soft-delete actions. The node
+switch controls separation only—unchecked nodes still download URLs.
 
 ## Production commissioning
 

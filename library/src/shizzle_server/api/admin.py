@@ -26,8 +26,11 @@ import asyncio
 import base64
 import hmac
 import json
+import re
+import shutil
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -48,6 +51,7 @@ from ..db.models import (
     utcnow,
 )
 from ..db.repository import (
+    InvalidTransition,
     JobRepository,
     NodeRepository,
     RuntimeSettingsRepository,
@@ -57,6 +61,12 @@ from ..db.repository import (
 )
 from ..orchestrator import cloud
 from ..orchestrator import nodes as node_routing
+from ..orchestrator.recover_publication import completion_evidence
+from ..orchestrator.runpod_client import (
+    HttpRunPodClient,
+    NotConfiguredRunPodClient,
+    RunPodClient,
+)
 from ..orchestrator.runtime import (
     NODE_ROUTING_KEY,
     RUNPOD_MAX_CONCURRENT_KEY,
@@ -64,6 +74,7 @@ from ..orchestrator.runtime import (
     parse_runpod_limit,
     validate_setting,
 )
+from ..orchestrator.stages import StageContext, _confirmed_dispatch_key
 from ..settings import Settings
 from .media import s3_client
 from .redaction import _redact_value
@@ -159,6 +170,7 @@ class AdminJobRow(BaseModel):
     leaseOwner: str | None = None
     leaseExpiresAt: datetime | None = None
     nextRetryAt: datetime | None = None
+    dismissedAt: datetime | None = None
     trackId: str | None = None
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
@@ -183,6 +195,7 @@ class AdminJobRow(BaseModel):
             leaseOwner=job.lease_owner,
             leaseExpiresAt=job.lease_expires_at,
             nextRetryAt=job.next_retry_at,
+            dismissedAt=job.dismissed_at,
             trackId=str(job.track_id) if job.track_id else None,
             createdAt=job.created_at,
             updatedAt=job.updated_at,
@@ -196,6 +209,7 @@ class AdminJobListResponse(BaseModel):
     limit: int
     offset: int
     counts: dict[str, int]
+    dismissedCount: int
 
 
 class AdminAssignmentInfo(BaseModel):
@@ -245,6 +259,7 @@ class AdminJobColumns(BaseModel):
     leaseOwner: str | None = None
     leaseExpiresAt: datetime | None = None
     nextRetryAt: datetime | None = None
+    dismissedAt: datetime | None = None
     profileVersion: int
     inputChecksum: str | None = None
     outputChecksums: dict[str, Any] | None = None
@@ -272,6 +287,7 @@ class AdminJobColumns(BaseModel):
             leaseOwner=job.lease_owner,
             leaseExpiresAt=job.lease_expires_at,
             nextRetryAt=job.next_retry_at,
+            dismissedAt=job.dismissed_at,
             profileVersion=job.profile_version,
             inputChecksum=job.input_checksum,
             outputChecksums=_redact_value(job.output_checksums),
@@ -334,7 +350,7 @@ class AdminNodeInfo(BaseModel):
     id: str
     displayName: str
     online: bool
-    enabled: bool
+    separationEnabled: bool
     capabilities: dict[str, Any]
     agentVersion: str | None = None
     lastSeenAt: datetime | None = None
@@ -370,6 +386,86 @@ class AdminReleaseResponse(BaseModel):
     assignmentId: str
     nodeId: str
     jobId: str
+
+
+class AdminRetryResponse(BaseModel):
+    status: str
+    resumeStage: str
+    attempt: int
+
+
+class AdminJobActionResponse(BaseModel):
+    ok: bool
+    status: str
+    dismissedAt: datetime | None = None
+
+
+class AdminBulkUpdate(BaseModel):
+    action: Literal["retry", "dismiss"]
+    jobIds: list[str] = Field(min_length=1, max_length=100)
+
+
+class AdminBulkResult(BaseModel):
+    jobId: str
+    ok: bool
+    reason: str | None = None
+    resumeStage: str | None = None
+
+
+class AdminTrackRow(BaseModel):
+    id: str
+    title: str
+    artist: str
+    durationSeconds: float
+    generation: int
+    createdAt: datetime
+    deletedAt: datetime | None = None
+    jobId: str | None = None
+
+
+class AdminTrackListResponse(BaseModel):
+    tracks: list[AdminTrackRow]
+
+
+class AdminTrackActionResponse(BaseModel):
+    ok: bool
+    deletedAt: datetime | None = None
+
+
+class AdminDuplicateMember(BaseModel):
+    id: str
+    kind: Literal["job", "track"]
+    status: str
+    title: str | None = None
+    artist: str = ""
+    createdAt: datetime
+    trackId: str | None = None
+
+
+class AdminDuplicateGroup(BaseModel):
+    groupId: str
+    identity: str
+    jobs: list[AdminDuplicateMember]
+    tracks: list[AdminDuplicateMember]
+    keeperTrackId: str | None = None
+
+
+class AdminDuplicateListResponse(BaseModel):
+    groups: list[AdminDuplicateGroup]
+
+
+class AdminDuplicateAction(BaseModel):
+    action: Literal["keep", "dismiss_failed"]
+    jobIds: list[str] = Field(default_factory=list, max_length=200)
+    trackIds: list[str] = Field(default_factory=list, max_length=200)
+    keeperTrackId: str | None = None
+
+
+class AdminDuplicateActionResult(BaseModel):
+    itemId: str
+    kind: Literal["job", "track"]
+    ok: bool
+    reason: str | None = None
 
 
 # --- helpers -------------------------------------------------------------------
@@ -1330,6 +1426,7 @@ async def admin_list_jobs(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    dismissed: Literal["only", "include"] | None = Query(default=None),
     _auth: None = Admin,
 ) -> AdminJobListResponse:
     stage: JobStage | None = None
@@ -1338,7 +1435,9 @@ async def admin_list_jobs(
             stage = JobStage(status)
         except ValueError:
             raise HTTPException(422, f"unknown status {status!r}") from None
-    jobs, total = await _jobs(request).list_jobs(limit=limit, offset=offset, status=stage)
+    jobs, total = await _jobs(request).list_jobs(
+        limit=limit, offset=offset, status=stage, dismissed=dismissed
+    )
     counts = {k.value: v for k, v in (await _jobs(request).count_jobs_by_status()).items()}
     flags = await _flags_for(request, jobs)
     return AdminJobListResponse(
@@ -1347,6 +1446,7 @@ async def admin_list_jobs(
         limit=limit,
         offset=offset,
         counts=counts,
+        dismissedCount=await _jobs(request).count_dismissed_jobs(),
     )
 
 
@@ -1448,7 +1548,7 @@ async def admin_list_nodes(request: Request, _auth: None = Admin) -> AdminNodeLi
                 id=node.id,
                 displayName=_redact_value(node.display_name or node.id),
                 online=online,
-                enabled=node.disabled_at is None,
+                separationEnabled=node.separation_disabled_at is None,
                 capabilities=dict(node.capabilities or {}),
                 agentVersion=node.agent_version,
                 lastSeenAt=seen,
@@ -1461,24 +1561,26 @@ async def admin_list_nodes(request: Request, _auth: None = Admin) -> AdminNodeLi
     return AdminNodeListResponse(nodes=infos, onlineSeconds=settings.node_online_seconds)
 
 
-async def _set_node_enabled(request: Request, node_id: str, enabled: bool) -> dict[str, bool]:
-    if not await _node_repo(request).set_disabled(node_id, not enabled):
+async def _set_node_separation_enabled(
+    request: Request, node_id: str, enabled: bool
+) -> dict[str, bool]:
+    if not await _node_repo(request).set_separation_disabled(node_id, not enabled):
         raise HTTPException(404, "Node not found")
-    return {"ok": True, "enabled": enabled}
+    return {"ok": True, "separationEnabled": enabled}
 
 
-@router.post("/nodes/{node_id}/enable")
-async def admin_enable_node(
+@router.post("/nodes/{node_id}/separation/enable")
+async def admin_enable_node_separation(
     request: Request, node_id: str, _auth: None = Admin
 ) -> dict[str, bool]:
-    return await _set_node_enabled(request, node_id, True)
+    return await _set_node_separation_enabled(request, node_id, True)
 
 
-@router.post("/nodes/{node_id}/disable")
-async def admin_disable_node(
+@router.post("/nodes/{node_id}/separation/disable")
+async def admin_disable_node_separation(
     request: Request, node_id: str, _auth: None = Admin
 ) -> dict[str, bool]:
-    return await _set_node_enabled(request, node_id, False)
+    return await _set_node_separation_enabled(request, node_id, False)
 
 
 # --- runtime settings ------------------------------------------------------------
@@ -1586,6 +1688,444 @@ async def admin_release_assignment(
         nodeId=assignment.node_id,
         jobId=assignment.job_id.hex,
     )
+
+
+# --- failed-job and library actions ---------------------------------------------
+
+
+def _runpod_for(settings: Settings) -> RunPodClient:
+    if settings.cloud_pipeline and settings.runpod_api_key and settings.runpod_endpoint_id:
+        return HttpRunPodClient(
+            api_key=settings.runpod_api_key,
+            endpoint_id=settings.runpod_endpoint_id,
+            api_base=settings.runpod_api_base,
+        )
+    return NotConfiguredRunPodClient()
+
+
+async def _source_is_obtainable(request: Request, job: Job) -> bool:
+    if job.source_type == SourceType.url:
+        return True  # A node re-downloads the submitted URL on the fresh run.
+    settings = _settings(request)
+    if (settings.data_dir / job.id.hex / "source.mp4").is_file():
+        return True
+    outcome = await asyncio.to_thread(
+        _head_blocking, settings, cloud.source_key(track_id_for_job(job.id))
+    )
+    return outcome.error is None and outcome.head is not None
+
+
+async def _stop_runpod_for_restart(
+    request: Request, job: Job, events: list[JobEvent]
+) -> dict[str, Any]:
+    """Cancel uncertain provider work; never claim success when it fails."""
+    if not job.runpod_job_id:
+        return {"status": "not_recorded"}
+    if job.worker_phase == "failed" or any(
+        event.event == "worker_completed"
+        and _event_detail(event).get("runpod_job_id") == job.runpod_job_id
+        for event in events
+    ):
+        return {"status": "already_closed", "runpod_job_id": job.runpod_job_id}
+    try:
+        await _runpod_for(_settings(request)).cancel(job.runpod_job_id)
+    except Exception as exc:
+        return {
+            "status": "cancel_failed",
+            "runpod_job_id": job.runpod_job_id,
+            "error_type": type(exc).__name__,
+        }
+    return {"status": "cancelled", "runpod_job_id": job.runpod_job_id}
+
+
+async def _try_publication_retry(
+    request: Request, job: Job, events: list[JobEvent]
+) -> tuple[Job | None, str | None]:
+    """Reuse the selected package, or return a safe fallback reason."""
+    failures = [event for event in events if event.event == "failed"]
+    failure_stage = _event_detail(failures[-1]).get("stage") if failures else None
+    stages = _stages_reached(job, events)
+    selected = _selected_package_prefix(job, events, stages)
+    if failure_stage not in ("verifying", "publishing") or selected is None:
+        return None, None
+    if not job.runpod_job_id or not job.input_checksum:
+        return None, "publication recovery lacks provider or source identity"
+    dispatch_key = _confirmed_dispatch_key(events, job.runpod_job_id)
+    if dispatch_key is None:
+        return None, "publication recovery lacks a confirmed dispatch reservation"
+
+    settings = _settings(request)
+    recovery_id = uuid.uuid4()
+    worker_id = f"admin-retry-{recovery_id.hex}"
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=_jobs(request),
+        runpod=_runpod_for(settings),
+        worker_id=worker_id,
+    )
+    try:
+        await completion_evidence(ctx, allow_receipt=True)
+    except Exception as exc:
+        return None, f"publication completion evidence failed: {type(exc).__name__}: {exc}"
+    if await _jobs(request).expire_terminal_assignments(
+        job.id, reason="expired by administrator publication retry"
+    ) is None:
+        return None, "publication recovery could not fence the existing lease"
+    try:
+        recovered = await _jobs(request).recover_publication(
+            job.id,
+            expected_provider_id=job.runpod_job_id,
+            expected_checksum=job.input_checksum,
+            expected_idempotency_key=job.idempotency_key,
+            expected_dispatch_key=dispatch_key,
+            recovery_id=recovery_id,
+            worker_id=worker_id,
+            lease_seconds=60,
+            admin_retry=True,
+        )
+    except InvalidTransition:
+        return None, "publication recovery preconditions were not met"
+    await _jobs(request).release_lease(job.id, worker_id=worker_id)
+    return recovered, None
+
+
+async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
+    job = await _jobs(request).get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.status != JobStage.failed:
+        raise HTTPException(409, "Only a failed job can be retried")
+    if job.dismissed_at is not None:
+        raise HTTPException(409, "Restore the dismissed job before retrying it")
+    events = await _jobs(request).list_events(job.id)
+    recovered, fallback_reason = await _try_publication_retry(request, job, events)
+    if recovered is not None:
+        return AdminRetryResponse(
+            status=recovered.status.value,
+            resumeStage=JobStage.verifying.value,
+            attempt=recovered.attempt,
+        )
+    if not await _source_is_obtainable(request, job):
+        raise HTTPException(409, "The upload source no longer exists locally or in S3")
+    outcome = await _stop_runpod_for_restart(request, job, events)
+    if outcome["status"] == "cancel_failed":
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_cancel_failed",
+            outcome,
+        )
+        raise HTTPException(
+            409,
+            "The recorded RunPod executor could not be confirmed stopped; retry was refused",
+        )
+    try:
+        retried = await _jobs(request).admin_restart_job(
+            job.id,
+            reason="restart from pending with a fresh dispatch attempt",
+            runpod_outcome=outcome,
+            fallback_reason=fallback_reason,
+        )
+    except InvalidTransition:
+        raise HTTPException(409, "The job is being processed or is no longer retryable") from None
+    return AdminRetryResponse(
+        status=retried.status.value,
+        resumeStage=JobStage.pending.value,
+        attempt=retried.attempt,
+    )
+
+
+@router.post("/jobs/{job_id}/retry")
+async def admin_retry_job(
+    request: Request, job_id: str, _auth: None = Admin
+) -> AdminRetryResponse:
+    try:
+        parsed = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(404, "Job not found") from None
+    return await _retry_job(request, parsed)
+
+
+def _job_workdir(settings: Settings, job_id: uuid.UUID) -> Path:
+    root = settings.data_dir.resolve()
+    candidate = root / job_id.hex
+    resolved = candidate.resolve()
+    if resolved.parent != root or resolved.name != job_id.hex or candidate.is_symlink():
+        raise HTTPException(409, "Refusing to remove a working directory outside DATA_DIR/<job>")
+    return candidate
+
+
+async def _set_dismissed(
+    request: Request, job_id: uuid.UUID, dismissed: bool
+) -> AdminJobActionResponse:
+    job = await _jobs(request).get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.status != JobStage.failed:
+        raise HTTPException(409, "Only a failed job can be dismissed or restored")
+    workdir = _job_workdir(_settings(request), job_id) if dismissed else None
+    try:
+        updated = await _jobs(request).set_job_dismissed(job_id, dismissed=dismissed)
+    except InvalidTransition:
+        raise HTTPException(409, "The job is already in the requested state or is being processed") from None
+    if workdir is not None and workdir.exists():
+        await asyncio.to_thread(shutil.rmtree, workdir)
+    return AdminJobActionResponse(
+        ok=True,
+        status=updated.status.value,
+        dismissedAt=updated.dismissed_at,
+    )
+
+
+@router.post("/jobs/{job_id}/dismiss")
+async def admin_dismiss_job(
+    request: Request, job_id: str, _auth: None = Admin
+) -> AdminJobActionResponse:
+    try:
+        parsed = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(404, "Job not found") from None
+    return await _set_dismissed(request, parsed, True)
+
+
+@router.post("/jobs/{job_id}/restore")
+async def admin_restore_job(
+    request: Request, job_id: str, _auth: None = Admin
+) -> AdminJobActionResponse:
+    try:
+        parsed = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(404, "Job not found") from None
+    return await _set_dismissed(request, parsed, False)
+
+
+@router.post("/jobs/bulk")
+async def admin_bulk_jobs(
+    request: Request, body: AdminBulkUpdate, _auth: None = Admin
+) -> list[AdminBulkResult]:
+    results: list[AdminBulkResult] = []
+    for raw_id in body.jobIds:
+        try:
+            job_id = uuid.UUID(raw_id)
+        except ValueError:
+            results.append(AdminBulkResult(jobId=raw_id, ok=False, reason="Invalid job id"))
+            continue
+        try:
+            if body.action == "retry":
+                retried = await _retry_job(request, job_id)
+                results.append(AdminBulkResult(
+                    jobId=raw_id, ok=True, resumeStage=retried.resumeStage
+                ))
+            else:
+                await _set_dismissed(request, job_id, True)
+                results.append(AdminBulkResult(jobId=raw_id, ok=True))
+        except HTTPException as exc:
+            reason = exc.detail if isinstance(exc.detail, str) else "Action refused"
+            results.append(AdminBulkResult(jobId=raw_id, ok=False, reason=reason))
+    return results
+
+
+@router.get("/tracks")
+async def admin_tracks(
+    request: Request,
+    deleted: Literal["only", "include"] | None = Query(default=None),
+    _auth: None = Admin,
+) -> AdminTrackListResponse:
+    rows = await _tracks(request).list_for_admin(deleted=deleted)
+    return AdminTrackListResponse(tracks=[
+        AdminTrackRow(
+            id=str(track.id),
+            title=track.title,
+            artist=track.artist,
+            durationSeconds=track.duration_seconds,
+            generation=track.generation,
+            createdAt=track.created_at,
+            deletedAt=track.deleted_at,
+            jobId=job_id.hex if job_id is not None else None,
+        )
+        for track, job_id in rows
+    ])
+
+
+async def _set_track_deleted(
+    request: Request, track_id: str, deleted: bool
+) -> AdminTrackActionResponse:
+    try:
+        parsed = uuid.UUID(track_id)
+    except ValueError:
+        raise HTTPException(404, "Track not found") from None
+    if await _tracks(request).get(parsed) is None:
+        raise HTTPException(404, "Track not found")
+    try:
+        track = await _tracks(request).set_deleted_for_admin(parsed, deleted=deleted)
+    except LookupError:
+        raise HTTPException(409, "Track is already in the requested state") from None
+    return AdminTrackActionResponse(ok=True, deletedAt=track.deleted_at)
+
+
+@router.post("/tracks/{track_id}/remove")
+async def admin_remove_track(
+    request: Request, track_id: str, _auth: None = Admin
+) -> AdminTrackActionResponse:
+    return await _set_track_deleted(request, track_id, True)
+
+
+@router.post("/tracks/{track_id}/restore")
+async def admin_restore_track(
+    request: Request, track_id: str, _auth: None = Admin
+) -> AdminTrackActionResponse:
+    return await _set_track_deleted(request, track_id, False)
+
+
+# --- duplicate review -------------------------------------------------------------
+
+
+def _normalized_song(title: str | None, artist: str) -> str | None:
+    if not title:
+        return None
+    folded = re.sub(r"[\W_]+", " ", f"{title} {artist}".casefold(), flags=re.UNICODE)
+    return folded.strip() or None
+
+
+def _duplicate_member(job: Job) -> AdminDuplicateMember:
+    return AdminDuplicateMember(
+        id=job.id.hex,
+        kind="job",
+        status=job.status.value,
+        title=job.title,
+        artist=job.artist,
+        createdAt=job.created_at,
+        trackId=str(job.track_id) if job.track_id else None,
+    )
+
+
+def _duplicate_track(track: Track) -> AdminDuplicateMember:
+    return AdminDuplicateMember(
+        id=str(track.id),
+        kind="track",
+        status="deleted" if track.deleted_at is not None else "ready",
+        title=track.title,
+        artist=track.artist,
+        createdAt=track.created_at,
+        trackId=str(track.id),
+    )
+
+
+@router.get("/duplicates")
+async def admin_duplicates(request: Request, _auth: None = Admin) -> AdminDuplicateListResponse:
+    jobs = await _jobs(request).list_all_jobs()
+    tracks = await _tracks(request).list_tracks(include_deleted=True)
+    job_by_track = {job.track_id: job for job in jobs if job.track_id is not None}
+    entities: list[tuple[str, Any]] = [("job", job) for job in jobs]
+    entities.extend(
+        ("track", track) for track in tracks if track.id not in job_by_track
+    )
+    parent = list(range(len(entities)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    first_seen: dict[tuple[str, str], int] = {}
+    identity_by_root: dict[int, str] = {}
+    for index, (kind, value) in enumerate(entities):
+        identities: list[tuple[int, str, str]] = []
+        if kind == "job":
+            if value.input_checksum:
+                identities.append((0, "checksum", value.input_checksum))
+            if value.source_type == SourceType.url:
+                video_id = node_routing.youtube_video_id(value.source_ref)
+                if video_id:
+                    identities.append((1, "youtube", video_id))
+        normalized = _normalized_song(value.title, value.artist)
+        if normalized:
+            identities.append((2, "title", normalized))
+        for _confidence, identity_kind, identity in identities:
+            key = (identity_kind, identity)
+            if key in first_seen:
+                union(index, first_seen[key])
+            else:
+                first_seen[key] = index
+            identity_by_root.setdefault(find(index), f"{identity_kind}:{identity}")
+
+    grouped: dict[int, dict[str, Any]] = {}
+    entity_roots: dict[int, int] = {}
+    for index, (kind, value) in enumerate(entities):
+        root = find(index)
+        entity_roots[index] = root
+        group = grouped.setdefault(root, {"jobs": [], "tracks": [], "identity": identity_by_root.get(root, "song")})
+        group["jobs" if kind == "job" else "tracks"].append(value)
+    for track in tracks:
+        job = job_by_track.get(track.id)
+        if job is None:
+            continue
+        job_index = next(index for index, (kind, value) in enumerate(entities) if kind == "job" and value is job)
+        grouped[entity_roots[job_index]]["tracks"].append(track)
+
+    responses: list[AdminDuplicateGroup] = []
+    for root, group in grouped.items():
+        if len(group["jobs"]) + len(group["tracks"]) < 2:
+            continue
+        available_tracks = [track for track in group["tracks"] if track.deleted_at is None]
+        keeper = max(available_tracks, key=lambda track: (track.created_at, str(track.id)), default=None)
+        responses.append(AdminDuplicateGroup(
+            groupId=str(root),
+            identity=group["identity"],
+            jobs=[_duplicate_member(job) for job in group["jobs"]],
+            tracks=[_duplicate_track(track) for track in group["tracks"]],
+            keeperTrackId=str(keeper.id) if keeper is not None else None,
+        ))
+    responses.sort(key=lambda group: group.groupId)
+    return AdminDuplicateListResponse(groups=responses)
+
+
+@router.post("/duplicates/action")
+async def admin_duplicate_action(
+    request: Request, body: AdminDuplicateAction, _auth: None = Admin
+) -> list[AdminDuplicateActionResult]:
+    results: list[AdminDuplicateActionResult] = []
+    for raw_id in body.jobIds:
+        try:
+            job_id = uuid.UUID(raw_id)
+            job = await _jobs(request).get_job(job_id)
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            if job.status != JobStage.failed:
+                continue
+            await _set_dismissed(request, job_id, True)
+            results.append(AdminDuplicateActionResult(itemId=raw_id, kind="job", ok=True))
+        except (ValueError, HTTPException) as exc:
+            reason = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else "Invalid job id"
+            results.append(AdminDuplicateActionResult(itemId=raw_id, kind="job", ok=False, reason=reason))
+    if body.action == "keep":
+        if not body.keeperTrackId:
+            return [AdminDuplicateActionResult(
+                itemId="group", kind="track", ok=False, reason="A keeper track is required"
+            ), *results]
+        for raw_id in body.trackIds:
+            if raw_id == body.keeperTrackId:
+                continue
+            try:
+                track_id = uuid.UUID(raw_id)
+                track = await _tracks(request).get(track_id)
+                if track is None:
+                    raise HTTPException(404, "Track not found")
+                if track.deleted_at is not None:
+                    continue
+                await _set_track_deleted(request, raw_id, True)
+                results.append(AdminDuplicateActionResult(itemId=raw_id, kind="track", ok=True))
+            except (ValueError, HTTPException) as exc:
+                reason = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else "Invalid track id"
+                results.append(AdminDuplicateActionResult(itemId=raw_id, kind="track", ok=False, reason=reason))
+    return results
 
 
 __all__ = ["router"]

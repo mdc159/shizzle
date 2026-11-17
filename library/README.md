@@ -48,7 +48,7 @@ prove a deployment has those prerequisites.
 
 - `src/shizzle_server/api/` — passcode/device-token authentication, routes,
   CloudFront signing, manifest rewriting, the worker-node API, the
-  fail-closed administrator API (`admin.py`, invariants G1–G5), and the
+  fail-closed administrator API (`admin.py`, invariants G1–G10), and the
   deployment-wide remote relay.
 - `src/shizzle_server/db/` — jobs, append-only events, tracks, generation
   activation, playback sessions/events, orchestrator heartbeats, and runtime

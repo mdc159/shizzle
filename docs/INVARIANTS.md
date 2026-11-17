@@ -202,10 +202,11 @@ lease-independent by design (B4).
 
 Operator publication recovery is a separate, explicit claim, never a normal
 `advance` from a terminal state. `recover_publication` locks the exact failed
-job with `FOR UPDATE SKIP LOCKED`, requires its latest failure to be at
-publication with `PUBLISH_FAILED`, checks the expected provider/input/reservation
-identity, refuses a live lease or published track, and grants a bounded lease
-at `verifying`. It preserves the provider ID, reservation and attempt counter
+job with `FOR UPDATE SKIP LOCKED`, requires a recoverable publication failure
+(or a selected-package verification failure whose completion evidence the
+admin retry has checked), checks the expected provider/input/reservation
+identity, refuses a live lease, dismissal or published track, and grants a
+bounded lease at `verifying`. It preserves the provider ID, reservation and attempt counter
 and appends recovery provenance. The operator command first verifies provider
 completion, package bytes and source identity. A crash can only resume
 verification/publication, never dispatch. Ordinary terminal transitions stay
@@ -643,7 +644,7 @@ Guard: `library/tests/test_nodes_api.py`
 
 **Invariant:** Migrations MUST form a single linear chain with numeric prefix ==
 revision id, explicit `down_revision`, and a paired real downgrade.
-- Where: `library/alembic/versions/` — revisions 0001 through 0005
+- Where: `library/alembic/versions/` — revisions 0001 through 0008
 - Violation smell: a branch, a filename/revision mismatch, or a no-op
   downgrade.
 
@@ -770,16 +771,66 @@ first (B16), never duplicated on RunPod.
 - Violation smell: a `separate` assignment created while the effective routing
   is `download_only`, or a wait window inserted before the RunPod dispatch.
 
-### G5 — a disabled node receives no new assignment
+### G5 — separation-unchecked nodes still download
 
-**Invariant:** A node with `disabled_at` set MUST NOT be offered or assigned
-new work (download or separation); work it already holds is left alone for the
-watchdogs. The admin enable/disable endpoints only flip this flag; they never
-expire or reassign an assignment themselves.
-- Where: `library/src/shizzle_server/db/repository.py` (`NodeRepository.available`, `next_for_node`), `library/src/shizzle_server/api/admin.py`
-- Guarded by: `library/tests/test_runtime_routing.py::test_disabled_node_receives_no_new_assignment`
-- Violation smell: a routing candidate list that ignores `disabled_at`, or a
-  disable endpoint that also expires assignments.
+**Invariant:** A node with `separation_disabled_at` set MUST NOT be offered or
+assigned new separation work, but MUST remain eligible for downloads exactly
+as before; work it already holds is left alone. The admin separation
+enable/disable endpoints flip only this new field, never the legacy
+`disabled_at` kill switch. In `prefer`, having no separation-eligible node
+triggers immediate RunPod fallback; `only` waits, while `download_only` and
+`off` are unaffected.
+- Where: `library/src/shizzle_server/db/repository.py` (`NodeRepository.available`, `create_assignment`, `set_separation_disabled`), `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/orchestrator/nodes.py`
+- Guarded by: `library/tests/test_runtime_routing.py::test_separation_disabled_node_still_receives_downloads`, `library/tests/test_runtime_routing.py::test_prefer_separation_disabled_falls_back_to_runpod_at_once`, `library/tests/test_runtime_routing.py::test_only_separation_disabled_waits_for_an_eligible_node`, `library/tests/test_runtime_routing.py::test_runpod_modes_ignore_separation_disabled`
+- Violation smell: an unchecked node losing a download assignment, a fresh
+  separation assignment racing the locked write, or `prefer` waiting for a
+  node whose separation is unchecked.
+
+### G7 — admin retry is source-safe, fenced and fresh
+
+**Invariant:** Only a non-dismissed failed job can be retried. Restart uses the
+explicit admin-only failed-to-pending transition, an obtainable source, a
+monotonically fresh dispatch attempt, and one locked transaction that expires
+open assignments, clears old execution state and appends `admin_retry_started`.
+Ordinary `advance()` remains unable to reopen failed jobs. Uncertain RunPod work
+is cancelled best-effort and the outcome recorded; failure to confirm it
+stopped refuses the retry. A verifying/publishing failure with a selected
+package first uses completion-checked publication recovery without another
+separation, and records why if it falls back to restart. Dismissed jobs require
+restore first. Concurrent retries or an orchestrator lease produce one winner.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
+- Guarded by: `library/tests/test_admin_actions.py`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`
+
+### G8 — dismissal hides history without deleting evidence
+
+**Invariant:** Only failed jobs can be dismissed/restored. Dismissal appends an
+event, expires open assignments, and removes only the exact
+`DATA_DIR/<job hex>` working directory (never a symlink or outside path). It
+deletes no database rows or S3 objects. Dismissed jobs disappear from public
+and default admin history/counts, are visible through explicit filters, and
+cannot be retried until restored.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/models.py`, `library/src/shizzle_server/db/repository.py`, `library/alembic/versions/0008_job_dismissal.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_dismiss_restore_visibility_workdir_and_retry_guard`, `library/tests/test_alembic_chain.py::test_0008_adds_job_dismissal_and_rolls_back`
+
+### G9 — admin library removal is soft and ledgered
+
+**Invariant:** Admin remove/restore changes only `tracks.deleted_at` and commits
+an `admin_removed`/`admin_restored` generation-ledger event in the same
+transaction. It never deletes S3 objects. Deleted-track filters and originating
+job ids are explicit in the admin API.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_track_remove_restore_and_deleted_filters`
+
+### G10 — duplicate cleanup keeps a live ready track and stays reversible
+
+**Invariant:** Duplicate groups use input checksum, YouTube video id, then
+case/whitespace/punctuation-folded title+artist, never expose source URLs, and
+select only the newest ready non-deleted track as keeper (none when no such
+track exists). Group actions dismiss failed jobs and soft-remove non-keeper
+tracks through the same reversible single-item rules; no-keeper groups only
+dismiss failed jobs. No action hard-deletes rows or media.
+- Where: `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_duplicate_grouping_rules_and_url_redaction`, `library/tests/test_admin_actions.py::test_duplicate_keeper_choice_and_group_actions`, `player/e2e/admin-dashboard.spec.ts`
 
 ### G6 — every admin response string crosses one redaction boundary
 

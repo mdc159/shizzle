@@ -271,12 +271,22 @@ jobs, stale busy pointers, unresolved reservations, overdue acknowledgements,
 stalls and caps, expired leases, over-window waits, silent stages) plus
 optional `?verify=s3` storage checks that HEAD the exact source, attempt-package
 and generation keys (S3 errors report `unknown`, never a false verdict). It
-also steers runtime behaviour without a restart: node use switches, the four
-routing modes (`prefer`, `only`, `off`, `download_only`) and the RunPod
+also steers runtime behaviour without a restart: separation-only node
+switches (unchecked nodes still download), the four routing modes
+(`prefer`, `only`, `off`, `download_only`) and the RunPod
 concurrency limit (park-without-attempt, never disturbing dispatched work,
 invariant G3). These overrides live in the `runtime_settings` table
 (migration `0007`) and fall back to the environment `Settings` values when
 unset; the orchestrator re-reads them at each routing decision.
+
+Failed-job actions use durable history: retry either reuses a completion-proven
+selected package or restarts from pending with a fresh dispatch key after
+source/executor checks. Dismiss/restore hides failed history without deleting
+rows or S3 objects and removes only the confined working directory. Migration
+`0008` adds dismissal and separation-only node flags. Admin Library removal is
+soft and ledgered. Duplicate groups use checksum, YouTube id or folded
+song/artist identity; keep-the-good-one preserves the newest live ready track
+and reversibly dismisses/removes the rest (G7–G10).
 
 Production uses separate API/orchestrator services, Postgres and Caddy.
 Only the explicit release transaction migrates the production schema.

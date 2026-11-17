@@ -271,6 +271,69 @@ async def test_concurrent_reservations_see_a_retry_reservation_slot(pg_engine):
         await engine.dispose()
 
 
+@pytest_asyncio.fixture
+async def retry_env(pg_engine, data_dir):
+    """One failed upload with an obtainable source and an admin client."""
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.main import create_app
+    from shizzle_server.settings import Settings
+
+    sf = create_session_factory(pg_engine)
+    jobs = JobRepository(sf)
+    job = await jobs.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"retry source")
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.failed
+        row.error_code = "INTERNAL"
+    settings = Settings(
+        database_url=PG_URL,
+        data_dir=data_dir,
+        shizzle_embedded_orchestrator=False,
+        shizzle_admin_proxy_secret=SECRET,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield sf, jobs, job, client
+
+
+async def test_simultaneous_admin_retries_have_exactly_one_winner(retry_env):
+    _, jobs, job, client = retry_env
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS),
+        client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS),
+    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.pending and current.attempt == 1
+    assert sum(
+        event.event == "admin_retry_started" for event in await jobs.list_events(job.id)
+    ) == 1
+
+
+async def test_retry_racing_an_orchestrator_pass_is_refused(retry_env):
+    sf, jobs, job, client = retry_env
+    # A failed terminal write can still have an in-flight orchestrator owner.
+    # Its live lease and row lock must prevent the admin transition.
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id, with_for_update=True)
+        row.lease_owner = "orchestrator-pass"
+        from datetime import timedelta
+
+        from shizzle_server.db.models import utcnow
+
+        row.lease_expires_at = utcnow() + timedelta(seconds=60)
+        response = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+        assert response.status_code == 409
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.attempt == 0
+
+
 async def test_capacity_count_cannot_miss_a_concurrent_confirmation(pg_engine, monkeypatch):
     """G3: job and event state come from one statement snapshot.
 

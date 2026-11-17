@@ -447,6 +447,77 @@ async def test_disabled_node_receives_no_new_assignment(
     assert "node_assigned" not in events
 
 
+async def test_separation_disabled_node_still_receives_downloads(
+    cloud_settings, job_repo, node_repo, runtime_repo
+):
+    await runtime_repo.set_value(NODE_ROUTING_KEY, "only")
+    await _register(node_repo)
+    assert await node_repo.set_separation_disabled(MAC, True)
+    job = await job_repo.create_job(
+        source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    orch, task = await _run(cloud_settings)
+    try:
+        assignment = await _wait_download(node_repo, job.id)
+    finally:
+        await _stop(orch, task)
+    assert assignment.kind == NodeAssignmentKind.download
+    assert (await node_repo.get(MAC)).disabled_at is None
+    assert await node_repo.available(
+        NodeAssignmentKind.separate, online_seconds=45
+    ) == []
+
+
+async def test_prefer_separation_disabled_falls_back_to_runpod_at_once(
+    cloud_settings, job_repo, node_repo, runtime_repo, upload_job, monkeypatch
+):
+    _stub_cloud_intake(monkeypatch)
+    await _register(node_repo)
+    assert await node_repo.set_separation_disabled(MAC, True)
+    fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "working"}}])
+    orch, task = await _run(cloud_settings, fake)
+    try:
+        await _wait_runpod_confirm(job_repo, upload_job.id)
+    finally:
+        await _stop(orch, task)
+    assert len(fake.dispatched) == 1
+    names = [event.event for event in await job_repo.list_events(upload_job.id)]
+    assert "node_wait" not in names and "fallback_runpod" not in names
+
+
+async def test_only_separation_disabled_waits_for_an_eligible_node(
+    cloud_settings, job_repo, node_repo, runtime_repo, upload_job, monkeypatch
+):
+    _stub_cloud_intake(monkeypatch)
+    await runtime_repo.set_value(NODE_ROUTING_KEY, "only")
+    await _register(node_repo)
+    assert await node_repo.set_separation_disabled(MAC, True)
+    fake = FakeRunPodClient([])
+    orch, task = await _run(cloud_settings, fake)
+    try:
+        await _wait_phase(job_repo, upload_job.id, "waiting for a separation node")
+    finally:
+        await _stop(orch, task)
+    assert fake.dispatched == []
+
+
+@pytest.mark.parametrize("mode", ["download_only", "off"])
+async def test_runpod_modes_ignore_separation_disabled(
+    mode, cloud_settings, job_repo, node_repo, runtime_repo, upload_job, monkeypatch
+):
+    _stub_cloud_intake(monkeypatch)
+    await runtime_repo.set_value(NODE_ROUTING_KEY, mode)
+    await _register(node_repo)
+    assert await node_repo.set_separation_disabled(MAC, True)
+    fake = FakeRunPodClient([{"status": "IN_PROGRESS", "output": {"phase": "working"}}])
+    orch, task = await _run(cloud_settings, fake)
+    try:
+        await _wait_runpod_confirm(job_repo, upload_job.id)
+    finally:
+        await _stop(orch, task)
+    assert len(fake.dispatched) == 1
+
+
 # --- helpers ----------------------------------------------------------------------
 
 

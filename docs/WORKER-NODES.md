@@ -249,7 +249,10 @@ Operator and dashboard reads (passcode-gated, existing auth):
 A node is **online** when `last_seen_at` is younger than
 `NODE_ONLINE_SECONDS` (default 45) and `disabled_at` is null. It is
 **available** for a kind when it is online, advertises that capability,
-and `busy_assignment_id` is null. Selection among several available nodes:
+and `busy_assignment_id` is null. Separation additionally requires
+`separation_disabled_at` to be null; the admin "Separate stems on this node"
+switch changes only that field, so unchecked nodes remain download candidates.
+Selection among several available nodes:
 the one least recently heard from (`updated_at`, a stable spread rather than a strict round-robin), ties by name.
 
 ### downloading stage
