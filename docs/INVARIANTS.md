@@ -801,11 +801,15 @@ call RunPod cancellation. Failure to confirm an executor stopped refuses the
 retry. A verifying/publishing failure with a selected package first uses
 completion, package-byte and source-identity-checked publication recovery
 without another separation, and records why if it falls back to the ordinary
-source-checked restart. S3-only uploads are restored and validated at the
-expected local path before downloading. A completed URL assignment satisfies
-only its own attempt; retry creates a fresh node download. Dismissed jobs
-require restore first. Concurrent retries or an orchestrator lease produce one
-winner.
+source-checked restart, whose preflight fallback reason is appended even when
+source checking or executor cancellation later refuses the retry. S3-only
+uploads are restored and validated at the expected local path before
+downloading. A completed URL assignment and its immutable source receipt
+satisfy only their own attempt: later attempts use
+`sources/<track>/attempts/<n>/source.json`, workers adopt only exact-attempt
+receipts, and marker completion requires that attempt's evidence. Dismissed
+jobs require restore first. Concurrent retries or an orchestrator lease
+produce one winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
 - Guarded by: `library/tests/test_admin_actions.py`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`
 
@@ -814,8 +818,11 @@ winner.
 **Invariant:** Only failed jobs can be dismissed/restored. Dismissal appends an
 event, expires open assignments, and removes only the exact
 `DATA_DIR/<job hex>` working directory (never a symlink or outside path). A
-filesystem failure is an actionable per-item refusal before the dismissal
-marker commits, and bulk/group processing continues with later items. It
+exclusive job row lock is acquired/revalidated before cleanup and retained
+through cleanup and dismissal commit, so a losing dismissal cannot remove a
+successfully retried or leased job's files. A filesystem failure is an
+actionable per-item refusal before the dismissal marker commits, and bulk/group
+processing continues with later items. It
 deletes no database rows or S3 objects. Dismissed jobs disappear from public
 and default admin history/counts, are visible through explicit filters, and
 cannot be retried until restored.

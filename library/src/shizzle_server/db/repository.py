@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -1095,8 +1095,19 @@ class JobRepository:
             ))
             return job
 
-    async def set_job_dismissed(self, job_id: uuid.UUID, *, dismissed: bool) -> Job:
-        """Dismiss/restore a failed job without deleting rows or S3 objects."""
+    async def set_job_dismissed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        dismissed: bool,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
+        """Dismiss/restore under one lock; cleanup precedes the commit.
+
+        When cleanup is supplied, the row lock is held throughout it. A retry
+        or orchestrator cannot change state between filesystem deletion and
+        the dismissal commit, and a cleanup exception rolls back dismissal.
+        """
         async with self._sf() as session, session.begin():
             result = await session.execute(
                 select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
@@ -1111,6 +1122,8 @@ class JobRepository:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
             if dismissed and _has_live_lease(job, now):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            if dismissed and cleanup is not None:
+                await cleanup()
             expired: list[str] = []
             if dismissed:
                 expired = await self._expire_open_assignments(
@@ -1899,6 +1912,7 @@ class NodeRepository:
                         "node_id": node_id,
                         "kind": kind.value,
                         "idempotency_key": idempotency_key,
+                        "attempt": (assignment.payload or {}).get("attempt"),
                     },
                 )
             )

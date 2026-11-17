@@ -334,6 +334,28 @@ async def test_retry_racing_an_orchestrator_pass_is_refused(retry_env):
     assert current.status == JobStage.failed and current.attempt == 0
 
 
+async def test_dismiss_cleanup_lock_fences_retry(retry_env):
+    _, jobs, job, client = retry_env
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    # Pause the repository callback while the row lock is held; the competing
+    # API retry must lose before any filesystem cleanup can become unsafe.
+    async def fenced_cleanup():
+        started.set()
+        await resume.wait()
+
+    dismissing = asyncio.create_task(
+        jobs.set_job_dismissed(job.id, dismissed=True, cleanup=fenced_cleanup)
+    )
+    await started.wait()
+    refused = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert refused.status_code == 409
+    resume.set()
+    await dismissing
+    assert (await jobs.get_job(job.id)).dismissed_at is not None
+
+
 async def test_capacity_count_cannot_miss_a_concurrent_confirmation(pg_engine, monkeypatch):
     """G3: job and event state come from one statement snapshot.
 

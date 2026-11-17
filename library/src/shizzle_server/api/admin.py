@@ -1224,6 +1224,21 @@ def _describe_head(head: dict[str, Any] | None) -> str:
     return f"present ({size} bytes)" if size is not None else "present"
 
 
+def _source_receipt_key(job: Job, events: list[JobEvent]) -> str:
+    track_id = track_id_for_job(job.id)
+    for event in reversed(events):
+        detail = _event_detail(event)
+        if event.event == "node_assigned" and detail.get("kind") == "download":
+            attempt = detail.get("attempt")
+            if isinstance(attempt, int):
+                return node_routing.source_json_key(track_id, attempt)
+        if event.event == "admin_retry_started" and detail.get("resume_stage") == "pending":
+            attempt = detail.get("new_attempt")
+            if isinstance(attempt, int):
+                return node_routing.source_json_key(track_id, attempt)
+    return node_routing.source_json_key(track_id, 0)
+
+
 async def _add_s3_evidence(
     ev: _Evidence,
     job: Job,
@@ -1311,11 +1326,12 @@ async def _add_s3_evidence(
         expected_sha256=job.input_checksum,
     )
     if job.source_type == SourceType.url:
-        receipt = await head(node_routing.source_json_key(track_id))
+        receipt_key = _source_receipt_key(job, events)
+        receipt = await head(receipt_key)
         note(
             "downloading",
             "source_receipt",
-            key=node_routing.source_json_key(track_id),
+            key=receipt_key,
             expected="sources/{track}/source.json (A12: written last) once the download completed",
             applies=source_applies,
             outcome=receipt,
@@ -1865,6 +1881,11 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
             attempt=recovered.attempt,
         )
     if not await _source_is_obtainable(request, job):
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_refused",
+            {"reason": "upload source unavailable", "fallback_reason": fallback_reason},
+        )
         raise HTTPException(409, "The upload source no longer exists locally or in S3")
     outcome = await _stop_runpod_for_restart(request, job, events)
     if outcome["status"] == "unresolved_reservation":
@@ -1877,7 +1898,7 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
         await _jobs(request).append_event(
             job.id,
             "admin_retry_cancel_failed",
-            outcome,
+            {**outcome, "fallback_reason": fallback_reason},
         )
         raise HTTPException(
             409,
@@ -1928,16 +1949,20 @@ async def _set_dismissed(
     if job.status != JobStage.failed:
         raise HTTPException(409, "Only a failed job can be dismissed or restored")
     workdir = _job_workdir(_settings(request), job_id) if dismissed else None
-    if workdir is not None and workdir.exists():
-        try:
+
+    async def cleanup() -> None:
+        if workdir is not None and workdir.exists():
             await asyncio.to_thread(shutil.rmtree, workdir)
-        except OSError as exc:
-            raise HTTPException(
-                409,
-                f"Working directory cleanup failed: {exc}. Fix the filesystem problem and retry dismissal",
-            ) from exc
+
     try:
-        updated = await _jobs(request).set_job_dismissed(job_id, dismissed=dismissed)
+        updated = await _jobs(request).set_job_dismissed(
+            job_id, dismissed=dismissed, cleanup=cleanup if dismissed else None
+        )
+    except OSError as exc:
+        raise HTTPException(
+            409,
+            f"Working directory cleanup failed: {exc}. Fix the filesystem problem and retry dismissal",
+        ) from exc
     except InvalidTransition:
         raise HTTPException(409, "The job is already in the requested state or is being processed") from None
     return AdminJobActionResponse(

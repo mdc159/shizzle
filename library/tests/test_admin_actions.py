@@ -575,8 +575,42 @@ async def test_publication_invalid_assets_fall_back_to_source_checked_restart(
     assert "required package bytes" in event.detail["fallback_reason"]
 
 
+@pytest.mark.parametrize(
+    ("stage", "code"),
+    [
+        (JobStage.verifying, ErrorCode.CHECKSUM_MISMATCH),
+        (JobStage.publishing, ErrorCode.PUBLISH_FAILED),
+    ],
+)
+async def test_publication_fallback_reason_survives_source_refusal(
+    admin_client, monkeypatch, stage, code
+):
+    c, app = admin_client
+    job = await _job(app, input_checksum="a" * 64)
+    await _fail(app, job, stage, code)
+
+    async def completed(_ctx, *, allow_receipt):
+        return "COMPLETED"
+
+    monkeypatch.setattr(admin_module, "completion_evidence", completed)
+    monkeypatch.setattr(
+        "shizzle_server.orchestrator.recover_publication.load_and_verify_package",
+        lambda _path: (_ for _ in ()).throw(
+            FileNotFoundError("required package bytes are unavailable")
+        ),
+    )
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409
+    event = next(
+        event
+        for event in await app.state.job_repo.list_events(job.id)
+        if event.event == "admin_retry_refused"
+    )
+    assert "required package bytes" in event.detail["fallback_reason"]
+
+
 async def test_old_completed_download_does_not_satisfy_reopened_attempt(
-    settings, job_repo, session_factory
+    settings, job_repo, session_factory, monkeypatch
 ):
     from shizzle_server.db.repository import NodeRepository
     from shizzle_server.orchestrator.nodes import download_via_node
@@ -626,6 +660,57 @@ async def test_old_completed_download_does_not_satisfy_reopened_attempt(
     assert latest is not None and latest.id != old.id
     assert latest.payload["attempt"] == 1
     assert latest.status == NodeAssignmentStatus.assigned
+
+    # The old immutable receipt is still present. It must not complete the
+    # fresh assignment before its worker has produced attempt-1 evidence.
+    from shizzle_server.orchestrator import nodes as nodes_mod
+
+    receipt = {
+        "interface": nodes_mod.SOURCE_INTERFACE,
+        "attempt": 0,
+        "source_json_key": nodes_mod.source_json_key(track_id_for_job(job.id), 0),
+        "object_key": cloud.source_key(track_id_for_job(job.id)),
+        "track_id": str(track_id_for_job(job.id)),
+        "sha256": hashlib.sha256(b"source").hexdigest(),
+        "bytes": 6,
+        "duration_seconds": 1.0,
+    }
+
+    async def old_receipt(_ctx, _track_id):
+        return receipt
+
+    def matching_head(_s3, _bucket, _key):
+        import base64
+
+        return {
+            "ContentLength": 6,
+            "ChecksumSHA256": base64.b64encode(hashlib.sha256(b"source").digest()).decode(),
+        }
+
+    monkeypatch.setattr(nodes_mod, "_read_source_receipt", old_receipt)
+    monkeypatch.setattr(nodes_mod, "_head_with_checksum", matching_head)
+    assert await download_via_node(ctx) is None
+    latest = await node_repo.latest_for_job(job.id, kind=NodeAssignmentKind.download)
+    assert latest.status == NodeAssignmentStatus.assigned
+    assert claimed.status == JobStage.downloading
+
+    receipt["attempt"] = 1
+    receipt["source_json_key"] = nodes_mod.source_json_key(track_id_for_job(job.id), 1)
+    assert await download_via_node(ctx) == JobStage.dispatched
+
+
+async def test_retry_winner_dismissal_refusal_preserves_source(admin_client):
+    c, app = admin_client
+    # When retry wins first, dismissal is refused before it can remove the
+    # reopened job's source.
+    other = await _job(app)
+    other_dir = _source(app, other)
+    await _fail(app, other, JobStage.pending)
+    retried = await c.post(f"/api/admin/jobs/{other.id}/retry", headers=HEADERS)
+    assert retried.status_code == 200
+    refused = await c.post(f"/api/admin/jobs/{other.id}/dismiss", headers=HEADERS)
+    assert refused.status_code == 409
+    assert (other_dir / "source.mp4").is_file()
 
 
 async def test_bulk_dismiss_cleanup_failure_is_actionable_and_continues(

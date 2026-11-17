@@ -123,6 +123,30 @@ def test_upload_writes_source_then_receipt_last_conditionally(tmp_path):
     assert phases[-1].startswith("upload: already complete")
 
 
+def test_attempt_receipt_is_immutable_and_stale_attempt_cannot_adopt(tmp_path):
+    s3 = _FakeS3()
+    source = _source(tmp_path)
+    receipt = {
+        "track_id": "t",
+        "object_key": "sources/t/source.mp4",
+        "source_json_key": "sources/t/attempts/1/source.json",
+        "attempt": 1,
+        "sha256": source.sha256,
+    }
+    upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _msg: None)
+    landed = json.loads(s3.objects["sources/t/attempts/1/source.json"])
+    assert landed["attempt"] == 1
+    assert "sources/t/source.json" not in s3.objects
+    with pytest.raises(DownloadError, match="attempt 1"):
+        upload_source(
+            s3,
+            bucket="b",
+            source=source,
+            receipt={**receipt, "attempt": 0},
+            progress=lambda _msg: None,
+        )
+
+
 def test_stale_node_cannot_overwrite_an_owned_source(tmp_path):
     """First writer wins: a 412 on source.mp4 adopts the owner's receipt."""
     s3 = _FakeS3()
