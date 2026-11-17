@@ -617,7 +617,9 @@ test.describe('Admin page (/admin)', () => {
     await expect(page.getByText('The admin API is not reachable from this network.')).toHaveCount(0);
   });
 
-  test('shows dismissed jobs and restores them', async ({ page }) => {
+  test('shows dismissed jobs with exactly Restore and Restore and retry, and restores them', async ({
+    page,
+  }) => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);
     await page.route('**/api/admin/jobs?*', (route) =>
@@ -639,8 +641,111 @@ test.describe('Admin page (/admin)', () => {
     });
     await page.goto('/admin');
     await page.getByLabel('Dismissed jobs').selectOption('only');
-    await page.getByRole('button', { name: 'Restore', exact: true }).first().click();
+    // G7/G8: a dismissed job offers exactly Restore and Restore and retry —
+    // no plain Retry, and no bulk buttons over a dismissed-only list.
+    const jobsSection = page.locator('section[aria-label="Jobs"]');
+    await expect(jobsSection.getByRole('button', { name: 'Restore', exact: true })).toHaveCount(1);
+    await expect(jobsSection.getByRole('button', { name: 'Restore and retry' })).toHaveCount(1);
+    await expect(jobsSection.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
+    await expect(jobsSection.getByRole('button', { name: /Retry all failed/ })).toHaveCount(0);
+    await jobsSection.getByRole('button', { name: 'Restore', exact: true }).click();
     await expect.poll(() => restored).toBe(true);
+  });
+
+  test('Restore and retry posts /retry?restore=true for a dismissed job', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/jobs?*', (route) =>
+      route.fulfill({
+        json: {
+          jobs: [{ ...failedJob(), dismissedAt: minutesAgo(1) }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+          counts: {},
+          dismissedCount: 1,
+        },
+      })
+    );
+    await page.route(`**/api/admin/jobs/${FAILED_ID}`, (route) =>
+      route.fulfill({
+        json: { ...detailPayload(false), job: { ...failedJob(), dismissedAt: minutesAgo(1) } },
+      })
+    );
+    const retryRequests: Array<{ url: string; method: string }> = [];
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry*`, (route) => {
+      retryRequests.push({ url: route.request().url(), method: route.request().method() });
+      return route.fulfill({
+        json: { status: 'pending', resumeStage: 'pending', attempt: 3, action: 'retried' },
+      });
+    });
+    await page.goto('/admin');
+    await page.getByLabel('Dismissed jobs').selectOption('only');
+
+    // The dismissed job's trace shows the same two buttons, still no Retry.
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+    const detail = page.locator('section[aria-label="Job detail"]');
+    await expect(detail.getByRole('button', { name: 'Restore and retry' })).toBeVisible();
+    await expect(detail.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0);
+
+    await page
+      .locator('section[aria-label="Jobs"]')
+      .getByRole('button', { name: 'Restore and retry' })
+      .click();
+    await expect.poll(() => retryRequests).toHaveLength(1);
+    expect(retryRequests[0].method).toBe('POST');
+    expect(retryRequests[0].url).toContain(`/api/admin/jobs/${FAILED_ID}/retry?restore=true`);
+  });
+
+  test('Retry all failed and bulk retry act only on the active list', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    const dismissedFailure = {
+      ...failedJob(),
+      jobId: SECOND_FAILED_ID,
+      title: 'Dismissed failure',
+      dismissedAt: minutesAgo(1),
+    };
+    await page.route('**/api/admin/jobs?*', (route) => {
+      const view = new URL(route.request().url()).searchParams.get('dismissed');
+      const jobs =
+        view === 'only'
+          ? [dismissedFailure]
+          : view === 'include'
+            ? [failedJob(), dismissedFailure, readyJob()]
+            : [failedJob(), readyJob()];
+      return route.fulfill({
+        json: {
+          jobs,
+          total: jobs.length,
+          limit: 50,
+          offset: 0,
+          counts: view === 'only' ? {} : { failed: 2, ready: 1 },
+          dismissedCount: 1,
+        },
+      });
+    });
+    const bulkBodies: Array<{ action: string; jobIds: string[] }> = [];
+    await page.route('**/api/admin/jobs/bulk', (route) => {
+      bulkBodies.push(route.request().postDataJSON() as { action: string; jobIds: string[] });
+      return route.fulfill({ json: [{ jobId: FAILED_ID, ok: true, resumeStage: 'pending' }] });
+    });
+    page.on('dialog', (dialog) => void dialog.accept());
+    await page.goto('/admin');
+
+    // Include-dismissed shows one active and one dismissed failure; the bulk
+    // count and the request cover only the active one.
+    await page.getByLabel('Dismissed jobs').selectOption('include');
+    await expect(page.getByRole('button', { name: 'Retry all failed (1)' })).toBeVisible();
+    await page.getByRole('button', { name: 'Retry all failed (1)' }).click();
+    await expect.poll(() => bulkBodies).toHaveLength(1);
+    expect(bulkBodies[0].action).toBe('retry');
+    expect(bulkBodies[0].jobIds).toEqual([FAILED_ID]);
+
+    // A dismissed-only list has no active failures, so no bulk buttons.
+    await page.getByLabel('Dismissed jobs').selectOption('only');
+    await expect(page.getByRole('button', { name: /Retry all failed/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Dismiss all failed/ })).toHaveCount(0);
   });
 
   test('confirms both bulk actions and shows per-job result summaries', async ({ page }) => {

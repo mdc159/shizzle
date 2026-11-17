@@ -294,15 +294,18 @@ export async function releaseAdminAssignment(assignmentId: string): Promise<void
 
 // --- Failed-job and library actions ---------------------------------------------
 
-async function adminJobAction(jobId: string, action: 'retry' | 'dismiss' | 'restore') {
+async function adminJobAction(jobId: string, action: 'retry' | 'dismiss' | 'restore', restore = false) {
+  // G7/G8: a dismissed job cannot be retried until restored. ?restore=true
+  // asks the server for the combined restore-then-retry transition.
+  const query = action === 'retry' && restore ? '?restore=true' : '';
   return adminFetch<AdminRetryResponse | AdminJobActionResponse>(
-    `/api/admin/jobs/${encodeURIComponent(jobId)}/${action}`,
+    `/api/admin/jobs/${encodeURIComponent(jobId)}/${action}${query}`,
     { method: 'POST' }
   );
 }
 
-export const retryAdminJob = (jobId: string) =>
-  adminJobAction(jobId, 'retry') as Promise<AdminRetryResponse>;
+export const retryAdminJob = (jobId: string, restore = false) =>
+  adminJobAction(jobId, 'retry', restore) as Promise<AdminRetryResponse>;
 export const dismissAdminJob = (jobId: string) =>
   adminJobAction(jobId, 'dismiss') as Promise<AdminJobActionResponse>;
 export const restoreAdminJob = (jobId: string) =>

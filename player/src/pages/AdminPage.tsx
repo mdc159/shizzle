@@ -316,7 +316,7 @@ export const AdminPage: React.FC = () => {
   const sortedJobs = useMemo(() => sortFailedFirst(jobs), [jobs]);
   const listedFailed = sortedJobs.filter((job) => job.status === 'failed' && !job.dismissedAt);
 
-  const runJobAction = async (action: 'retry' | 'dismiss' | 'restore', jobId: string) => {
+  const runJobAction = async (action: JobAction, jobId: string) => {
     setActionBusy(jobId);
     setActionErrors((current) => {
       const next = { ...current };
@@ -324,8 +324,15 @@ export const AdminPage: React.FC = () => {
       return next;
     });
     try {
-      const call = action === 'retry' ? retryAdminJob : action === 'dismiss' ? dismissAdminJob : restoreAdminJob;
-      const result = await call(jobId);
+      const call =
+        action === 'retry'
+          ? retryAdminJob(jobId)
+          : action === 'restore_retry'
+            ? retryAdminJob(jobId, true)
+            : action === 'dismiss'
+              ? dismissAdminJob(jobId)
+              : restoreAdminJob(jobId);
+      const result = await call;
       if ('newJobId' in result && result.newJobId) {
         setResubmission({ oldJobId: jobId, newJobId: result.newJobId });
         setSelectedJobId(result.newJobId);
@@ -610,15 +617,25 @@ export const AdminPage: React.FC = () => {
 
 // --- job and library actions -----------------------------------------------------
 
+type JobAction = 'retry' | 'dismiss' | 'restore' | 'restore_retry';
+
 type ActionJob = Pick<AdminJobRow, 'jobId' | 'status' | 'dismissedAt'>;
 
 const JobActionButtons: React.FC<{
   job: ActionJob;
   busy: boolean;
-  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+  onAction: (action: JobAction, jobId: string) => void;
 }> = ({ job, busy, onAction }) => {
   if (job.dismissedAt) {
-    return <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('restore', job.jobId)}>Restore</Button>;
+    // G7/G8: a dismissed job cannot be retried until restored, so the
+    // dismissed view offers exactly Restore and Restore and retry — never a
+    // plain Retry.
+    return (
+      <span className="flex gap-2">
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('restore', job.jobId)}>Restore</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('restore_retry', job.jobId)}>Restore and retry</Button>
+      </span>
+    );
   }
   if (job.status !== 'failed') return null;
   return (
@@ -634,7 +651,7 @@ const JobCard: React.FC<{
   error?: string;
   busy: boolean;
   onSelect: () => void;
-  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+  onAction: (action: JobAction, jobId: string) => void;
 }> = ({ job, error, busy, onSelect, onAction }) => (
   <div className={cn(
     'w-full rounded-lg border p-3 text-left transition-colors',
@@ -994,7 +1011,7 @@ const JobDetailSection: React.FC<{
   onReleased: () => void;
   actionError?: string;
   actionBusy: boolean;
-  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+  onAction: (action: JobAction, jobId: string) => void;
 }> = ({ jobId, detail, error, verifyS3, onToggleVerify, onReleased, actionError, actionBusy, onAction }) => {
   const [releaseBusy, setReleaseBusy] = useState<string | null>(null);
   const [releaseError, setReleaseError] = useState<string | null>(null);
