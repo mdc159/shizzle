@@ -446,13 +446,15 @@ test.describe('Admin page (/admin)', () => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);
     await page.route('**/api/admin/settings', async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
       await route.fulfill({ json: settingsPayload() }).catch(() => undefined);
     });
     await page.goto('/admin');
     // Jobs and nodes must render when the shared controller aborts settings
-    // at 10 s, not wait for this route's 11 s response.
-    await expect(page.locator('button', { hasText: 'Broken Ballad' })).toBeVisible({ timeout: 10_500 });
+    // at 10 s, not wait for this route's 30 s response. The margin between
+    // the abort and this deadline is wide on purpose: a 0.5 s margin failed
+    // under full-suite load.
+    await expect(page.locator('button', { hasText: 'Broken Ballad' })).toBeVisible({ timeout: 20_000 });
   });
 
   test('distinguishes an unknown job from an unavailable admin network', async ({ page }) => {
