@@ -191,6 +191,25 @@ async def test_download_only_dispatches_runpod_with_no_node_wait(
 # --- the RunPod concurrency limit -------------------------------------------------
 
 
+class _GateRunPodClient(FakeRunPodClient):
+    """Holds every job IN_PROGRESS until the test opens the gate.
+
+    Keeps the single RunPod slot occupied deterministically while the second
+    job's parked state is observed, instead of racing a scripted response
+    list.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.gate_open = False
+
+    async def poll(self, runpod_job_id: str) -> dict:
+        self.polled.append(runpod_job_id)
+        if self.gate_open:
+            return {"status": "COMPLETED", "output": {"separation": {"sample_count": 44100}}}
+        return {"status": "IN_PROGRESS", "output": {"phase": "working"}}
+
+
 async def test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work(
     cloud_settings, job_repo, runtime_repo, monkeypatch, upload_job
 ):
@@ -199,16 +218,11 @@ async def test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_
     dispatches. Dispatched work is never cancelled."""
     _stub_cloud_intake(monkeypatch)
     await runtime_repo.set_value(RUNPOD_MAX_CONCURRENT_KEY, 1)
-    fake = FakeRunPodClient([
-        # First job: one IN_PROGRESS poll, then COMPLETED (script repeats the
-        # last response, so the second job completes as well).
-        {"status": "IN_PROGRESS", "output": {"phase": "working"}},
-        {"status": "COMPLETED", "output": {"separation": {"sample_count": 44100}}},
-    ])
+    fake = _GateRunPodClient()
     orch, task = await _run(cloud_settings, fake)
     try:
         # Job one takes the only RunPod slot first (no claim-order race: the
-        # second job does not exist yet).
+        # second job does not exist yet) and holds it (gate closed).
         first_dispatched = await _wait_runpod_confirm(job_repo, upload_job.id)
         assert len(fake.dispatched) == 1
 
@@ -222,11 +236,6 @@ async def test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_
         # The second job parks while the first holds the single RunPod slot.
         await wait_for_status(job_repo, second.id, JobStage.dispatched, timeout=10)
         await _wait_event_count(job_repo, second.id, "runpod_wait", exactly=1)
-        parked = await job_repo.get_job(second.id)
-        assert parked.attempt == 0  # a park costs no attempt (B9 sibling)
-        assert parked.runpod_job_id is None
-        # (lease_owner may already show a fresh claim: a parked job is
-        # immediately re-claimable; that is the point of parking.)
         # Give the parked pass a moment to re-check several times: the wait
         # event must stay deduped to one row per outage.
         await asyncio.sleep(0.3)
@@ -234,10 +243,16 @@ async def test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_
             e for e in await job_repo.list_events(second.id) if e.event == "runpod_wait"
         ]
         assert len(waits) == 1
+        parked = await job_repo.get_job(second.id)
+        assert parked.attempt == 0  # a park costs no attempt (B9 sibling)
+        assert parked.runpod_job_id is None  # nothing dispatched for it yet
         assert "retry_scheduled" not in [
             e.event for e in await job_repo.list_events(second.id)
         ]
 
+        # Open the gate: the first job completes, the slot frees, and only
+        # then does the parked job dispatch.
+        fake.gate_open = True
         await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
         second_ready = await wait_for_status(job_repo, second.id, JobStage.ready, timeout=15)
     finally:

@@ -390,11 +390,13 @@ async def test_rejected_source_receipt_is_a_retryable_checksum_failure(
     assert "receipt rejected" in retry.detail["error_detail"]
     assert (await job_repo.get_job(job.id)).input_checksum is None
     # The rejected assignment is closed (not left "completed" to be re-verified
-    # forever) and the node is free again.
+    # forever) and the node is no longer held by IT. Under load the orchestrator
+    # may already have handed the node the next attempt's fresh assignment —
+    # that is legitimate retry behavior, not a leak of this assignment.
     rejected = await node_repo.get_assignment(first.id)
     assert rejected.status == NodeAssignmentStatus.failed
     assert rejected.detail["rejected_reason"].startswith("source.mp4 is 9 bytes")
-    assert (await node_repo.get(MAC)).busy_assignment_id is None
+    assert (await node_repo.get(MAC)).busy_assignment_id != first.id
 
 
 async def test_source_receipt_is_checked_against_the_objects_stored_checksum(
@@ -449,13 +451,25 @@ async def test_upload_job_prefers_an_online_separation_node(
 ):
     _stub_cloud_intake(monkeypatch)
     _stub_package_ready(monkeypatch, True)
+    # The scripted node completes by direct repository call; under a loaded
+    # full-suite run the wall clock between assignment creation and that call
+    # can exceed the default ack window, which would expire the assignment out
+    # from under the script (not the behavior under test).
+    cloud_settings.node_ack_seconds = 60.0
     await _register(node_repo)
     fake = FakeRunPodClient([])
     orch, task = await _run(cloud_settings, fake)
     try:
         sep = await _wait_assignment(node_repo, upload_job.id, NodeAssignmentKind.separate)
         assert sep.payload["track_id"] == str(track_id_for_job(upload_job.id))
-        assert await node_repo.complete(sep.id, node_id=MAC, detail={})
+        # A1: the S3 marker is the truth and the report is only a hint — with
+        # package_ready stubbed True the orchestrator may legitimately complete
+        # this assignment via the marker before our scripted report lands.
+        # Either completion path is fine; the job must reach ready either way.
+        if not await node_repo.complete(sep.id, node_id=MAC, detail={}):
+            marker_completed = await node_repo.get_assignment(sep.id)
+            assert marker_completed.status == NodeAssignmentStatus.completed
+            assert marker_completed.detail == {"completed_by": "s3-marker"}
         ready = await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
     finally:
         await _stop(orch, task)
