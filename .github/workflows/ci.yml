@@ -36,6 +36,7 @@ jobs:
         run: |
           bash deploy/vps/tests/test_release_transaction.sh
           bash deploy/runpod/tests/test_repoint.sh
+          bash deploy/vps/tests/test_staging_stack.sh
       - run: uv sync --directory library
       - run: uv run --directory library pytest -q -m "not postgres"
       # ops/tests is outside library's configured testpaths; run the ops

@@ -2,15 +2,23 @@ name: deploy-staging
 
 # Manual-only deploy of any branch or commit to the staging stack on the
 # production VPS. This is how a pull-request branch reaches staging before
-# merge. It is deliberately NOT callable from ci.yml and does not use the
-# `production` GitHub environment, so it never queues a production approval
-# and never deploys shizzle.systems. The image build is reused from
-# api-image.yml; the host transaction is deploy/vps/deploy-staging.sh, which
-# refuses to act on the production directory or project.
+# merge. It is deliberately NOT callable from ci.yml and never touches the
+# production project or the public site.
 #
-# Secrets (repository level, NOT the production environment): VPS_STAGING_HOST,
-# VPS_STAGING_SSH_KEY, VPS_STAGING_SSH_HOST_KEY. They may hold the same key
-# material as production; a dedicated staging SSH account is future hardening.
+# Trust split (see docs/AUTOMATION.md 3b for the honest boundary statement):
+#   - The ONLY things that flow from the chosen ref are the digest-pinned API
+#     image (built by the reused api-image.yml) and the built player bundle.
+#     The player build runs in its own job that holds no VPS credentials.
+#   - deploy-staging.sh, compose.staging.yml and Caddyfile.staging are shipped
+#     from the repository's DEFAULT BRANCH, so a feature branch cannot make
+#     root execute its own deploy assets. A change to those files reaches
+#     staging only after it is merged.
+#   - The deploy job uses the GitHub environment `staging`; configure a
+#     required reviewer there if staging deploys should need approval. The
+#     environment holds the VPS_STAGING_* secrets.
+#   - What remains true: the chosen ref's image still runs on the production
+#     host (inside the staging project), and the SSH identity is root on that
+#     host — the same trust level as a production deploy, not a sandbox.
 
 on:
   workflow_dispatch:
@@ -58,14 +66,46 @@ jobs:
       contents: read
       packages: write # Publish the digest-pinned API image.
 
+  build-player:
+    name: Build player from the chosen ref
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact: shizzle-player-${{ needs.resolve.outputs.target_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.target_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: player/package-lock.json
+      - name: Build player
+        working-directory: player
+        run: npm ci && npm run build
+      - name: Package player
+        run: tar -C player -czf shizzle-player.tar.gz dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: shizzle-player-${{ needs.resolve.outputs.target_sha }}
+          path: shizzle-player.tar.gz
+          retention-days: 5
+          if-no-files-found: error
+
   deploy:
     name: Ship and deploy to staging
-    needs: [resolve, build-image]
+    needs: [resolve, build-image, build-player]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    environment:
+      name: staging
     env:
       TARGET_SHA: ${{ needs.resolve.outputs.target_sha }}
       IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
+      PLAYER_ARTIFACT: ${{ needs.build-player.outputs.artifact }}
     steps:
       - name: Preflight staging deployment secrets
         env:
@@ -79,21 +119,18 @@ jobs:
           [ -n "$VPS_SSH_KEY" ] || missing="$missing VPS_STAGING_SSH_KEY"
           [ -n "$VPS_SSH_HOST_KEY" ] || missing="$missing VPS_STAGING_SSH_HOST_KEY"
           if [ -n "$missing" ]; then
-            echo "::error::Empty staging deployment secrets:${missing}. Add them as repository secrets."
+            echo "::error::Empty staging deployment secrets:${missing}. Add them to the 'staging' GitHub environment."
             exit 1
           fi
+      # No ref: the DEFAULT BRANCH. The deploy script and the Compose/Caddy
+      # assets it runs as root on the box come from this reviewed copy, never
+      # from the chosen feature ref.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.resolve.outputs.target_sha }}
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: player/package-lock.json
-      - name: Build player
-        working-directory: player
-        run: npm ci && npm run build
+          name: ${{ env.PLAYER_ARTIFACT }}
       - name: Set up SSH
         env:
           SSH_KEY: ${{ secrets.VPS_STAGING_SSH_KEY }}
@@ -108,9 +145,9 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_STAGING_HOST }}
         run: |
           set -euo pipefail
-          tar -C player -czf /tmp/shizzle-player.tar.gz dist
+          test -s shizzle-player.tar.gz
           ssh root@"$VPS_HOST" 'rm -rf /opt/shizzle/staging/incoming && mkdir -p /opt/shizzle/staging/incoming'
-          scp /tmp/shizzle-player.tar.gz deploy/vps/compose.staging.yml deploy/vps/Caddyfile.staging \
+          scp shizzle-player.tar.gz deploy/vps/compose.staging.yml deploy/vps/Caddyfile.staging \
             deploy/vps/deploy-staging.sh \
             root@"$VPS_HOST":/opt/shizzle/staging/incoming/
       - name: Deploy transaction
