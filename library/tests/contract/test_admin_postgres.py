@@ -360,9 +360,9 @@ async def test_cancelled_dismissal_finishes_cleanup_before_retry(
     retry_env, data_dir, monkeypatch
 ):
     _, jobs, job, client = retry_env
-    from shizzle_server.api import admin as admin_module
-
     import threading
+
+    from shizzle_server.api import admin as admin_module
 
     started = threading.Event()
     resume = threading.Event()

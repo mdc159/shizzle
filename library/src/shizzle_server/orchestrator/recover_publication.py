@@ -68,7 +68,8 @@ async def verify_publication_assets(ctx: StageContext, expected_checksum: str) -
     from .nodes import source_attempt_for_history
 
     source_attempt = source_attempt_for_history(
-        ctx.job, await ctx.jobs.list_events(ctx.job.id)
+        ctx.job,
+        await ctx.jobs.list_events(ctx.job.id) if ctx.jobs is not None else [],
     )
     if (
         source_hash != expected_checksum

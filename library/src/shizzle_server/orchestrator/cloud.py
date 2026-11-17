@@ -252,7 +252,8 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
     from .nodes import source_attempt_for_history
 
     source_attempt = source_attempt_for_history(
-        ctx.job, await ctx.jobs.list_events(ctx.job.id)
+        ctx.job,
+        await ctx.jobs.list_events(ctx.job.id) if ctx.jobs is not None else [],
     )
     if source_info.get("object_key") != source_key(track_id, source_attempt):
         raise StageError(
@@ -314,7 +315,8 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
             from .nodes import source_attempt_for_history
 
             source_attempt = source_attempt_for_history(
-                ctx.job, await ctx.jobs.list_events(ctx.job.id)
+                ctx.job,
+                await ctx.jobs.list_events(ctx.job.id) if ctx.jobs is not None else [],
             )
             source = ctx.job_dir / "source.mp4"
             await asyncio.to_thread(
