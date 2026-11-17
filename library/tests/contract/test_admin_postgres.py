@@ -316,17 +316,39 @@ async def test_simultaneous_admin_retries_have_exactly_one_winner(retry_env):
     ) == 1
 
 
-async def test_restore_and_retry_racing_restore_converges_on_postgres(retry_env):
+async def test_restore_and_retry_racing_restore_converges_on_postgres(
+    retry_env, monkeypatch
+):
     _, jobs, job, client = retry_env
     await jobs.set_job_dismissed(job.id, dismissed=True)
-    responses = await asyncio.gather(
-        client.post(f"/api/admin/jobs/{job.id}/restore", headers=HEADERS),
-        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+
+    from shizzle_server.api import admin as admin_module
+
+    started = asyncio.Event()
+    resume = asyncio.Event()
+    original_stop = admin_module._stop_runpod_for_restart
+
+    async def pause_after_snapshot_and_preflight(*args, **kwargs):
+        started.set()
+        await resume.wait()
+        return await original_stop(*args, **kwargs)
+
+    monkeypatch.setattr(
+        admin_module, "_stop_runpod_for_restart", pause_after_snapshot_and_preflight
     )
-    assert responses[1].status_code == 200, responses[1].text
-    # If retry wins first, the now-pending job is no longer eligible for the
-    # standalone failed-job restore; either ordering must converge atomically.
-    assert responses[0].status_code in (200, 409)
+    retry_task = asyncio.create_task(
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS)
+    )
+    await started.wait()
+    try:
+        restored = await client.post(
+            f"/api/admin/jobs/{job.id}/restore", headers=HEADERS
+        )
+    finally:
+        resume.set()
+    retried = await retry_task
+    assert restored.status_code == 200, restored.text
+    assert retried.status_code == 200, retried.text
     current = await jobs.get_job(job.id)
     assert current.status == JobStage.pending and current.dismissed_at is None
     events = await jobs.list_events(job.id)
