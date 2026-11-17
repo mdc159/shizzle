@@ -178,6 +178,7 @@ export const AdminPage: React.FC = () => {
   const [routingMessage, setRoutingMessage] = useState<string | null>(null);
   const [limitDraft, setLimitDraft] = useState<string>('');
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [actionMessages, setActionMessages] = useState<Record<string, string>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkResults, setBulkResults] = useState<AdminBulkResult[]>([]);
@@ -324,9 +325,16 @@ export const AdminPage: React.FC = () => {
     });
     try {
       const call = action === 'retry' ? retryAdminJob : action === 'dismiss' ? dismissAdminJob : restoreAdminJob;
-      await call(jobId);
-      await refresh();
-      if (selectedJobId === jobId) await loadDetail(jobId, verifyS3);
+      const result = await call(jobId);
+      if ('newJobId' in result && result.newJobId) {
+        setActionMessages((current) => ({ ...current, [jobId]: 'Resubmitted as a new job' }));
+        setSelectedJobId(result.newJobId);
+        await refresh();
+        await loadDetail(result.newJobId, false);
+      } else {
+        await refresh();
+        if (selectedJobId === jobId) await loadDetail(jobId, verifyS3);
+      }
     } catch (err) {
       setActionErrors((current) => ({
         ...current,
@@ -499,7 +507,7 @@ export const AdminPage: React.FC = () => {
                 <ul aria-label="Bulk action results" className="mb-3 space-y-1 text-xs">
                   {bulkResults.map((result, index) => (
                     <li key={`${result.jobId}-${index}`} className={result.ok ? 'text-green-400' : 'text-red-400'}>
-                      {result.jobId.slice(0, 8)}: {result.ok ? `ok${result.resumeStage ? ` (${result.resumeStage})` : ''}` : result.reason}
+                      {result.jobId.slice(0, 8)}: {result.ok ? `ok${result.action ? ` (${result.action})` : result.resumeStage ? ` (${result.resumeStage})` : ''}${result.newJobId ? ` → ${result.newJobId.slice(0, 8)}` : ''}` : result.reason}
                     </li>
                   ))}
                 </ul>
@@ -513,6 +521,7 @@ export const AdminPage: React.FC = () => {
                       key={job.jobId}
                       job={job}
                       error={actionErrors[job.jobId]}
+                      message={actionMessages[job.jobId]}
                       busy={actionBusy === job.jobId}
                       onSelect={() => {
                         setVerifyS3(false);
@@ -559,6 +568,7 @@ export const AdminPage: React.FC = () => {
                 onToggleVerify={() => setVerifyS3((value) => !value)}
                 onReleased={() => selectedJobId && void loadDetail(selectedJobId, verifyS3)}
                 actionError={actionErrors[selectedJobId]}
+                actionMessage={actionMessages[selectedJobId]}
                 actionBusy={actionBusy === selectedJobId}
                 onAction={runJobAction}
               />
@@ -608,10 +618,11 @@ const JobActionButtons: React.FC<{
 const JobCard: React.FC<{
   job: AdminJobRow;
   error?: string;
+  message?: string;
   busy: boolean;
   onSelect: () => void;
   onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
-}> = ({ job, error, busy, onSelect, onAction }) => (
+}> = ({ job, error, message, busy, onSelect, onAction }) => (
   <div className={cn(
     'w-full rounded-lg border p-3 text-left transition-colors',
     job.status === 'failed' ? 'border-red-900/70 bg-zinc-950' : 'border-zinc-800 bg-zinc-950/50'
@@ -650,6 +661,7 @@ const JobCard: React.FC<{
     </button>
     <span className="mt-2 flex items-center justify-between gap-2">
       <JobActionButtons job={job} busy={busy} onAction={onAction} />
+      {message && <span className="text-xs text-green-400">{message}</span>}
       {error && <span className="text-xs text-red-400">{error}</span>}
     </span>
   </div>
@@ -955,9 +967,10 @@ const JobDetailSection: React.FC<{
   onToggleVerify: () => void;
   onReleased: () => void;
   actionError?: string;
+  actionMessage?: string;
   actionBusy: boolean;
   onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
-}> = ({ jobId, detail, error, verifyS3, onToggleVerify, onReleased, actionError, actionBusy, onAction }) => {
+}> = ({ jobId, detail, error, verifyS3, onToggleVerify, onReleased, actionError, actionMessage, actionBusy, onAction }) => {
   const [releaseBusy, setReleaseBusy] = useState<string | null>(null);
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const terminal = detail ? TERMINAL_JOB_STATUSES.has(detail.job.status) : false;
@@ -980,6 +993,7 @@ const JobDetailSection: React.FC<{
         </Button>
       </span>
     </div>
+    {actionMessage && <p className="mb-2 text-sm text-green-400">{actionMessage}</p>}
     {actionError && <p className="mb-2 text-sm text-red-400">{actionError}</p>}
     {error ? (
       <p className="text-sm text-red-400">{error}</p>

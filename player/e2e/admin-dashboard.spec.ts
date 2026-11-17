@@ -516,6 +516,28 @@ test.describe('Admin page (/admin)', () => {
     await expect.poll(() => actions).toEqual(['retry', 'dismiss']);
   });
 
+  test('shows a link resubmission and selects the new job', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry`, (route) =>
+      route.fulfill({
+        json: {
+          status: 'resubmitted',
+          resumeStage: 'pending',
+          attempt: 0,
+          action: 'resubmitted',
+          newJobId: READY_ID,
+        },
+      })
+    );
+    await page.goto('/admin');
+    await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
+    await expect(page.getByText('Resubmitted as a new job')).toBeVisible();
+    await expect(
+      page.locator('section[aria-label="Job detail"] h2').first()
+    ).toContainText(READY_ID.slice(0, 8));
+  });
+
   test('shows action refusals next to the row and detail, including unknown ids', async ({ page }) => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);

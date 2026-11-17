@@ -315,8 +315,6 @@ def build_receipt(
     return {
         "interface": SOURCE_INTERFACE,
         "assignment_id": assignment_id,
-        "attempt": payload.get("attempt"),
-        "source_json_key": payload.get("source_json_key"),
         "track_id": str(payload["track_id"]),
         "object_key": str(payload["source_key"]),
         "bytes": source.bytes,
@@ -349,14 +347,9 @@ def upload_source(
     and returns it, so the completion report describes what is in S3.
     """
     key = receipt["object_key"]
-    receipt_key = str(receipt.get("source_json_key") or _receipt_key(receipt["track_id"]))
+    receipt_key = _receipt_key(receipt["track_id"])
     existing = _read_json(s3, bucket, receipt_key)
     if existing is not None:
-        if existing.get("attempt") != receipt.get("attempt"):
-            raise DownloadError(
-                "SOURCE_RACE",
-                f"receipt is for attempt {existing.get('attempt')}, expected {receipt.get('attempt')}",
-            )
         progress("upload: already complete (adopting the existing source)")
         return existing
     progress("upload: source.mp4")
@@ -399,11 +392,9 @@ def upload_source(
     return _write_receipt(s3, bucket=bucket, receipt_key=receipt_key, receipt=receipt, progress=progress)
 
 
-def existing_receipt(
-    s3: Any, *, bucket: str, track_id: str, receipt_key: str | None = None
-) -> dict[str, Any] | None:
-    """The receipt for this exact download attempt, if it exists (A12)."""
-    return _read_json(s3, bucket, receipt_key or _receipt_key(track_id))
+def existing_receipt(s3: Any, *, bucket: str, track_id: str) -> dict[str, Any] | None:
+    """The receipt already in S3 for this track, if the download is done (A12)."""
+    return _read_json(s3, bucket, _receipt_key(track_id))
 
 
 def _receipt_key(track_id: str) -> str:

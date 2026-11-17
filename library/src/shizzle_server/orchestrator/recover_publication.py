@@ -65,16 +65,10 @@ async def verify_publication_assets(ctx: StageContext, expected_checksum: str) -
     source = ctx.source_path if ctx.source_path.is_file() else ctx.job_dir / "source.mp4"
     source_hash = await asyncio.to_thread(source_digest, source)
     source_info = package.handoff.get("source", {})
-    from .nodes import source_attempt_for_history
-
-    source_attempt = source_attempt_for_history(
-        ctx.job,
-        await ctx.jobs.list_events(ctx.job.id) if ctx.jobs is not None else [],
-    )
     if (
         source_hash != expected_checksum
         or source_info.get("sha256") != expected_checksum
-        or source_info.get("object_key") != source_key(track_id_for_job(ctx.job.id), source_attempt)
+        or source_info.get("object_key") != source_key(track_id_for_job(ctx.job.id))
     ):
         raise ValueError("Recovery source identity does not match verified bytes")
 

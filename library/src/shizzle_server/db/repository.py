@@ -1096,6 +1096,76 @@ class JobRepository:
             ))
             return job
 
+    async def admin_resubmit_url_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        runpod_outcome: dict[str, Any],
+        fallback_reason: str | None = None,
+    ) -> Job:
+        """Create a fresh URL job and dismiss its failed predecessor atomically."""
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            old = result.scalar_one_or_none()
+            now = utcnow()
+            if (
+                old is None or old.status != JobStage.failed
+                or old.source_type != SourceType.url or old.dismissed_at is not None
+                or _has_live_lease(old, now)
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            if pending_runpod_dispatch(historical) is not None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            expired = await self._expire_open_assignments(
+                session, job_id, reason="expired by administrator URL resubmission", now=now
+            )
+            new = Job(
+                id=uuid.uuid4(),
+                source_type=SourceType.url,
+                source_ref=old.source_ref,
+                title=old.title,
+                artist=old.artist,
+                status=JobStage.pending,
+                idempotency_key=uuid.uuid4().hex,
+                profile_version=old.profile_version,
+            )
+            session.add(new)
+            await session.flush()
+            old.dismissed_at = now
+            old.updated_at = now
+            session.add(JobEvent(
+                job_id=old.id,
+                event="admin_resubmitted",
+                detail={
+                    "new_job_id": str(new.id),
+                    "previous_failure_code": old.error_code,
+                    "fallback_reason": fallback_reason,
+                    "expired_assignment_ids": expired,
+                    "runpod": runpod_outcome,
+                },
+            ))
+            session.add(JobEvent(
+                job_id=old.id,
+                event="admin_dismissed",
+                detail={"expired_assignment_ids": expired, "resubmitted_as": str(new.id)},
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="created",
+                detail={"source_type": SourceType.url.value},
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="admin_resubmitted_from",
+                detail={"old_job_id": str(old.id)},
+            ))
+            return new
+
     async def set_job_dismissed(
         self,
         job_id: uuid.UUID,
@@ -1107,14 +1177,19 @@ class JobRepository:
         operation = asyncio.create_task(
             self._set_job_dismissed_locked(job_id, dismissed=dismissed, cleanup=cleanup)
         )
-        try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            # Cancelling the request must not unwind the transaction while the
-            # filesystem worker is deleting. Wait for the durable outcome so a
-            # retry cannot reopen before the dismissal has committed.
-            await operation
-            raise
+        cancelled = False
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                # Every cancellation is kept away from the locked operation,
+                # not only the first. Keep waiting until cleanup + commit end.
+                cancelled = True
+        result = await operation
+        current = asyncio.current_task()
+        if cancelled or (current is not None and current.cancelling()):
+            raise asyncio.CancelledError
+        return result
 
     async def _set_job_dismissed_locked(
         self,

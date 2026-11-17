@@ -243,6 +243,8 @@ export interface AdminRetryResponse {
   status: string;
   resumeStage: string;
   attempt: number;
+  action?: 'retried' | 'recovered' | 'resubmitted';
+  newJobId?: string | null;
 }
 
 export interface AdminJobActionResponse {
@@ -256,6 +258,8 @@ export interface AdminBulkResult {
   ok: boolean;
   reason?: string | null;
   resumeStage?: string | null;
+  action?: 'retried' | 'recovered' | 'resubmitted';
+  newJobId?: string | null;
 }
 
 export interface AdminLibraryTrack {

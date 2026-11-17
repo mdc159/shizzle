@@ -123,52 +123,6 @@ def test_upload_writes_source_then_receipt_last_conditionally(tmp_path):
     assert phases[-1].startswith("upload: already complete")
 
 
-def test_attempt_receipt_is_immutable_and_stale_attempt_cannot_adopt(tmp_path):
-    s3 = _FakeS3()
-    source = _source(tmp_path)
-    receipt = {
-        "track_id": "t",
-        "object_key": "sources/t/source.mp4",
-        "source_json_key": "sources/t/attempts/1/source.json",
-        "attempt": 1,
-        "sha256": source.sha256,
-    }
-    upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _msg: None)
-    landed = json.loads(s3.objects["sources/t/attempts/1/source.json"])
-    assert landed["attempt"] == 1
-    assert "sources/t/source.json" not in s3.objects
-    with pytest.raises(DownloadError, match="attempt 1"):
-        upload_source(
-            s3,
-            bucket="b",
-            source=source,
-            receipt={**receipt, "attempt": 0},
-            progress=lambda _msg: None,
-        )
-
-
-def test_new_attempt_writes_and_certifies_its_own_source_bytes(tmp_path):
-    s3 = _FakeS3()
-    old_bytes = b"attempt-zero-bytes"
-    s3.objects["sources/t/source.mp4"] = old_bytes
-    s3.objects["sources/t/source.json"] = json.dumps({"attempt": 0}).encode()
-    source = _source(tmp_path)
-    receipt = {
-        "track_id": "t",
-        "object_key": "sources/t/attempts/1/source.mp4",
-        "source_json_key": "sources/t/attempts/1/source.json",
-        "attempt": 1,
-        "sha256": source.sha256,
-    }
-    upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _msg: None)
-    assert s3.objects["sources/t/attempts/1/source.mp4"] == b"0123456789"
-    landed = json.loads(s3.objects["sources/t/attempts/1/source.json"])
-    assert landed["sha256"] == hashlib.sha256(b"0123456789").hexdigest()
-    assert landed["sha256"] != hashlib.sha256(old_bytes).hexdigest()
-    assert s3.objects["sources/t/source.mp4"] == old_bytes
-    assert json.loads(s3.objects["sources/t/source.json"])["attempt"] == 0
-
-
 def test_stale_node_cannot_overwrite_an_owned_source(tmp_path):
     """First writer wins: a 412 on source.mp4 adopts the owner's receipt."""
     s3 = _FakeS3()

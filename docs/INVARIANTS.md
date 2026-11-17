@@ -788,9 +788,9 @@ triggers immediate RunPod fallback; `only` waits, while `download_only` and
 
 ### G7 — admin retry is source-safe, fenced and fresh
 
-**Invariant:** Only a non-dismissed failed job can be retried. Restart uses the
-explicit admin-only failed-to-pending transition, an obtainable source, a
-monotonically fresh dispatch attempt, and one locked transaction that expires
+**Invariant:** Only a non-dismissed failed job can be retried. Upload restart
+uses the explicit admin-only failed-to-pending transition, an obtainable source,
+a monotonically fresh dispatch attempt, and one locked transaction that expires
 open assignments, clears old execution state and appends `admin_retry_started`.
 Ordinary `advance()` remains unable to reopen failed jobs. An unresolved accepted
 reservation refuses reopening even when no provider id was recorded; the retry
@@ -804,14 +804,14 @@ without another separation, and records why if it falls back to the ordinary
 source-checked restart, whose preflight fallback reason is appended even when
 source checking or executor cancellation later refuses the retry. S3-only
 uploads are restored and validated at the expected local path before
-downloading. A completed URL assignment and its immutable source receipt
-satisfy only their own attempt: later attempts use
-`sources/<track>/attempts/<n>/source.mp4` and `source.json`, workers adopt
-only exact-attempt objects/receipts, and marker completion requires that
-attempt's evidence. A canonical-object 412 can never certify previous-attempt
-bytes as a fresh download; old objects and receipts remain immutable. Dismissed
-jobs require restore first. Concurrent retries or an orchestrator lease
-produce one winner.
+downloading. A failed URL job that cannot use publication recovery is instead
+RESUBMITTED AS A NEW JOB: new id, track id and storage keys, with
+`admin_resubmitted` on the old job, `admin_resubmitted_from` on the new job,
+and dismissal of the old job in the same transaction. A12's canonical
+`sources/<track>/source.mp4` and `source.json` interface is unchanged; no
+per-attempt source/receipt naming or cross-attempt adoption is introduced.
+Dismissed jobs require restore first. Concurrent retries or an orchestrator
+lease produce one winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
 - Guarded by: `library/tests/test_admin_actions.py`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`
 
@@ -822,9 +822,10 @@ event, expires open assignments, and removes only the exact
 `DATA_DIR/<job hex>` working directory (never a symlink or outside path). A
 exclusive job row lock is acquired/revalidated before cleanup and retained
 through cleanup and dismissal commit, so a losing dismissal cannot remove a
-successfully retried or leased job's files. Request cancellation waits for the
-locked operation's durable outcome rather than unwinding it while the
-filesystem worker runs; deletion and dismissal resolve before retry can reopen.
+successfully retried or leased job's files. Every request cancellation, including
+repeated cancellation, remains shielded while waiting for the locked
+operation's durable outcome; deletion and dismissal resolve before retry can
+reopen, and only then is the cancellation re-raised.
 A filesystem failure is an
 actionable per-item refusal before the dismissal marker commits, and bulk/group
 processing continues with later items. It

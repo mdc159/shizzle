@@ -396,6 +396,8 @@ class AdminRetryResponse(BaseModel):
     status: str
     resumeStage: str
     attempt: int
+    action: Literal["retried", "recovered", "resubmitted"] | None = None
+    newJobId: str | None = None
 
 
 class AdminJobActionResponse(BaseModel):
@@ -414,6 +416,8 @@ class AdminBulkResult(BaseModel):
     ok: bool
     reason: str | None = None
     resumeStage: str | None = None
+    action: Literal["retried", "recovered", "resubmitted"] | None = None
+    newJobId: str | None = None
 
 
 class AdminTrackRow(BaseModel):
@@ -1224,10 +1228,6 @@ def _describe_head(head: dict[str, Any] | None) -> str:
     return f"present ({size} bytes)" if size is not None else "present"
 
 
-def _source_download_attempt(job: Job, events: list[JobEvent]) -> int:
-    return node_routing.source_attempt_for_history(job, events)
-
-
 async def _add_s3_evidence(
     ev: _Evidence,
     job: Job,
@@ -1304,8 +1304,7 @@ async def _add_s3_evidence(
     # proven by source.json). A job that FAILED during downloading may never
     # have transferred its source, so it stays not_yet rather than missing.
     source_applies = "dispatched" in stages
-    source_attempt = _source_download_attempt(job, events)
-    source_object_key = cloud.source_key(track_id, source_attempt)
+    source_object_key = cloud.source_key(track_id)
     outcome = await head(source_object_key)
     note(
         "downloading",
@@ -1317,7 +1316,7 @@ async def _add_s3_evidence(
         expected_sha256=job.input_checksum,
     )
     if job.source_type == SourceType.url:
-        receipt_key = node_routing.source_json_key(track_id, source_attempt)
+        receipt_key = node_routing.source_json_key(track_id)
         receipt = await head(receipt_key)
         note(
             "downloading",
@@ -1870,6 +1869,30 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
             status=recovered.status.value,
             resumeStage=JobStage.verifying.value,
             attempt=recovered.attempt,
+            action="recovered",
+        )
+    if job.source_type == SourceType.url:
+        outcome = await _stop_runpod_for_restart(request, job, events)
+        if outcome["status"] == "unresolved_reservation":
+            await _jobs(request).append_event(job.id, "admin_retry_unresolved", outcome)
+            raise HTTPException(409, "An earlier dispatch reservation is unresolved; reconcile it first")
+        if outcome["status"] == "cancel_failed":
+            await _jobs(request).append_event(
+                job.id, "admin_retry_cancel_failed", {**outcome, "fallback_reason": fallback_reason}
+            )
+            raise HTTPException(409, "The recorded RunPod executor could not be confirmed stopped")
+        try:
+            new_job = await _jobs(request).admin_resubmit_url_job(
+                job.id, runpod_outcome=outcome, fallback_reason=fallback_reason
+            )
+        except InvalidTransition:
+            raise HTTPException(409, "The job is being processed or is no longer retryable") from None
+        return AdminRetryResponse(
+            status="resubmitted",
+            resumeStage=JobStage.pending.value,
+            attempt=new_job.attempt,
+            action="resubmitted",
+            newJobId=new_job.id.hex,
         )
     if not await _source_is_obtainable(request, job):
         await _jobs(request).append_event(
@@ -1908,6 +1931,7 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
         status=retried.status.value,
         resumeStage=JobStage.pending.value,
         attempt=retried.attempt,
+        action="retried",
     )
 
 
@@ -2000,7 +2024,11 @@ async def admin_bulk_jobs(
             if body.action == "retry":
                 retried = await _retry_job(request, job_id)
                 results.append(AdminBulkResult(
-                    jobId=raw_id, ok=True, resumeStage=retried.resumeStage
+                    jobId=raw_id,
+                    ok=True,
+                    resumeStage=retried.resumeStage,
+                    action=retried.action,
+                    newJobId=retried.newJobId,
                 ))
             else:
                 await _set_dismissed(request, job_id, True)

@@ -34,7 +34,6 @@ from urllib.parse import parse_qs, urlsplit
 from ..api.media import s3_client
 from ..db.models import (
     NODE_ASSIGNMENT_OPEN,
-    Job,
     JobEvent,
     JobStage,
     NodeAssignment,
@@ -105,27 +104,8 @@ def source_ref_for_url(url: str) -> str:
     return "sha256-" + hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:32]
 
 
-def source_attempt_for_history(job: Job, events: list[JobEvent]) -> int:
-    """Select the download attempt that owns source/receipt evidence."""
-    del job  # identity is already represented by the event's job_id.
-    for event in reversed(events):
-        detail = event.detail if isinstance(event.detail, dict) else {}
-        if event.event == "node_assigned" and detail.get("kind") == "download":
-            attempt = detail.get("attempt")
-            if isinstance(attempt, int):
-                return attempt
-        if event.event == "admin_retry_started" and detail.get("resume_stage") == "pending":
-            attempt = detail.get("new_attempt")
-            if isinstance(attempt, int):
-                return attempt
-    return 0
-
-
-def source_json_key(track_id: uuid.UUID | str, attempt: int | None = None) -> str:
-    """Immutable receipt key for one download attempt (legacy base for zero)."""
-    if attempt is None or attempt == 0:
-        return f"sources/{track_id}/{SOURCE_JSON}"
-    return f"sources/{track_id}/attempts/{attempt}/{SOURCE_JSON}"
+def source_json_key(track_id: uuid.UUID | str) -> str:
+    return f"sources/{track_id}/{SOURCE_JSON}"
 
 
 # --- small helpers -------------------------------------------------------------
@@ -289,13 +269,6 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
     track_id = track_id_for_job(job.id)
     events = await ctx.jobs.list_events(job.id)
     assignment = await _repo(ctx).latest_for_job(job.id, kind=NodeAssignmentKind.download)
-    if (
-        assignment is not None
-        and (assignment.payload or {}).get("attempt") != job.attempt
-    ):
-        # Admin retry creates a new attempt boundary. Keep the old assignment
-        # and receipt as history, but require a fresh node download (G7).
-        assignment = None
 
     if assignment is not None and assignment.status in NODE_ASSIGNMENT_OPEN:
         # The S3 marker is the truth: a download whose completion report was
@@ -459,8 +432,8 @@ def _download_payload(ctx: StageContext, track_id: uuid.UUID) -> dict[str, Any]:
         "source_ref": source_ref_for_url(url),
         "track_id": str(track_id),
         "bucket": ctx.settings.s3_media_bucket,
-        "source_key": cloud.source_key(track_id, ctx.job.attempt),
-        "source_json_key": source_json_key(track_id, ctx.job.attempt),
+        "source_key": cloud.source_key(track_id),
+        "source_json_key": source_json_key(track_id),
         "max_duration_seconds": ctx.settings.max_duration_seconds,
         "max_bytes": ctx.settings.max_upload_bytes,
         "title": ctx.job.title,
@@ -469,7 +442,7 @@ def _download_payload(ctx: StageContext, track_id: uuid.UUID) -> dict[str, Any]:
 
 
 async def _read_source_receipt(ctx: StageContext, track_id: uuid.UUID) -> dict[str, Any] | None:
-    key = source_json_key(track_id, ctx.job.attempt)
+    key = source_json_key(track_id)
     try:
         return await asyncio.to_thread(
             cloud._read_json_or_none, s3_client(ctx.settings), ctx.settings.s3_media_bucket, key
@@ -486,13 +459,7 @@ async def _verify_source_receipt(
     ctx: StageContext, track_id: uuid.UUID, receipt: dict[str, Any]
 ) -> str | None:
     """A12: the receipt must describe exactly the object the pipeline will use."""
-    job_attempt = getattr(getattr(ctx, "job", None), "attempt", 0)
-    expected_key = cloud.source_key(track_id, job_attempt)
-    receipt_attempt = receipt.get("attempt")
-    if job_attempt > 0 and receipt_attempt != job_attempt:
-        return f"receipt is for attempt {receipt_attempt}, expected {job_attempt}"
-    if receipt.get("source_json_key") not in (None, source_json_key(track_id, job_attempt)):
-        return "source receipt key mismatch"
+    expected_key = cloud.source_key(track_id)
     if receipt.get("interface") != SOURCE_INTERFACE:
         return f"interface must be {SOURCE_INTERFACE}"
     if receipt.get("object_key") != expected_key:

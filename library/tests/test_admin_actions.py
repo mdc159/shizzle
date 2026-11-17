@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -164,7 +165,13 @@ async def test_retry_restarts_with_fresh_attempt_and_expires_open_assignments(
     monkeypatch.setattr(admin_module, "_runpod_for", lambda _settings: FakeRunPod())
     response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
     assert response.status_code == 200, response.text
-    assert response.json() == {"status": "pending", "resumeStage": "pending", "attempt": 1}
+    assert response.json() == {
+        "status": "pending",
+        "resumeStage": "pending",
+        "attempt": 1,
+        "action": "retried",
+        "newJobId": None,
+    }
     assert cancelled == ["rp-live"]
     current = await app.state.job_repo.get_job(job.id)
     assert current.status == JobStage.pending and current.attempt == 1
@@ -187,7 +194,8 @@ async def test_retry_refuses_missing_upload_source_but_uses_s3_fallback(
     assert refused.status_code == 409
     assert "source no longer exists" in refused.json()["detail"]
 
-    present = await _job(app)
+    checksum = hashlib.sha256(b"source").hexdigest()
+    present = await _job(app, input_checksum=checksum)
     await _fail(app, present, JobStage.pending)
     monkeypatch.setattr(
         admin_module,
@@ -229,6 +237,40 @@ async def test_retry_refuses_missing_upload_source_but_uses_s3_fallback(
         detail={},
     )
     assert await handle_downloading(ctx) == JobStage.dispatched
+    await app.state.job_repo.advance(
+        present.id,
+        worker_id="s3-retry",
+        from_stage=JobStage.pending,
+        to_stage=JobStage.downloading,
+    )
+    claimed = await app.state.job_repo.advance(
+        present.id,
+        worker_id="s3-retry",
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+    )
+    ctx.job = claimed
+    ctx.job_dir = local.parent
+
+    def download_package(*_args):
+        return None
+
+    monkeypatch.setattr(cloud, "download_package", download_package)
+    monkeypatch.setattr(
+        cloud,
+        "load_and_verify_package",
+        lambda _path: SimpleNamespace(
+            handoff={
+                "source": {
+                    "sha256": checksum,
+                    "object_key": cloud.source_key(track_id_for_job(present.id)),
+                },
+                "separation": {"sample_count": 44100},
+            },
+            duration_seconds=1.0,
+        ),
+    )
+    assert await cloud.cloud_verifying(ctx) == JobStage.publishing
 
 
 @pytest.mark.parametrize(
@@ -271,6 +313,37 @@ async def test_publication_retry_reuses_selected_package(admin_client, monkeypat
     retry = next(event for event in events if event.event == "admin_retry_started")
     assert retry.detail["resume_stage"] == "verifying"
     assert retry.detail["dispatch_key"] == f"{job.id.hex}:0"
+
+
+async def test_url_publication_recovery_stays_in_place(admin_client, monkeypatch):
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job = await _job(
+        app,
+        source_type=SourceType.url,
+        source_ref="https://youtu.be/dQw4w9WgXcQ",
+        input_checksum=checksum,
+    )
+    _source(app, job)
+    await _fail(app, job, JobStage.publishing, ErrorCode.PUBLISH_FAILED)
+
+    async def complete(_ctx, *, allow_receipt):
+        return "COMPLETED"
+
+    monkeypatch.setattr(admin_module, "completion_evidence", complete)
+    monkeypatch.setattr(
+        "shizzle_server.orchestrator.recover_publication.load_and_verify_package",
+        lambda _path: SimpleNamespace(handoff={"source": {
+            "sha256": checksum,
+            "object_key": cloud.source_key(track_id_for_job(job.id)),
+        }}),
+    )
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "recovered"
+    assert response.json()["status"] == "verifying"
+    assert response.json()["newJobId"] is None
+    assert (await app.state.job_repo.get_job(job.id)).dismissed_at is None
 
 
 async def test_publication_precondition_failure_falls_back_and_records_reason(
@@ -609,95 +682,32 @@ async def test_publication_fallback_reason_survives_source_refusal(
     assert "required package bytes" in event.detail["fallback_reason"]
 
 
-async def test_old_completed_download_does_not_satisfy_reopened_attempt(
-    settings, job_repo, session_factory, monkeypatch
-):
-    from shizzle_server.db.repository import NodeRepository
-    from shizzle_server.orchestrator.nodes import download_via_node
-
-    cloud_settings = settings
-    cloud_settings.shizzle_pipeline = "cloud"
-    cloud_settings.shizzle_node_routing = "prefer"
-    node_repo = NodeRepository(session_factory)
-    await node_repo.heartbeat("mac-mini", capabilities={"download": True, "separate": True})
-    job = await job_repo.create_job(
+async def test_failed_url_job_resubmits_as_new_job_and_dismisses_old(admin_client):
+    c, app = admin_client
+    old = await _job(
+        app,
         source_type=SourceType.url,
-        source_ref="https://youtu.be/dQw4w9WgXcQ",
-        title="Fresh download",
+        source_ref="https://youtu.be/dQw4w9WgXcQ?token=server-only",
+        title="Link job",
+        artist="Artist",
     )
-    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=600)
-    assert claimed is not None
-    await job_repo.advance(
-        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
-    )
-    old = await node_repo.create_assignment(
-        job.id,
-        worker_id="w",
-        node_id="mac-mini",
-        kind=NodeAssignmentKind.download,
-        payload={"attempt": 0},
-    )
-    assert old is not None
-    await node_repo.acknowledge(old.id, node_id="mac-mini")
-    await node_repo.complete(old.id, node_id="mac-mini", detail={"sha256": "a" * 64})
-    async with session_factory() as session, session.begin():
-        row = await session.get(Job, job.id)
-        row.attempt = 1
-        claimed = row
-    ctx = SimpleNamespace(
-        job=claimed,
-        settings=cloud_settings,
-        jobs=job_repo,
-        worker_id="w",
-        nodes=node_repo,
-        runtime=None,
-        detail={},
-        park_seconds=None,
-    )
-    result = await download_via_node(ctx)
-    assert result is None
-    latest = await node_repo.latest_for_job(job.id, kind=NodeAssignmentKind.download)
-    assert latest is not None and latest.id != old.id
-    assert latest.payload["attempt"] == 1
-    assert latest.status == NodeAssignmentStatus.assigned
-
-    # The old immutable receipt is still present. It must not complete the
-    # fresh assignment before its worker has produced attempt-1 evidence.
-    from shizzle_server.orchestrator import nodes as nodes_mod
-
-    receipt = {
-        "interface": nodes_mod.SOURCE_INTERFACE,
-        "attempt": 0,
-        "source_json_key": nodes_mod.source_json_key(track_id_for_job(job.id), 0),
-        "object_key": cloud.source_key(track_id_for_job(job.id)),
-        "track_id": str(track_id_for_job(job.id)),
-        "sha256": hashlib.sha256(b"source").hexdigest(),
-        "bytes": 6,
-        "duration_seconds": 1.0,
-    }
-
-    async def old_receipt(_ctx, _track_id):
-        return receipt
-
-    def matching_head(_s3, _bucket, _key):
-        import base64
-
-        return {
-            "ContentLength": 6,
-            "ChecksumSHA256": base64.b64encode(hashlib.sha256(b"source").digest()).decode(),
-        }
-
-    monkeypatch.setattr(nodes_mod, "_read_source_receipt", old_receipt)
-    monkeypatch.setattr(nodes_mod, "_head_with_checksum", matching_head)
-    assert await download_via_node(ctx) is None
-    latest = await node_repo.latest_for_job(job.id, kind=NodeAssignmentKind.download)
-    assert latest.status == NodeAssignmentStatus.assigned
-    assert claimed.status == JobStage.downloading
-
-    receipt["attempt"] = 1
-    receipt["source_json_key"] = nodes_mod.source_json_key(track_id_for_job(job.id), 1)
-    receipt["object_key"] = cloud.source_key(track_id_for_job(job.id), 1)
-    assert await download_via_node(ctx) == JobStage.dispatched
+    await _fail(app, old, JobStage.downloading)
+    response = await c.post(f"/api/admin/jobs/{old.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "resubmitted" and body["action"] == "resubmitted"
+    assert body["newJobId"] != old.id.hex
+    assert "server-only" not in response.text and "source_ref" not in response.text
+    new_id = uuid.UUID(body["newJobId"])
+    old_now = await app.state.job_repo.get_job(old.id)
+    new = await app.state.job_repo.get_job(new_id)
+    assert old_now.dismissed_at is not None and old_now.status == JobStage.failed
+    assert new.status == JobStage.pending and new.id != old.id
+    assert new.source_ref == old.source_ref and new.title == "Link job" and new.artist == "Artist"
+    old_events = [event.event for event in await app.state.job_repo.list_events(old.id)]
+    new_events = [event.event for event in await app.state.job_repo.list_events(new.id)]
+    assert "admin_resubmitted" in old_events and "admin_dismissed" in old_events
+    assert "admin_resubmitted_from" in new_events and "created" in new_events
 
 
 async def test_retry_winner_dismissal_refusal_preserves_source(admin_client):

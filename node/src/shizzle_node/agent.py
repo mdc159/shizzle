@@ -246,22 +246,14 @@ class Agent:
         # fetching the video again.
         try:
             existing = self._existing_receipt(
-                self._s3_factory(),
-                bucket=str(payload["bucket"]),
-                track_id=str(payload["track_id"]),
-                receipt_key=payload.get("source_json_key"),
+                self._s3_factory(), bucket=str(payload["bucket"]), track_id=str(payload["track_id"])
             )
         except Exception as exc:  # unknown, not a failure: upload_source re-checks
             logger.warning("could not check for an existing receipt: %s", exc)
             existing = None
-        if existing is not None and existing.get("attempt") == payload.get("attempt"):
+        if existing is not None:
             progress("upload: already complete (adopting the existing source)")
             return self._report(existing, adopted=True)
-        if existing is not None:
-            progress(
-                f"upload: receipt is for attempt {existing.get('attempt')}; "
-                f"downloading again for attempt {payload.get('attempt')}"
-            )
         source = self._download(
             str(payload["url"]),
             workdir,
