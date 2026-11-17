@@ -9,6 +9,11 @@
 #   distribution (d2488k8kjndpsy.cloudfront.net, ELKN8VGSX0M64), Host-rewritten
 #   so CloudFront routes it. Media is private-S3 behind signed cookies; the
 #   cookies are set on shizzle.systems (Path=/cdn) and forwarded here.
+# - Admin isolation: the public sites strip any incoming X-Shizzle-Admin
+#   header and answer 404 for /api/admin/* and /admin. The admin surface is
+#   served only by the tailnet-only :18081 listener below, which injects the
+#   secret header upstream (value from the caddy container's environment,
+#   SHIZZLE_ADMIN_PROXY_SECRET in /opt/shizzle/prod/.env, invariant E3).
 # - No explicit :80 server, so Caddy's standard HTTP->HTTPS redirect returns.
 
 shizzle.systems, www.shizzle.systems {
@@ -17,6 +22,23 @@ shizzle.systems, www.shizzle.systems {
 	}
 
 	encode zstd gzip
+
+	# Defense in depth for every public request: a forged admin header must
+	# never reach the api container, whatever route it targets.
+	header >-X-Shizzle-Admin
+
+	# Admin API and admin page are not public. These handles precede the
+	# /api/* and static handles on purpose: handle blocks are mutually
+	# exclusive in file order.
+	handle /api/admin/* {
+		respond 404
+	}
+	handle /admin {
+		respond 404
+	}
+	handle /admin/* {
+		respond 404
+	}
 
 	# API + WebSocket relay -> control plane. reverse_proxy handles the WS
 	# upgrade transparently. (No /ws routes ship yet — remote pairing is a
@@ -38,6 +60,44 @@ shizzle.systems, www.shizzle.systems {
 	}
 
 	# Static UI (SPA fallback to index.html).
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# Tailnet-only administrator listener. Compose publishes this port ONLY as
+# 127.0.0.1:18081:18081; the host fronts it with
+#   tailscale serve --bg --https=8444 http://127.0.0.1:18081
+# giving https://shizzle.tailfedd3b.ts.net:8444 with real TLS, reachable only
+# from the tailnet. Plain HTTP inside the container is fine because tailscale
+# terminates TLS. Same site as the public listener plus the injected admin
+# header, so /api/admin/* (which 404s publicly) and the /admin page work here.
+# The secret value is interpolated from the caddy container environment; keep
+# it in sync with the api service (SHIZZLE_ADMIN_PROXY_SECRET in .env).
+:18081 {
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:8001 {
+			header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}
+		}
+	}
+	handle /ws/* {
+		reverse_proxy api:8001 {
+			header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}
+		}
+	}
+
+	# Same-origin media proxy (parity with the public site: cookies set on the
+	# 8444 origin ride along if the /cdn fallback is ever used from here).
+	handle_path /cdn/* {
+		reverse_proxy https://d2488k8kjndpsy.cloudfront.net {
+			header_up Host d2488k8kjndpsy.cloudfront.net
+		}
+	}
+
 	handle {
 		root * /srv/ui
 		try_files {path} /index.html

@@ -55,6 +55,10 @@ services:
       DATA_DIR: /app/data
       SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
       CLOUDFRONT_PRIVATE_KEY_PATH: /run/secrets/cloudfront_private_key.pem
+      # Admin routes (/api/admin/*) answer 404 unless the request carries
+      # X-Shizzle-Admin with this exact value. Only the tailnet-only 18081
+      # Caddy listener injects it; empty/unset keeps admin fail-closed.
+      SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}
     volumes:
       - appdata:/app/data
       - ./secrets/cloudfront_private_key.pem:/run/secrets/cloudfront_private_key.pem:ro
@@ -102,6 +106,12 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp" # HTTP/3
+      # Tailnet-only admin listener (Caddyfile :18081); fronted on the host by
+      # `tailscale serve --https=8444`. Never publish beyond host loopback.
+      - "127.0.0.1:18081:18081"
+    environment:
+      # Read by the Caddyfile's 18081 site ({$SHIZZLE_ADMIN_PROXY_SECRET:}).
+      SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./player:/srv/ui:ro
