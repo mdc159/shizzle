@@ -4,11 +4,14 @@
 # Part 1 (always): structural assertions on compose.staging.yml, Caddyfile.staging,
 # Caddyfile.prod, and the env templates.
 # Part 2 (always): deploy-staging.sh transaction behavior with stubbed docker
-# and curl — including the production-target refusals and rollback paths.
+# and curl — production-target refusals (including the non-overridable guard),
+# fresh-directory bootstrap success/failure, and rollback ordering.
 # Part 3 (only where a Docker daemon answers): compose config validation
 # (published ports + resource limits), `caddy validate` of both real
-# Caddyfiles through the caddy image, and live behavior of the admin routing
-# (public 404 + header strip vs injected header on the loopback listeners).
+# Caddyfiles through the caddy image, and live behavior of the admin routing:
+# the public site strips X-Shizzle-Admin before /api, /ws AND the /cdn proxy
+# and 404s admin paths, while the loopback listeners inject exactly the
+# secret — and never on the /cdn upstream.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
@@ -29,8 +32,14 @@ count() { grep -c "$@" || true; }
 grep -Fq 'shizzle.systems, www.shizzle.systems {' "$CADDY_PROD"
 grep -Fq 'protocols tls1.2 tls1.3' "$CADDY_PROD"
 
-# Public site strips a forged admin header from EVERY request.
-grep -Fq $'\theader >-X-Shizzle-Admin' "$CADDY_PROD"
+# Public site strips a forged admin header from EVERY request, including /ws
+# and /cdn: request_header (not the response-side `header >-...`) at site
+# scope, before any routing.
+grep -Fq $'\trequest_header -X-Shizzle-Admin' "$CADDY_PROD"
+if grep -Fq 'header >-X-Shizzle-Admin' "$CADDY_PROD"; then
+  echo "Caddyfile.prod must strip the request header, not edit responses" >&2
+  exit 1
+fi
 
 # Admin denial handles exist, answer 404, and precede the /api/* proxy handle
 # (handle blocks are mutually exclusive in file order).
@@ -44,9 +53,15 @@ for line in "$admin_api_line" "$admin_page_line" "$admin_tree_line"; do
 done
 [ "$(count -F 'respond 404' "$CADDY_PROD")" -ge 3 ]
 
-# Tailnet-only admin listener exists and injects the secret header upstream.
+# Tailnet-only admin listener exists. Injection is limited to the api and ws
+# upstreams (exactly two per file) so the secret never travels to CloudFront.
 grep -Fq ':18081 {' "$CADDY_PROD"
-[ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_PROD")" -ge 2 ]
+[ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_PROD")" = 2 ]
+[ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_STAGING")" = 2 ]
+if grep -B2 -F 'header_up X-Shizzle-Admin' "$CADDY_PROD" "$CADDY_STAGING" | grep -q '/cdn'; then
+  echo "admin secret must not be injected on a /cdn upstream" >&2
+  exit 1
+fi
 
 # Production compose publishes the admin listener only on host loopback and
 # keeps the public ports; api and caddy see the admin secret.
@@ -71,7 +86,6 @@ staging_ports=$(grep -E '^\s+- "[^"]*:[^"]*"' "$COMPOSE_STAGING" || true)
 # Staging Caddyfile: plain HTTP single listener, admin header injected, no /cdn
 # route (staging media is signed-URL CloudFront; comments may mention /cdn).
 grep -Fq ':80 {' "$CADDY_STAGING"
-[ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_STAGING")" -ge 2 ]
 if grep -Eq 'handle(_path)? /cdn' "$CADDY_STAGING"; then
   echo "staging Caddyfile must not route /cdn (staging media is signed-URL CloudFront)" >&2
   exit 1
@@ -115,7 +129,7 @@ case " $* " in
   *" alembic upgrade head "*) [ "${DOCKER_FAIL:-}" != migration ] || exit 32; exit 0 ;;
   *" up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy "*)
     [ "${DOCKER_FAIL:-}" != up ] || exit 34; exit 0 ;;
-  *" stop api orchestrator caddy "*) exit 0 ;;
+  *" stop api orchestrator caddy "*) [ "${DOCKER_FAIL:-}" != stop ] || exit 35; exit 0 ;;
   *" up -d --force-recreate --no-deps api orchestrator caddy "*) exit 0 ;;
 esac
 exit 0
@@ -137,6 +151,7 @@ TARGET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 IMAGE="ghcr.io/mdc159/shizzle/api:sha-$TARGET@sha256:$DIGEST"
 
+# A staging directory with a previous release on it.
 new_fixture() {
   STG="$TMP/staging-$1"
   GUARD="$TMP/prodguard-$1"
@@ -145,6 +160,22 @@ new_fixture() {
   printf 'old-compose\n' > "$STG/compose.staging.yml"
   printf 'old-caddy\n' > "$STG/Caddyfile"
   printf 'old-player\n' > "$STG/player/index.html"
+  printf 'new-compose\n' > "$STG/incoming/compose.staging.yml"
+  printf 'new-caddy\n' > "$STG/incoming/Caddyfile.staging"
+  printf 'new-player\n' > "$STG/incoming/dist/index.html"
+  tar -C "$STG/incoming" -czf "$STG/incoming/shizzle-player.tar.gz" dist
+  DOCKER_LOG="$STG/docker.log"
+  : > "$DOCKER_LOG"
+  PROD_GUARD="$GUARD"
+  export PROD_GUARD DOCKER_LOG STG
+}
+
+# A fresh staging directory: only .env (no image identity) and incoming/.
+new_fresh_fixture() {
+  STG="$TMP/fresh-$1"
+  GUARD="$TMP/freshguard-$1"
+  mkdir -p "$STG/incoming/dist" "$GUARD"
+  printf 'POSTGRES_USER=shizzle\nPOSTGRES_PASSWORD=x\n' > "$STG/.env"
   printf 'new-compose\n' > "$STG/incoming/compose.staging.yml"
   printf 'new-caddy\n' > "$STG/incoming/Caddyfile.staging"
   printf 'new-player\n' > "$STG/incoming/dist/index.html"
@@ -169,7 +200,7 @@ run_deploy() {
 
 # Production-target refusals (fail before anything is touched).
 new_fixture refuse-prod-dir
-STG="$PROD_GUARD" # aim the deploy at the production directory itself
+STG="$PROD_GUARD" # aim the deploy at the additional guard directory
 if run_deploy 2> "$TMP/refuse1.err"; then
   echo "deploy-staging accepted the production directory" >&2; exit 1
 fi
@@ -183,6 +214,36 @@ if run_deploy 2> "$TMP/refuse2.err"; then
   echo "deploy-staging accepted a directory inside production" >&2; exit 1
 fi
 grep -Fq 'Refusing to operate on the production directory' "$TMP/refuse2.err"
+
+# The canonical production path is always refused, whatever the caller put in
+# the environment: the extra guard cannot remove the built-in denylist.
+new_fixture refuse-canonical-prod
+PROD_GUARD="$TMP/nowhere-special"
+export PROD_GUARD
+for canonical in /opt/shizzle/prod /opt/shizzle/prod/sub; do
+  if PATH="$BIN:$PATH" SHIZZLE_STAGING_DIR="$canonical" SHIZZLE_STAGING_PROD_DIR="$PROD_GUARD" \
+    SHIZZLE_DOCKER_BIN=docker SHIZZLE_CURL_BIN=curl \
+    bash "$DEPLOY" "$IMAGE" "$TARGET" 2> "$TMP/refuse-canonical.err"; then
+    echo "deploy-staging accepted the canonical production path $canonical" >&2; exit 1
+  fi
+  grep -Fq "Refusing to operate on the production directory: $canonical" "$TMP/refuse-canonical.err"
+done
+
+# An unresolvable additional guard fails closed (symlink loop; only provable
+# where symlinks really exist, i.e. Linux CI).
+ln -s "$TMP/guard-loop-b" "$TMP/guard-loop-a" 2>/dev/null || true
+ln -s "$TMP/guard-loop-a" "$TMP/guard-loop-b" 2>/dev/null || true
+if [ -L "$TMP/guard-loop-a" ] && [ -L "$TMP/guard-loop-b" ]; then
+  new_fixture refuse-unresolvable-guard
+  if PROD_GUARD="$TMP/guard-loop-a" SHIZZLE_STAGING_DIR="$STG" \
+    PATH="$BIN:$PATH" SHIZZLE_DOCKER_BIN=docker SHIZZLE_CURL_BIN=curl \
+    bash "$DEPLOY" "$IMAGE" "$TARGET" 2> "$TMP/refuse-loop.err"; then
+    echo "deploy-staging accepted an unresolvable guard path" >&2; exit 1
+  fi
+  grep -Fq 'failing closed' "$TMP/refuse-loop.err"
+else
+  echo "NOTE: symlink loop not constructible on this filesystem; unresolvable-guard refusal NOT RUN"
+fi
 
 new_fixture refuse-root
 STG=/
@@ -211,7 +272,22 @@ if run_deploy 2> "$TMP/missing.err"; then
 fi
 grep -Fq 'Cannot deploy: missing incoming/Caddyfile.staging' "$TMP/missing.err"
 
-# Successful transaction.
+new_fixture missing-release-file
+rm -rf "$STG/player"
+if run_deploy 2> "$TMP/missing-release.err"; then
+  echo "deploy-staging ran with a prior release half-missing" >&2; exit 1
+fi
+grep -Fq 'Cannot deploy: missing player' "$TMP/missing-release.err"
+
+# Stale release files with no recorded image identity are refused, not guessed.
+new_fresh_fixture refuse-stale-tree
+printf 'old-compose\n' > "$STG/compose.staging.yml"
+if run_deploy 2> "$TMP/stale.err"; then
+  echo "deploy-staging accepted a stale release tree on a first deploy" >&2; exit 1
+fi
+grep -Fq 'Refusing first deployment with stale release file present: compose.staging.yml' "$TMP/stale.err"
+
+# Successful transaction over an existing release.
 new_fixture success
 run_deploy
 grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$STG/.env"
@@ -229,7 +305,42 @@ if grep '^compose ' "$DOCKER_LOG" | grep -v ' -p shizzle-staging ' | grep -q .; 
 fi
 test ! -e "$STG/.staging-rollback.tar.gz"
 
-# Config validation failure: nothing is activated, prior files survive.
+# Successful FIRST deployment into a fresh directory.
+new_fresh_fixture fresh-success
+run_deploy
+grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$STG/.env"
+grep -Fx new-compose "$STG/compose.staging.yml"
+grep -Fx new-caddy "$STG/Caddyfile"
+grep -Fx new-player "$STG/player/index.html"
+grep -Fq 'up -d --wait postgres' "$DOCKER_LOG"
+grep -Fq 'alembic upgrade head' "$DOCKER_LOG"
+grep -Fq 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
+test ! -e "$STG/.staging-rollback.tar.gz"
+
+# Failed FIRST deployment: stopped while the failed config was active, then
+# the directory returns to its fresh state (no image identity, no release files).
+new_fresh_fixture fresh-failure
+CURL_MODE=bad
+if run_deploy 2> "$TMP/fresh-fail.err"; then
+  echo "fresh deploy survived a failing health check" >&2; exit 1
+fi
+CURL_MODE=ok
+grep -Fq 'stop api orchestrator caddy' "$DOCKER_LOG"
+grep -Fq 'rolling back' "$TMP/fresh-fail.err"
+# .env back to no image identity; activated release files removed.
+if sed -n 's/^SHIZZLE_API_IMAGE=//p' "$STG/.env" | grep -q .; then
+  echo "fresh-deploy rollback left an image identity behind" >&2; exit 1
+fi
+test ! -e "$STG/compose.staging.yml"
+test ! -e "$STG/Caddyfile"
+test ! -e "$STG/player"
+test ! -e "$STG/.staging-rollback.tar.gz"
+# Stop happens while the failed release (new identity) is still active: the
+# stop call precedes the file restoration, observable as stop being the last
+# compose invocation of the failed transaction.
+tail -n 1 "$DOCKER_LOG" | grep -Fq 'stop api orchestrator caddy'
+
+# Config validation failure: nothing is activated (no stop), prior files survive.
 new_fixture config-failure
 DOCKER_FAIL=config
 if run_deploy 2> "$TMP/config.err"; then
@@ -238,9 +349,13 @@ fi
 DOCKER_FAIL=
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx old-player "$STG/player/index.html"
+if grep -q 'stop api orchestrator caddy' "$DOCKER_LOG"; then
+  echo "config failure stopped services it never started" >&2; exit 1
+fi
 test ! -e "$STG/.staging-rollback.tar.gz"
 
-# Migration failure: prior files restored, previous image restarted.
+# Migration failure: services stopped FIRST (with the failed release still
+# active), then prior files restored, then the previous image restarted.
 new_fixture migration-failure
 DOCKER_FAIL=migration
 if run_deploy 2> "$TMP/migration.err"; then
@@ -250,10 +365,16 @@ DOCKER_FAIL=
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx old-caddy "$STG/Caddyfile"
 grep -Fx old-player "$STG/player/index.html"
-grep -Fq 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"
+stop_line=$(grep -n 'stop api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
+restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
+: "${stop_line:?stop not logged after migration failure}" "${restart_line:?restart not logged after migration failure}"
+[ "$stop_line" -lt "$restart_line" ] || {
+  echo "rollback restarted the previous image before stopping the failed one" >&2; exit 1
+}
 test ! -e "$STG/.staging-rollback.tar.gz"
 
-# Health-check failure: prior files and image identity restored.
+# Health-check failure on an existing release: same stop-before-restore order,
+# prior image identity and files restored.
 new_fixture health-failure
 CURL_MODE=bad
 if run_deploy 2> "$TMP/health.err"; then
@@ -263,18 +384,28 @@ CURL_MODE=ok
 grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx old-player "$STG/player/index.html"
-tail -n 1 "$DOCKER_LOG" | grep -Fq 'up -d --force-recreate --no-deps api orchestrator caddy'
+stop_line=$(grep -n 'stop api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
+restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
+[ -n "$stop_line" ] && [ -n "$restart_line" ] && [ "$stop_line" -lt "$restart_line" ] || {
+  echo "rollback order wrong on health failure" >&2; exit 1
+}
 test ! -e "$STG/.staging-rollback.tar.gz"
 
-# First-deploy (bootstrap) failure: no previous image, application stopped.
-new_fixture bootstrap-failure
-sed -i '/^SHIZZLE_API_IMAGE=/d' "$STG/.env"
+# A failing stop during rollback is surfaced (exit status and message), with
+# the prior files still restored.
+new_fixture stop-failure
 CURL_MODE=bad
-if run_deploy 2> "$TMP/bootstrap.err"; then
-  echo "bootstrap deploy survived a failing health check" >&2; exit 1
-fi
+DOCKER_FAIL=stop
+set +e
+run_deploy 2> "$TMP/stop.err"
+stop_status=$?
+set -e
 CURL_MODE=ok
-grep -Fq 'stop api orchestrator caddy' "$DOCKER_LOG"
+DOCKER_FAIL=
+test "$stop_status" -eq 35
+grep -Fq 'could not stop the failed services' "$TMP/stop.err"
+grep -Fx old-compose "$STG/compose.staging.yml"
+grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
 test ! -e "$STG/.staging-rollback.tar.gz"
 printf 'staging deploy transaction scenarios passed\n'
 
@@ -344,33 +475,45 @@ docker run --rm \
   -v "$CADDY_STAGING":/etc/caddy/Caddyfile:ro caddy:2 \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
-# Live admin-routing behavior. The api upstream is a stub caddy that answers
-# 209 only when X-Shizzle-Admin equals the secret, 200 otherwise, so status
-# codes prove stripping/injection without trusting bodies. Site addresses are
-# the only edits: public hostnames become a plain :18082 listener (TLS/ACME is
-# untestable here) and the tls block is dropped with it; loopback listener
-# addresses stay as authored.
-NET=shizzle-staging-caddytest
-docker network create "$NET"
-STUB_CADDY="$TMP/stub-api.Caddyfile"
-cat > "$STUB_CADDY" <<'EOF'
+# Live admin-routing behavior. Upstream stubs answer:
+#   209 when X-Shizzle-Admin equals the secret,
+#   208 when the header is present with any other value,
+#   200 when the header is absent,
+# so status codes alone prove stripping (any presence would flip 200→208/209)
+# and exact-value injection. Site addresses and the /cdn upstream are the only
+# edits: public hostnames become a plain :18082 listener (TLS/ACME is
+# untestable here) with the tls block dropped, and the CloudFront host becomes
+# a stub container, so the strip can be proven on /api, /ws AND /cdn.
+STUB_API="$TMP/stub-api.Caddyfile"
+cat > "$STUB_API" <<'EOF'
 :8001 {
-	@admin header X-Shizzle-Admin test-admin-secret
-	respond @admin "admin" 209
+	@exact header X-Shizzle-Admin test-admin-secret
+	@any header X-Shizzle-Admin *
+	respond @exact "admin-exact" 209
+	respond @any "admin-present" 208
 	respond "no-admin" 200
 }
 EOF
+STUB_CDN="$TMP/stub-cdn.Caddyfile"
+sed 's/:8001/:9001/' "$STUB_API" > "$STUB_CDN"
 BEHAVIOR_PROD="$TMP/Caddyfile.prod.behavior"
 sed -e 's/^shizzle\.systems, www\.shizzle\.systems {/:18082 {/' \
-  -e $'/^\ttls {$/,/^\t}$/d' "$CADDY_PROD" > "$BEHAVIOR_PROD"
+  -e $'/^\ttls {$/,/^\t}$/d' \
+  -e 's|https://d2488k8kjndpsy\.cloudfront\.net|http://cdn-stub:9001|' \
+  -e '/header_up Host d2488k8kjndpsy\.cloudfront\.net$/d' \
+  "$CADDY_PROD" > "$BEHAVIOR_PROD"
+NET=shizzle-staging-caddytest
+docker network create "$NET"
 cleanup() {
-  docker rm -f stub-api caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
+  docker rm -f stub-api stub-cdn caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap 'cleanup; rm -rf -- "$TMP"' EXIT
 
 docker run -d --name stub-api --network "$NET" --network-alias api \
-  -v "$STUB_CADDY":/etc/caddy/Caddyfile:ro caddy:2 >/dev/null
+  -v "$STUB_API":/etc/caddy/Caddyfile:ro caddy:2 >/dev/null
+docker run -d --name stub-cdn --network "$NET" --network-alias cdn-stub \
+  -v "$STUB_CDN":/etc/caddy/Caddyfile:ro caddy:2 >/dev/null
 docker run -d --name caddy-prod-behavior --network "$NET" \
   -p 127.0.0.1:18081:18081 -p 127.0.0.1:18082:18082 \
   -e SHIZZLE_ADMIN_PROXY_SECRET=test-admin-secret \
@@ -386,18 +529,29 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 
-# Public site: admin paths 404 at the edge; a forged header never reaches api.
+# Public site: admin paths 404 at the edge; the header never reaches any
+# upstream — not /api, not /ws, not the /cdn proxy — even when it carries the
+# exact secret. (208/209 from a stub would mean the header leaked through.)
 [ "$(code http://127.0.0.1:18082/api/admin/x)" = 404 ]
 [ "$(code http://127.0.0.1:18082/admin)" = 404 ]
 [ "$(code http://127.0.0.1:18082/admin/sub/page)" = 404 ]
-[ "$(code -H 'X-Shizzle-Admin: forged-value' http://127.0.0.1:18082/api/health)" = 200 ]
 [ "$(code http://127.0.0.1:18082/api/health)" = 200 ]
-# Tailnet-only admin listener: correct secret injected, admin routes proxied.
+[ "$(code -H 'X-Shizzle-Admin: test-admin-secret' http://127.0.0.1:18082/api/health)" = 200 ]
+[ "$(code -H 'X-Shizzle-Admin: forged-value' http://127.0.0.1:18082/api/health)" = 200 ]
+[ "$(code -H 'X-Shizzle-Admin: test-admin-secret' http://127.0.0.1:18082/ws/relay)" = 200 ]
+[ "$(code http://127.0.0.1:18082/cdn/tracks/x)" = 200 ]
+[ "$(code -H 'X-Shizzle-Admin: test-admin-secret' http://127.0.0.1:18082/cdn/tracks/x)" = 200 ]
+# Tailnet-only admin listener: the exact secret is injected on /api and /ws
+# (forged values are overwritten), and admin routes proxy through.
 [ "$(code http://127.0.0.1:18081/api/health)" = 209 ]
+[ "$(code -H 'X-Shizzle-Admin: forged-value' http://127.0.0.1:18081/api/health)" = 209 ]
 [ "$(code http://127.0.0.1:18081/api/admin/x)" = 209 ]
-[ "$(code -H 'X-Shizzle-Admin: forged-value' http://127.0.0.1:18081/api/admin/x)" = 209 ]
+[ "$(code http://127.0.0.1:18081/ws/relay)" = 209 ]
+# The secret must never be injected on the /cdn upstream (209 would be a leak).
+[ "$(code http://127.0.0.1:18081/cdn/tracks/x)" = 200 ]
 # Staging listener: same injection, so /admin works on staging.
 [ "$(code http://127.0.0.1:18080/api/health)" = 209 ]
 [ "$(code http://127.0.0.1:18080/api/admin/x)" = 209 ]
+[ "$(code http://127.0.0.1:18080/ws/relay)" = 209 ]
 
 printf 'docker-gated staging and admin-routing checks passed\n'
