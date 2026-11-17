@@ -453,6 +453,13 @@ forms the staging stack described above.
 
 - Preserve the Caddy data volume across recreates.
 - Keep Postgres private; only Caddy should publish public ports.
+- Caddy publishes 80 and 443 on the public address only
+  (`SHIZZLE_PUBLIC_IP`, default `72.60.173.171`), not on every address.
+  Tailscale Serve on the same host uses port 443 of the tailnet address and
+  takes it first after a reboot; a `0.0.0.0:443` publish then fails with
+  `address already in use` and the site stays down until Caddy is recreated
+  by hand. After changing either side, reboot the host and confirm the site
+  returns unaided.
 - Docker port publishing bypasses host firewall filtering unless explicitly
   constrained. The staging (127.0.0.1:18080) and admin (127.0.0.1:18081)
   listeners rely on the explicit loopback host IP in `ports:` — never widen

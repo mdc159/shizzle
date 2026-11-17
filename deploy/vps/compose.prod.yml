@@ -102,10 +102,15 @@ services:
   caddy:
     image: caddy:2
     container_name: shizzle-caddy
+    # Published on the public address only, never 0.0.0.0. Tailscale Serve on
+    # this host owns port 443 of the tailnet address and claims it first after
+    # a reboot; a 0.0.0.0:443 bind then fails and Caddy is left without a
+    # network (outage of 2026-11-17). Binding one address makes start order
+    # irrelevant. There is no AAAA record, so no IPv6 mapping.
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp" # HTTP/3
+      - "${SHIZZLE_PUBLIC_IP:-72.60.173.171}:80:80"
+      - "${SHIZZLE_PUBLIC_IP:-72.60.173.171}:443:443"
+      - "${SHIZZLE_PUBLIC_IP:-72.60.173.171}:443:443/udp" # HTTP/3
       # Tailnet-only admin listener (Caddyfile :18081); fronted on the host by
       # `tailscale serve --https=8444`. Never publish beyond host loopback.
       - "127.0.0.1:18081:18081"
