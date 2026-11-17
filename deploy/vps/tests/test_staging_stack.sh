@@ -143,6 +143,82 @@ BIN="$TMP/bin"
 mkdir -p "$BIN"
 trap 'rm -rf -- "$TMP"' EXIT
 
+# Python is used for crafted archives and the offline policy evaluation.
+PY_BIN=""
+for py_candidate in python3 python; do
+  if "$py_candidate" -c 'import tarfile' >/dev/null 2>&1; then PY_BIN="$py_candidate"; break; fi
+done
+
+# --- N5 follow-up: the worker policy's ListBucket grant must be usable by
+# the first-attempt absent-handoff probe. That probe is a GetObject (no
+# s3:prefix exists in its request context), so S3 can only return 404
+# instead of 403 if s3:ListBucket on the bucket is allowed UNCONDITIONED.
+# This is an offline evaluation of the documented policy — not live AWS
+# acceptance.
+WORKER_POLICY="$TMP/worker-policy.json"
+awk '/^ *```json/{buf=""; f=1; next} /^ *```$/{if (f && buf ~ /ListForAbsentHandoffAndSourceChecks/) printf "%s", buf; f=0; next} f{buf = buf $0 "\n"}' \
+  "$ROOT/deploy/vps/README.md" > "$WORKER_POLICY"
+[ -s "$WORKER_POLICY" ] || { echo "could not extract the worker policy JSON from the README" >&2; exit 1; }
+if grep -q 's3:prefix\|"Condition"' "$WORKER_POLICY"; then
+  echo "worker policy ListBucket grant is conditioned; the absent-handoff probe has no s3:prefix context" >&2
+  exit 1
+fi
+if [ -n "$PY_BIN" ]; then
+  "$PY_BIN" - "$WORKER_POLICY" <<'PY'
+import copy, json, sys
+
+policy = json.load(open(sys.argv[1]))
+stmts = policy["Statement"]
+BUCKET = "arn:aws:s3:::shizzle-staging-media"
+
+def evaluate(statements, action, resource, context):
+    for st in statements:
+        if action not in st.get("Action", []):
+            continue
+        res = st.get("Resource", [])
+        res = [res] if isinstance(res, str) else res
+        if resource not in res:
+            continue
+        matched = True
+        for block in st.get("Condition", {}).values():
+            for key in block:
+                if key not in context:
+                    matched = False  # absent condition key: statement cannot match
+        if not matched:
+            continue
+        return st["Effect"] == "Allow"
+    return False
+
+# First-attempt probe context: a GetObject request carries no s3:prefix.
+probe_ctx = {}
+assert evaluate(stmts, "s3:ListBucket", BUCKET, probe_ctx), (
+    "ListBucket ineffective without s3:prefix context: the absent-handoff "
+    "probe would get 403 and the first attempt could not start"
+)
+# Regression: the rejected prefix-conditioned form must evaluate to Deny.
+bad = copy.deepcopy(policy)
+for st in bad["Statement"]:
+    if "s3:ListBucket" in st.get("Action", []):
+        st["Condition"] = {"StringLike": {"s3:prefix": ["sources/*"]}}
+assert not evaluate(bad["Statement"], "s3:ListBucket", BUCKET, probe_ctx)
+# Object grants stay prefix-scoped; no s3:HeadObject anywhere.
+actions = {a for st in policy["Statement"] for a in st["Action"]}
+assert "s3:HeadObject" not in actions
+resources = [r for st in policy["Statement"]
+             for r in ([st["Resource"]] if isinstance(st["Resource"], str) else st["Resource"])]
+assert resources == [
+    BUCKET,
+    BUCKET + "/sources/*",
+    BUCKET + "/tracks/*/1/separation/attempts/*",
+], resources
+print("worker policy offline evaluation: unconditional ListBucket covers the "
+      "absent-handoff probe (offline check, not live AWS acceptance); "
+      "object grants prefix-scoped")
+PY
+else
+  echo "NOTE: no python available; offline policy evaluation NOT RUN (grep-level checks only)"
+fi
+
 cat > "$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -352,10 +428,6 @@ grep -Fq 'Refusing first deployment with stale release file present: compose.sta
 # types (symlink, hard link) and hostile names (absolute, ..) are exact on
 # every filesystem — no symlink support required. A normal archive still
 # succeeding is proven by the success and fresh-success cases below.
-PY_BIN=""
-for py_candidate in python3 python; do
-  if "$py_candidate" -c 'import tarfile' >/dev/null 2>&1; then PY_BIN="$py_candidate"; break; fi
-done
 if [ -n "$PY_BIN" ]; then
   dir_digest() {
     (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)

@@ -296,12 +296,18 @@ because it is scoped to the distribution ARN):
    `s3:PutObject`, abort needs its own action), and it re-reads its own
    receipt/handoff and HEADs uploaded stems to verify ETags. There is no
    `s3:HeadObject` IAM action: every HEAD above is authorized by
-   `s3:GetObject`. `s3:ListBucket` (prefix-conditioned) is required on the
-   bucket itself: on a first attempt the handler GETs the absent
+   `s3:GetObject`. `s3:ListBucket` is required on the bucket itself and must
+   be UNCONDITIONED: on a first attempt the handler GETs the absent
    `handoff.json` to detect completion (lossless_handler.py `_is_not_found`
-   accepts only 404/NoSuchKey); without ListBucket S3 answers that probe
-   with 403, `_is_not_found` is false, and the handler re-raises — the first
-   attempt can never start:
+   accepts only 404/NoSuchKey); without an effective ListBucket grant S3
+   answers that probe with 403, `_is_not_found` is false, and the handler
+   re-raises — the first attempt can never start. S3 decides 404-vs-403 for
+   that GetObject by evaluating s3:ListBucket in the GetObject request
+   context, which carries no `s3:prefix` (that condition key exists only in
+   ListObjects requests), so a prefix-conditioned ListBucket grant never
+   matches the probe and changes nothing. The grant therefore covers the
+   whole bucket — it lets the worker list keys anywhere in this dedicated
+   staging bucket, which is the price of correct 404s:
    ```json
    {
      "Version": "2012-10-17",
@@ -310,12 +316,7 @@ because it is scoped to the distribution ARN):
          "Sid": "ListForAbsentHandoffAndSourceChecks",
          "Effect": "Allow",
          "Action": ["s3:ListBucket"],
-         "Resource": "arn:aws:s3:::shizzle-staging-media",
-         "Condition": {
-           "StringLike": {
-             "s3:prefix": ["sources/*", "tracks/*/1/separation/attempts/*"]
-           }
-         }
+         "Resource": "arn:aws:s3:::shizzle-staging-media"
        },
        {
          "Sid": "ReadJobSources",
