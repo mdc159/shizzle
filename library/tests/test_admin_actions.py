@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
+import struct
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
@@ -122,15 +122,23 @@ def _write_real_lossless_package(root, job, checksum):
     for role in roles:
         path = root / "stems" / f"{role}.wav"
         path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
-                "-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", str(path),
-            ],
-            check=True,
-            capture_output=True,
+        sample_count = 4410
+        samples = [value for index in range(sample_count) for value in (0.0, 0.1 if index % 2 else -0.1)]
+        frames = struct.pack(f"<{len(samples)}f", *samples)
+        format_payload = struct.pack(
+            "<HHIIHH",
+            3,  # WAVE_FORMAT_IEEE_FLOAT
+            2,
+            44100,
+            44100 * 2 * 4,
+            2 * 4,
+            32,
         )
+        payload = (
+            b"WAVEfmt " + struct.pack("<I", len(format_payload)) + format_payload
+            + b"data" + struct.pack("<I", len(frames)) + frames
+        )
+        path.write_bytes(b"RIFF" + struct.pack("<I", len(payload)) + payload)
         stems.append({
             "role": role,
             "file": f"stems/{role}.wav",
