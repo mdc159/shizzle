@@ -432,21 +432,24 @@ PY
   # be falsely refused under pipefail.
   new_fixture large-archive
   (cd "$STG/incoming" && "$PY_BIN" - <<'PY'
-import tarfile
+import io, tarfile
 
 with tarfile.open("shizzle-player.tar.gz", "w:gz") as tf:
     dist = tarfile.TarInfo("dist/")
     dist.type = tarfile.DIRTYPE
+    dist.mode = 0o755  # realistic: what `tar -czf` stores for directories
     tf.addfile(dist)
     for i in range(2000):
         data = ("asset-%04d" % i).encode()
         ti = tarfile.TarInfo("dist/assets/f-%04d.js" % i)
         ti.size = len(data)
-        tf.addfile(ti, __import__("io").BytesIO(data))
+        ti.mode = 0o644
+        tf.addfile(ti, io.BytesIO(data))
     html = b"<html>ok</html>"
     ti = tarfile.TarInfo("dist/index.html")
     ti.size = len(html)
-    tf.addfile(ti, __import__("io").BytesIO(html))
+    ti.mode = 0o644
+    tf.addfile(ti, io.BytesIO(html))
 PY
   )
   run_deploy

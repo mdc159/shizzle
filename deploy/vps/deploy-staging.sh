@@ -291,6 +291,10 @@ mv -f "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
 # Extract without preserving owners or special modes, and verify on disk what
 # the listing check proved about the archive.
 tar -xzf incoming/shizzle-player.tar.gz -C "$STAGE_DIR" --no-same-owner --no-same-permissions
+# Crafted mode bits could otherwise make subtrees untraversable, and the
+# on-disk verification below must see every entry: normalize our own access
+# before checking (the eventual owner is root on the box either way).
+chmod -R u+rwX "$STAGE_DIR/dist"
 if [ ! -d "$STAGE_DIR/dist" ] || [ -L "$STAGE_DIR/dist" ]; then
   echo "Refusing player archive: dist is not a plain directory after extraction" >&2
   exit 1
