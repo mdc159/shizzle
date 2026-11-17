@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import struct
@@ -459,6 +460,34 @@ async def test_publication_precondition_failure_falls_back_and_records_reason(
     assert "provider is not complete" in event.detail["fallback_reason"]
 
 
+async def test_retry_uses_durable_closed_executor_evidence_after_phase_clear(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job = await _job(app)
+    _source(app, job)
+    await _claim_and_advance(app, job, JobStage.dispatched)
+    await app.state.job_repo.record_worker_progress(
+        job.id, phase="failed", worker_id="action-test"
+    )
+    await app.state.job_repo.fail_job(
+        job.id,
+        worker_id="action-test",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="provider already failed",
+    )
+    assert (await app.state.job_repo.get_job(job.id)).worker_phase is None
+
+    class NoCancel:
+        async def cancel(self, _provider_id):
+            raise AssertionError("a durably closed executor must not be cancelled again")
+
+    monkeypatch.setattr(admin_module, "_runpod_for", lambda _settings: NoCancel())
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert (await app.state.job_repo.get_job(job.id)).status == JobStage.pending
+
+
 async def test_retry_refuses_when_runpod_cannot_be_confirmed_stopped(
     admin_client, session_factory, monkeypatch
 ):
@@ -509,6 +538,99 @@ async def test_dismiss_restore_visibility_workdir_and_retry_guard(admin_client):
     assert len((await c.get("/api/admin/jobs", headers=HEADERS)).json()["jobs"]) == 1
     events = [event.event for event in await app.state.job_repo.list_events(job.id)]
     assert "admin_dismissed" in events and "admin_restored" in events
+
+
+async def test_restore_and_retry_is_one_successful_action(admin_client):
+    c, app = admin_client
+    job = await _job(app)
+    _source(app, job)
+    await _fail(app, job, JobStage.pending)
+    await app.state.job_repo.set_job_dismissed(job.id, dismissed=True)
+
+    response = await c.post(
+        f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "retried"
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.pending and current.dismissed_at is None
+    events = await app.state.job_repo.list_events(job.id)
+    names = [event.event for event in events]
+    assert names.count("admin_restored") == 1
+    assert names.count("admin_retry_started") == 1
+    assert names.index("admin_restored") < names.index("admin_retry_started")
+
+
+async def test_restore_and_retry_refusal_leaves_job_dismissed(admin_client):
+    c, app = admin_client
+    job = await _job(app)
+    await _fail(app, job, JobStage.pending)
+    await app.state.job_repo.set_job_dismissed(job.id, dismissed=True)
+
+    response = await c.post(
+        f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS
+    )
+    assert response.status_code == 409
+    assert "source no longer exists" in response.json()["detail"]
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.failed and current.dismissed_at is not None
+    names = [event.event for event in await app.state.job_repo.list_events(job.id)]
+    assert "admin_restored" not in names
+    assert "admin_retry_started" not in names
+
+
+async def test_restore_and_retry_fences_new_dismissal_after_source_preflight(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job = await _job(app)
+    workdir = _source(app, job)
+    await _fail(app, job, JobStage.pending)
+
+    async def dismiss_after_preflight(*_args, **_kwargs):
+        async def cleanup():
+            import shutil
+
+            await asyncio.to_thread(shutil.rmtree, workdir)
+
+        await app.state.job_repo.set_job_dismissed(
+            job.id, dismissed=True, cleanup=cleanup
+        )
+        return {"status": "not_recorded"}
+
+    monkeypatch.setattr(
+        admin_module, "_stop_runpod_for_restart", dismiss_after_preflight
+    )
+    response = await c.post(
+        f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS
+    )
+    assert response.status_code == 409
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.failed and current.dismissed_at is not None
+    assert not workdir.exists()
+    names = [event.event for event in await app.state.job_repo.list_events(job.id)]
+    assert "admin_restored" not in names
+    assert "admin_retry_started" not in names
+
+
+async def test_dismissed_url_restore_retry_cannot_resubmit_twice(admin_client):
+    c, app = admin_client
+    job = await _job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ"
+    )
+    await _fail(app, job, JobStage.pending)
+    await app.state.job_repo.set_job_dismissed(job.id, dismissed=True)
+
+    first = await c.post(
+        f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS
+    )
+    second = await c.post(
+        f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    events = await app.state.job_repo.list_events(job.id)
+    assert sum(event.event == "admin_resubmitted" for event in events) == 1
 
 
 async def test_track_remove_restore_and_deleted_filters(admin_client, session_factory):

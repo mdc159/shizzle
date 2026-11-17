@@ -425,6 +425,25 @@ class JobRepository:
         async with self._sf() as session:
             return await session.get(Job, job_id)
 
+    async def get_retry_snapshot(
+        self, job_id: uuid.UUID
+    ) -> tuple[Job | None, list[JobEvent]]:
+        """Read retry state and its event authority at one locked instant.
+
+        Dismissal/resubmission preflight uses the latest dismissal event as a
+        fence. Reading it separately from the job could pair an old row with a
+        newer event and authorize stale source evidence. Every competing
+        terminal action takes this row lock, so the short snapshot is coherent.
+        """
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                return None, []
+            events = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            return job, events
+
     async def get_job_by_idempotency_key(self, key: str) -> Job | None:
         async with self._sf() as session:
             res = await session.execute(select(Job).where(Job.idempotency_key == key))
@@ -831,6 +850,56 @@ class JobRepository:
             session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
             return True
 
+    async def record_publish_step(
+        self,
+        job_id: uuid.UUID,
+        *,
+        phase: str,
+        worker_id: str,
+    ) -> bool:
+        """Record one changed publication phase and its cheap timing event.
+
+        The phase and append-only ``publish_step`` event commit together under
+        the same lease fence as other worker progress. Repeating a step after
+        a crash is a no-op while it remains the durable current phase (B8/B11).
+        """
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise LookupError(f"job {job_id} does not exist")
+            now = utcnow()
+            if not _lease_is_owned(job, worker_id, now) or job.worker_phase == phase:
+                return False
+            job.worker_phase = phase
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            previous = await session.scalar(
+                select(JobEvent)
+                .where(JobEvent.job_id == job_id, JobEvent.event == "publish_step")
+                .order_by(JobEvent.id.desc())
+                .limit(1)
+            )
+            previous_detail = (
+                previous.detail if previous is not None and isinstance(previous.detail, dict) else {}
+            )
+            previous_step = previous_detail.get("step")
+            previous_seconds = (
+                round(max(0.0, (now - (_aware(previous.created_at) or now)).total_seconds()), 3)
+                if previous is not None
+                else 0.0
+            )
+            session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
+            session.add(JobEvent(
+                job_id=job_id,
+                event="publish_step",
+                detail={
+                    "step": phase,
+                    "previous_step": previous_step,
+                    "previous_seconds": previous_seconds,
+                },
+            ))
+            return True
+
     async def set_input_checksum(
         self, job_id: uuid.UUID, *, worker_id: str, checksum: str
     ) -> None:
@@ -901,6 +970,11 @@ class JobRepository:
             job.next_retry_at = None
             job.error_code = None
             job.error_detail = None
+            if from_stage == JobStage.dispatched and to_stage == JobStage.verifying:
+                # Separation's last upload percentage is not verification
+                # progress. The verifier records its first real step next.
+                job.worker_phase = None
+                job.worker_heartbeat_at = None
             if runpod_job_id is not None:
                 job.runpod_job_id = runpod_job_id
             if output_checksums is not None:
@@ -996,12 +1070,15 @@ class JobRepository:
             if job.status == JobStage.ready:
                 raise InvalidTransition(job_id, job.status, JobStage.failed)
             from_stage = job.status
+            executor_closed = job.worker_phase == "failed"
             job.status = JobStage.failed
             job.error_code = error_code.value
             job.error_detail = error_detail
             job.lease_owner = None
             job.lease_expires_at = None
             job.next_retry_at = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
             job.updated_at = utcnow()
             failure_detail: dict[str, Any] = {
                 "stage": from_stage.value,
@@ -1013,6 +1090,12 @@ class JobRepository:
                 failure_detail["provider_accepted"] = provider_accepted
                 if from_stage == JobStage.dispatched:
                     failure_detail["idempotency_key"] = f"{job.id.hex}:{job.attempt}"
+            if from_stage == JobStage.dispatched and job.runpod_job_id is not None:
+                # Terminal cards no longer display the executor phase. Preserve
+                # its closed/not-closed meaning as durable attempt evidence for
+                # admin retry instead of relying on the cleared UI field.
+                failure_detail["runpod_job_id"] = job.runpod_job_id
+                failure_detail["executor_closed"] = executor_closed
             session.add(
                 JobEvent(
                     job_id=job.id,
@@ -1069,6 +1152,8 @@ class JobRepository:
         reason: str,
         runpod_outcome: dict[str, Any],
         fallback_reason: str | None = None,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
     ) -> Job:
         """Atomically reopen a failed job at pending under ADMIN_RETRY_TRANSITION.
 
@@ -1084,7 +1169,7 @@ class JobRepository:
             now = utcnow()
             if (
                 job is None or job.status != JobStage.failed
-                or job.dismissed_at is not None
+                or (job.dismissed_at is not None and not restore)
                 or _has_live_lease(job, now)
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
@@ -1092,6 +1177,17 @@ class JobRepository:
             historical = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id)
             )).all())
+            if restore:
+                latest_dismissal = next(
+                    (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                    None,
+                )
+                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                    # Source/package preflight ran before this lock. A newer
+                    # dismissal may have cleaned those bytes; never restore from
+                    # stale evidence. A standalone restore adds no dismissal and
+                    # is therefore safe to join.
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             pending = pending_runpod_dispatch(historical)
             if (
                 pending is None
@@ -1122,6 +1218,13 @@ class JobRepository:
             job.output_checksums = None
             job.stage_timings = None
             job.updated_at = now
+            if restore and job.dismissed_at is not None:
+                job.dismissed_at = None
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
             session.add(JobEvent(
                 job_id=job.id,
                 event="admin_retry_started",
@@ -1145,6 +1248,8 @@ class JobRepository:
         *,
         runpod_outcome: dict[str, Any],
         fallback_reason: str | None = None,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
     ) -> Job:
         """Create a fresh URL job and dismiss its failed predecessor atomically."""
         async with self._sf() as session, session.begin():
@@ -1155,13 +1260,26 @@ class JobRepository:
             now = utcnow()
             if (
                 old is None or old.status != JobStage.failed
-                or old.source_type != SourceType.url or old.dismissed_at is not None
+                or old.source_type != SourceType.url
+                or (old.dismissed_at is not None and not restore)
                 or _has_live_lease(old, now)
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             historical = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
+            if any(event.event == "admin_resubmitted" for event in historical):
+                # The predecessor stays failed+dismissed by design. Its
+                # immutable completion evidence, not that persistent state,
+                # decides whether another fresh URL job may be created.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            if restore:
+                latest_dismissal = next(
+                    (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                    None,
+                )
+                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             pending = pending_runpod_dispatch(historical)
             if (
                 pending is None
@@ -1187,6 +1305,12 @@ class JobRepository:
             )
             session.add(new)
             await session.flush()
+            if restore and old.dismissed_at is not None:
+                session.add(JobEvent(
+                    job_id=old.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
             old.dismissed_at = now
             old.updated_at = now
             session.add(JobEvent(
@@ -1305,6 +1429,8 @@ class JobRepository:
         worker_id: str,
         lease_seconds: float,
         admin_retry: bool = False,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
         expected_reservation_id: int | None = None,
         expected_failure_event_id: int | None = None,
         reservation_resolution: str | None = None,
@@ -1344,13 +1470,21 @@ class JobRepository:
                 )
                 or job.input_checksum != expected_checksum
                 or job.idempotency_key != expected_idempotency_key
-                or job.track_id is not None or job.dismissed_at is not None
+                or job.track_id is not None
+                or (job.dismissed_at is not None and not restore)
                 or (job.lease_expires_at is not None and _aware(job.lease_expires_at) > now)
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             events = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
+            if restore:
+                latest_dismissal = next(
+                    (event for event in reversed(events) if event.event == "admin_dismissed"),
+                    None,
+                )
+                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             failure = next(
                 (event for event in reversed(events) if event.event == "failed"),
                 None,
@@ -1414,6 +1548,15 @@ class JobRepository:
             job.next_retry_at = None
             job.error_code = None
             job.error_detail = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
+            if restore and job.dismissed_at is not None:
+                job.dismissed_at = None
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
             if handoff_recovery and expected_provider_id and not job.runpod_job_id:
                 job.runpod_job_id = expected_provider_id
             job.updated_at = now
@@ -1603,6 +1746,8 @@ class JobRepository:
             job.error_detail = None
             job.lease_owner = None
             job.lease_expires_at = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
             if duration_stage_s is not None:
                 timings = dict(job.stage_timings or {})
                 timings[JobStage.publishing.value] = round(duration_stage_s, 3)

@@ -1927,6 +1927,11 @@ async def _stop_runpod_for_restart(
     if not job.runpod_job_id:
         return {"status": "not_recorded"}
     if job.worker_phase == "failed" or any(
+        event.event == "failed"
+        and _event_detail(event).get("runpod_job_id") == job.runpod_job_id
+        and _event_detail(event).get("executor_closed") is True
+        for event in events
+    ) or any(
         event.event == "worker_completed"
         and _event_detail(event).get("runpod_job_id") == job.runpod_job_id
         for event in events
@@ -1944,7 +1949,12 @@ async def _stop_runpod_for_restart(
 
 
 async def _try_publication_retry(
-    request: Request, job: Job, events: list[JobEvent]
+    request: Request,
+    job: Job,
+    events: list[JobEvent],
+    *,
+    restore: bool = False,
+    expected_dismissal_event_id: int | None = None,
 ) -> tuple[Job | None, str | None]:
     """Reuse the selected package, or return a safe fallback reason."""
     failures = [event for event in events if event.event == "failed"]
@@ -1990,6 +2000,8 @@ async def _try_publication_retry(
             worker_id=worker_id,
             lease_seconds=60,
             admin_retry=True,
+            restore=restore,
+            expected_dismissal_event_id=expected_dismissal_event_id,
         )
     except InvalidTransition:
         return None, "publication recovery preconditions were not met"
@@ -2025,6 +2037,9 @@ async def _recover_handoff_reservation(
     job: Job,
     outcome: dict[str, Any],
     fallback_reason: str | None,
+    *,
+    restore: bool = False,
+    expected_dismissal_event_id: int | None = None,
 ) -> AdminRetryResponse:
     """Reuse a complete unconfirmed attempt after package/source preflight."""
     dispatch_key = outcome.get("idempotency_key")
@@ -2138,6 +2153,8 @@ async def _recover_handoff_reservation(
             worker_id=worker_id,
             lease_seconds=60,
             admin_retry=True,
+            restore=restore,
+            expected_dismissal_event_id=expected_dismissal_event_id,
         )
     except InvalidTransition:
         raise HTTPException(
@@ -2152,16 +2169,27 @@ async def _recover_handoff_reservation(
     )
 
 
-async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
-    job = await _jobs(request).get_job(job_id)
+async def _retry_job(
+    request: Request, job_id: uuid.UUID, *, restore: bool = False
+) -> AdminRetryResponse:
+    job, events = await _jobs(request).get_retry_snapshot(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
     if job.status != JobStage.failed:
         raise HTTPException(409, "Only a failed job can be retried")
-    if job.dismissed_at is not None:
+    if job.dismissed_at is not None and not restore:
         raise HTTPException(409, "Restore the dismissed job before retrying it")
-    events = await _jobs(request).list_events(job.id)
-    recovered, fallback_reason = await _try_publication_retry(request, job, events)
+    expected_dismissal_event_id = next(
+        (event.id for event in reversed(events) if event.event == "admin_dismissed"),
+        None,
+    )
+    recovered, fallback_reason = await _try_publication_retry(
+        request,
+        job,
+        events,
+        restore=restore,
+        expected_dismissal_event_id=expected_dismissal_event_id,
+    )
     if recovered is not None:
         return AdminRetryResponse(
             status=recovered.status.value,
@@ -2188,7 +2216,12 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
         and outcome.get("handoff_present") is True
     ):
         return await _recover_handoff_reservation(
-            request, job, outcome, fallback_reason
+            request,
+            job,
+            outcome,
+            fallback_reason,
+            restore=restore,
+            expected_dismissal_event_id=expected_dismissal_event_id,
         )
     await _refuse_reservation_if_needed(request, job, outcome, fallback_reason)
     if outcome["status"] == "cancel_failed":
@@ -2205,7 +2238,11 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
     if job.source_type == SourceType.url:
         try:
             new_job = await _jobs(request).admin_resubmit_url_job(
-                job.id, runpod_outcome=outcome, fallback_reason=fallback_reason
+                job.id,
+                runpod_outcome=outcome,
+                fallback_reason=fallback_reason,
+                restore=restore,
+                expected_dismissal_event_id=expected_dismissal_event_id,
             )
         except InvalidTransition:
             raise HTTPException(409, "The job is being processed or is no longer retryable") from None
@@ -2222,6 +2259,8 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
             reason="restart from pending with a fresh dispatch attempt",
             runpod_outcome=outcome,
             fallback_reason=fallback_reason,
+            restore=restore,
+            expected_dismissal_event_id=expected_dismissal_event_id,
         )
     except InvalidTransition:
         raise HTTPException(409, "The job is being processed or is no longer retryable") from None
@@ -2235,13 +2274,16 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
 
 @router.post("/jobs/{job_id}/retry")
 async def admin_retry_job(
-    request: Request, job_id: str, _auth: None = Admin
+    request: Request,
+    job_id: str,
+    restore: bool = Query(default=False),
+    _auth: None = Admin,
 ) -> AdminRetryResponse:
     try:
         parsed = uuid.UUID(job_id)
     except ValueError:
         raise HTTPException(404, "Job not found") from None
-    return await _retry_job(request, parsed)
+    return await _retry_job(request, parsed, restore=restore)
 
 
 def _job_workdir(settings: Settings, job_id: uuid.UUID) -> Path:

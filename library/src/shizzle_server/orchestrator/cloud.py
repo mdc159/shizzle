@@ -54,6 +54,39 @@ SEPARATION_SEGMENT = "separation"
 DISPATCH_RECEIPT = "dispatch.json"
 
 
+class _PublishProgress:
+    """Best-effort, lease-fenced phase and elapsed-step reporting."""
+
+    def __init__(self, ctx: StageContext) -> None:
+        self.ctx = ctx
+
+    async def start(self, step: str) -> None:
+        if self.ctx.jobs is None:  # lightweight intake unit contexts
+            return
+        try:
+            await self.ctx.jobs.record_publish_step(
+                self.ctx.job.id,
+                phase=step,
+                worker_id=self.ctx.worker_id,
+            )
+        except Exception:
+            # Progress is observability, never a reason to fail paid media work.
+            logger.exception("job %s: could not record publish step %s", self.ctx.job.id, step)
+
+
+def _threaded_progress(progress: _PublishProgress) -> Any:
+    """Bridge synchronous ffmpeg helpers back to the orchestrator event loop."""
+    loop = asyncio.get_running_loop()
+
+    def report(step: str) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(progress.start(step), loop).result()
+        except Exception:
+            logger.exception("could not deliver threaded publish step %s", step)
+
+    return report
+
+
 @dataclass(frozen=True)
 class DispatchAttemptInspection:
     """Durable worker evidence at one exact attempt prefix."""
@@ -286,6 +319,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
     """
     track_id = track_id_for_job(ctx.job.id)
     pkg_dir = ctx.job_dir / "package"
+    progress = _PublishProgress(ctx)
     prefix = await _selected_package_prefix(ctx, track_id)
     if ctx.jobs is not None:
         events = await ctx.jobs.list_events(ctx.job.id)
@@ -302,6 +336,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             await asyncio.to_thread(shutil.rmtree, pkg_dir, ignore_errors=True)
     pkg_dir.mkdir(parents=True, exist_ok=True)
     try:
+        await progress.start("verifying: downloading package")
         await asyncio.to_thread(
             download_package,
             s3_client(ctx.settings),
@@ -309,6 +344,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             prefix,
             pkg_dir,
         )
+        await progress.start("verifying: checking stems")
         pkg = await asyncio.to_thread(load_and_verify_package, pkg_dir)
     except PackageNotReady as exc:
         raise StageError(
@@ -323,6 +359,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             retryable=False,
         ) from exc
     source_info = pkg.handoff.get("source", {})
+    await progress.start("verifying: checking source")
     source_sha256 = source_info.get("sha256")
     if ctx.job.input_checksum and source_sha256 != ctx.job.input_checksum:
         raise StageError(
@@ -386,25 +423,36 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
     """
     track_id = track_id_for_job(ctx.job.id)
     bucket = ctx.settings.s3_media_bucket
+    progress = _PublishProgress(ctx)
 
     try:
         s3 = s3_client(ctx.settings)
         source = ctx.source_path
         if not source.exists():
             source = ctx.job_dir / "source.mp4"
+            await progress.start("publishing: downloading source")
             await asyncio.to_thread(
                 _download_source, s3, bucket, source_key(track_id), source
             )
 
+        await progress.start("publishing: checking package")
         pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
         candidate = ctx.job_dir / "candidate"
         title = ctx.job.title or ctx.job.id.hex
         manifest = await asyncio.to_thread(
-            transform, pkg, source, candidate, title, ctx.job.artist or ""
+            transform,
+            pkg,
+            source,
+            candidate,
+            title,
+            ctx.job.artist or "",
+            progress=_threaded_progress(progress),
         )
+        await progress.start("publishing: uploading")
         staged = await asyncio.to_thread(
             stage, s3, bucket, track_id, GENERATION, candidate, manifest
         )
+        await progress.start("publishing: finalising")
         result = await Publisher(s3, bucket).publish_async(track_id, GENERATION, staged)
         if result.already_published:
             existing = await asyncio.to_thread(

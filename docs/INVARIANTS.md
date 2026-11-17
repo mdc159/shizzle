@@ -271,10 +271,17 @@ transient poll error propagates.
 ### B8 — heartbeats only on phase change
 
 **Invariant:** Worker-phase heartbeats MUST be written only on phase change
-(bounded history per job).
-- Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_worker_progress_writes_only_on_phase_change`
-- Violation smell: a DB write per progress tick.
+(bounded history per job). Leaving `dispatched` for verification clears the
+separator's final phase; verification and publication then report each real
+step in plain language. Each changed step atomically appends a lease-fenced
+`publish_step` event (`step`, `previous_step`, `previous_seconds`) with the
+phase write, is best-effort and logged on failure, and never fails media work.
+Terminal `ready` and `failed` transitions clear the executor phase.
+- Where: `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/cloud.py`, `library/src/shizzle_server/publish/lossless_intake.py`
+- Guarded by: `library/tests/test_repository.py::test_worker_progress_writes_only_on_phase_change`, `library/tests/test_repository.py::test_publish_step_is_change_only_and_lease_fenced`, `library/tests/test_orchestrator_unit.py::test_cloud_publish_progress_replaces_executor_phase_and_records_steps`, `library/tests/test_orchestrator_unit.py::test_cloud_progress_write_failure_does_not_fail_verification`
+- Violation smell: a DB write per progress tick, a stale separator upload
+  percentage displayed during publication, an unfenced/unlogged progress
+  write, or a terminal job still displaying its last executor step.
 
 ### B9 — park frees the lease, costs no attempt
 
@@ -823,10 +830,19 @@ RESUBMITTED AS A NEW JOB: new id, track id and storage keys, with
 and dismissal of the old job in the same transaction. A12's canonical
 `sources/<track>/source.mp4` and `source.json` interface is unchanged; no
 per-attempt source/receipt naming or cross-attempt adoption is introduced.
-Dismissed jobs require restore first. Concurrent retries or an orchestrator
-lease produce one winner.
+Dismissed jobs require restore first, except that `retry?restore=true` may
+atomically restore and retry under the final locked retry transaction. Its
+normal preflight/refusal rules are unchanged, and a refusal leaves the job
+dismissed without an `admin_restored` or `admin_retry_started` event. A
+concurrent standalone restore converges to one restore and one retry. Retry
+preflight reads the job and event authority under one short row lock; the final
+transition refuses any newer dismissal event, so intervening cleanup cannot
+validate stale source/package evidence. Concurrent URL restore-retries have one
+resubmission winner even though the predecessor remains dismissed; durable
+`admin_resubmitted` evidence permanently bars another successor for that old
+job. Concurrent retries or an orchestrator lease produce one winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
-- Guarded by: `library/tests/test_admin_actions.py` (including `test_terminal_dispatch_rejection_retries_with_real_fresh_key_fence`, `test_empty_attempt_after_deadline_retries_and_cancel_is_best_effort`, `test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix`), `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`, `library/tests/contract/test_admin_postgres.py::test_retry_with_resolved_reservation_racing_orchestrator_is_refused`
+- Guarded by: `library/tests/test_admin_actions.py` (including `test_restore_and_retry_is_one_successful_action`, `test_restore_and_retry_refusal_leaves_job_dismissed`, `test_restore_and_retry_fences_new_dismissal_after_source_preflight`, `test_dismissed_url_restore_retry_cannot_resubmit_twice`, `test_retry_uses_durable_closed_executor_evidence_after_phase_clear`, `test_terminal_dispatch_rejection_retries_with_real_fresh_key_fence`, `test_empty_attempt_after_deadline_retries_and_cancel_is_best_effort`, `test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix`), `library/tests/contract/test_admin_postgres.py::test_restore_and_retry_racing_restore_converges_on_postgres`, `library/tests/contract/test_admin_postgres.py::test_dismissed_url_restore_retries_have_one_postgres_winner`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`, `library/tests/contract/test_admin_postgres.py::test_retry_with_resolved_reservation_racing_orchestrator_is_refused`
 
 ### G8 — dismissal hides history without deleting evidence
 
@@ -844,7 +860,8 @@ actionable per-item refusal before the dismissal marker commits, and bulk/group
 processing continues with later items. It
 deletes no database rows or S3 objects. Dismissed jobs disappear from public
 and default admin history/counts, are visible through explicit filters, and
-cannot be retried until restored.
+cannot be retried until restored (or atomically restored and retried through
+G7's explicit `restore=true` action).
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/models.py`, `library/src/shizzle_server/db/repository.py`, `library/alembic/versions/0008_job_dismissal.py`
 - Guarded by: `library/tests/test_admin_actions.py::test_dismiss_restore_visibility_workdir_and_retry_guard`, `library/tests/test_alembic_chain.py::test_0008_adds_job_dismissal_and_rolls_back`
 

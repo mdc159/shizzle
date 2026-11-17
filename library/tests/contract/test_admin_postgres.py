@@ -316,6 +316,45 @@ async def test_simultaneous_admin_retries_have_exactly_one_winner(retry_env):
     ) == 1
 
 
+async def test_restore_and_retry_racing_restore_converges_on_postgres(retry_env):
+    _, jobs, job, client = retry_env
+    await jobs.set_job_dismissed(job.id, dismissed=True)
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/jobs/{job.id}/restore", headers=HEADERS),
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+    )
+    assert responses[1].status_code == 200, responses[1].text
+    # If retry wins first, the now-pending job is no longer eligible for the
+    # standalone failed-job restore; either ordering must converge atomically.
+    assert responses[0].status_code in (200, 409)
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.pending and current.dismissed_at is None
+    events = await jobs.list_events(job.id)
+    assert sum(event.event == "admin_restored" for event in events) == 1
+    assert sum(event.event == "admin_retry_started" for event in events) == 1
+
+
+async def test_dismissed_url_restore_retries_have_one_postgres_winner(retry_env):
+    sf, jobs, job, client = retry_env
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.source_type = SourceType.url
+        row.source_ref = "https://youtu.be/dQw4w9WgXcQ"
+    await jobs.set_job_dismissed(job.id, dismissed=True)
+
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    accepted = next(response for response in responses if response.status_code == 200)
+    assert accepted.json()["action"] == "resubmitted"
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.dismissed_at is not None
+    events = await jobs.list_events(job.id)
+    assert sum(event.event == "admin_resubmitted" for event in events) == 1
+
+
 async def test_retry_racing_an_orchestrator_pass_is_refused(retry_env):
     sf, jobs, job, client = retry_env
     # A failed terminal write can still have an in-flight orchestrator owner.
