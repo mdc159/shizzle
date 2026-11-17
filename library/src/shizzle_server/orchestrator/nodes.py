@@ -269,6 +269,13 @@ async def download_via_node(ctx: StageContext) -> JobStage | None:
     track_id = track_id_for_job(job.id)
     events = await ctx.jobs.list_events(job.id)
     assignment = await _repo(ctx).latest_for_job(job.id, kind=NodeAssignmentKind.download)
+    if (
+        assignment is not None
+        and (assignment.payload or {}).get("attempt") != job.attempt
+    ):
+        # Admin retry creates a new attempt boundary. Keep the old assignment
+        # and receipt as history, but require a fresh node download (G7).
+        assignment = None
 
     if assignment is not None and assignment.status in NODE_ASSIGNMENT_OPEN:
         # The S3 marker is the truth: a download whose completion report was

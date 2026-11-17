@@ -59,6 +59,20 @@ async def completion_evidence(ctx: StageContext, *, allow_receipt: bool) -> str:
     return "live_provider"
 
 
+async def verify_publication_assets(ctx: StageContext, expected_checksum: str) -> None:
+    """Verify the exact package and source bytes required for recovery."""
+    package = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
+    source = ctx.source_path if ctx.source_path.is_file() else ctx.job_dir / "source.mp4"
+    source_hash = await asyncio.to_thread(source_digest, source)
+    source_info = package.handoff.get("source", {})
+    if (
+        source_hash != expected_checksum
+        or source_info.get("sha256") != expected_checksum
+        or source_info.get("object_key") != source_key(track_id_for_job(ctx.job.id))
+    ):
+        raise ValueError("Recovery source identity does not match verified bytes")
+
+
 async def recover(args: argparse.Namespace) -> dict:
     recovery_id = uuid.UUID(args.recovery_id)
     worker_id = "publication-recovery-" + recovery_id.hex + "-" + uuid.uuid4().hex
@@ -85,20 +99,12 @@ async def recover(args: argparse.Namespace) -> dict:
         if not dispatch_key:
             raise ValueError("No confirmed dispatch reservation for this provider job")
         # Verify existing bytes without altering the terminal job or package.
-        package = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
-        source = ctx.source_path if ctx.source_path.is_file() else ctx.job_dir / "source.mp4"
-        source_hash = await asyncio.to_thread(source_digest, source)
-        source_info = package.handoff.get("source", {})
-        if (
-            source_hash != args.input_checksum
-            or source_info.get("sha256") != args.input_checksum
-            or source_info.get("object_key") != source_key(track_id_for_job(job.id))
-        ):
-            raise ValueError("Recovery source identity does not match verified bytes")
+        await verify_publication_assets(ctx, args.input_checksum)
         report = {
             "job_id": str(job.id), "provider_job_id": job.runpod_job_id,
-            "recovery_id": str(recovery_id), "input_checksum": source_hash,
+            "recovery_id": str(recovery_id), "input_checksum": args.input_checksum,
             "completion_evidence": completion, "package_verified": True,
+            "source_hash": args.input_checksum,
             "executed": bool(args.execute),
         }
         if not args.execute:

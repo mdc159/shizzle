@@ -61,7 +61,11 @@ from ..db.repository import (
 )
 from ..orchestrator import cloud
 from ..orchestrator import nodes as node_routing
-from ..orchestrator.recover_publication import completion_evidence
+from ..orchestrator.recover_publication import (
+    completion_evidence,
+    source_digest,
+    verify_publication_assets,
+)
 from ..orchestrator.runpod_client import (
     HttpRunPodClient,
     NotConfiguredRunPodClient,
@@ -618,6 +622,13 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
         ):
             transition_index = index
     history = events[:transition_index] if transition_index is not None else events
+    retry_index = next(
+        (index for index in range(len(history) - 1, -1, -1)
+         if history[index].event == "admin_retry_started"),
+        None,
+    )
+    if retry_index is not None:
+        history = history[retry_index:]
     pending = pending_runpod_dispatch(history)
     # The latest keyed reservation opens the current execution's authority
     # window even after it is confirmed. Otherwise an old handoff recovery
@@ -638,10 +649,16 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
         pending_index = next(index for index, event in enumerate(history) if event is pending)
         history = history[pending_index:]
 
+    authority_keys = {
+        key
+        for event in history
+        if event.event == "runpod_dispatch_started"
+        and isinstance((key := _event_detail(event).get("idempotency_key")), str)
+    }
     for event_name in ("runpod_dispatch_recovered", "runpod_dispatched"):
         for event in reversed(history):
             key = _event_detail(event).get("idempotency_key")
-            if event.event == event_name and isinstance(key, str):
+            if event.event == event_name and isinstance(key, str) and key in authority_keys:
                 return key
     if pending is not None:
         key = _event_detail(pending).get("idempotency_key")
@@ -737,6 +754,13 @@ def _build_db_evidence(
     # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
     authority_start = 0
+    retry_index = next(
+        (index for index in range(len(events) - 1, -1, -1)
+         if events[index].event == "admin_retry_started"),
+        None,
+    )
+    if retry_index is not None:
+        authority_start = retry_index
     latest_reservation_index = next(
         (
             index
@@ -746,16 +770,24 @@ def _build_db_evidence(
         ),
         None,
     )
-    if latest_reservation_index is not None:
+    if retry_index is not None:
+        pass
+    elif latest_reservation_index is not None:
         authority_start = latest_reservation_index
     elif pending is not None:
         authority_start = next(index for index, event in enumerate(events) if event is pending)
     recovered = None
     confirmed = None
+    authority_keys = {
+        key
+        for event in events[authority_start:]
+        if event.event == "runpod_dispatch_started"
+        and isinstance((key := _event_detail(event).get("idempotency_key")), str)
+    }
     for event in reversed(events[authority_start:]):
         detail = _event_detail(event)
         key = detail.get("idempotency_key")
-        if not isinstance(key, str):
+        if not isinstance(key, str) or key not in authority_keys:
             continue
         if recovered is None and event.event == "runpod_dispatch_recovered":
             recovered = detail
@@ -1704,21 +1736,45 @@ def _runpod_for(settings: Settings) -> RunPodClient:
 
 
 async def _source_is_obtainable(request: Request, job: Job) -> bool:
+    """Ensure an upload source is present where downloading expects it."""
     if job.source_type == SourceType.url:
         return True  # A node re-downloads the submitted URL on the fresh run.
     settings = _settings(request)
-    if (settings.data_dir / job.id.hex / "source.mp4").is_file():
+    destination = settings.data_dir / job.id.hex / "source.mp4"
+    if destination.is_file():
         return True
-    outcome = await asyncio.to_thread(
-        _head_blocking, settings, cloud.source_key(track_id_for_job(job.id))
-    )
-    return outcome.error is None and outcome.head is not None
+    key = cloud.source_key(track_id_for_job(job.id))
+    outcome = await asyncio.to_thread(_head_blocking, settings, key)
+    if outcome.error is not None or outcome.head is None:
+        return False
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            s3_client(settings).download_file,
+            settings.s3_media_bucket,
+            key,
+            str(destination),
+        )
+        if job.input_checksum and await asyncio.to_thread(source_digest, destination) != job.input_checksum:
+            destination.unlink(missing_ok=True)
+            return False
+    except Exception:
+        destination.unlink(missing_ok=True)
+        return False
+    return destination.is_file()
 
 
 async def _stop_runpod_for_restart(
     request: Request, job: Job, events: list[JobEvent]
 ) -> dict[str, Any]:
     """Cancel uncertain provider work; never claim success when it fails."""
+    if job.runpod_job_id and job.runpod_job_id.startswith("node:"):
+        return {"status": "node_assignment", "assignment": job.runpod_job_id}
+    if (pending := pending_runpod_dispatch(events)) is not None:
+        return {
+            "status": "unresolved_reservation",
+            "idempotency_key": _event_detail(pending).get("idempotency_key"),
+        }
     if not job.runpod_job_id:
         return {"status": "not_recorded"}
     if job.worker_phase == "failed" or any(
@@ -1767,6 +1823,7 @@ async def _try_publication_retry(
     )
     try:
         await completion_evidence(ctx, allow_receipt=True)
+        await verify_publication_assets(ctx, job.input_checksum)
     except Exception as exc:
         return None, f"publication completion evidence failed: {type(exc).__name__}: {exc}"
     if await _jobs(request).expire_terminal_assignments(
@@ -1810,6 +1867,12 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
     if not await _source_is_obtainable(request, job):
         raise HTTPException(409, "The upload source no longer exists locally or in S3")
     outcome = await _stop_runpod_for_restart(request, job, events)
+    if outcome["status"] == "unresolved_reservation":
+        await _jobs(request).append_event(job.id, "admin_retry_unresolved", outcome)
+        raise HTTPException(
+            409,
+            "An earlier dispatch reservation is unresolved; reconcile its executor before retrying",
+        )
     if outcome["status"] == "cancel_failed":
         await _jobs(request).append_event(
             job.id,
@@ -1865,12 +1928,18 @@ async def _set_dismissed(
     if job.status != JobStage.failed:
         raise HTTPException(409, "Only a failed job can be dismissed or restored")
     workdir = _job_workdir(_settings(request), job_id) if dismissed else None
+    if workdir is not None and workdir.exists():
+        try:
+            await asyncio.to_thread(shutil.rmtree, workdir)
+        except OSError as exc:
+            raise HTTPException(
+                409,
+                f"Working directory cleanup failed: {exc}. Fix the filesystem problem and retry dismissal",
+            ) from exc
     try:
         updated = await _jobs(request).set_job_dismissed(job_id, dismissed=dismissed)
     except InvalidTransition:
         raise HTTPException(409, "The job is already in the requested state or is being processed") from None
-    if workdir is not None and workdir.exists():
-        await asyncio.to_thread(shutil.rmtree, workdir)
     return AdminJobActionResponse(
         ok=True,
         status=updated.status.value,
@@ -2092,6 +2161,33 @@ async def admin_duplicate_action(
     request: Request, body: AdminDuplicateAction, _auth: None = Admin
 ) -> list[AdminDuplicateActionResult]:
     results: list[AdminDuplicateActionResult] = []
+    if body.action == "keep":
+        groups = (await admin_duplicates(request)).groups
+        requested_jobs = set(body.jobIds)
+        requested_tracks = set(body.trackIds)
+        group = next((
+            candidate
+            for candidate in groups
+            if candidate.keeperTrackId == body.keeperTrackId
+            and {job.id for job in candidate.jobs} == requested_jobs
+            and {track.id for track in candidate.tracks} == requested_tracks
+        ), None)
+        if group is None or not body.keeperTrackId:
+            raise HTTPException(
+                409,
+                "Keeper availability or duplicate group membership changed; review the group again",
+            )
+        try:
+            removed = await _tracks(request).remove_nonkeepers_for_admin(
+                [uuid.UUID(raw_id) for raw_id in body.trackIds],
+                keeper_id=uuid.UUID(body.keeperTrackId),
+            )
+        except (ValueError, LookupError) as exc:
+            raise HTTPException(409, f"Keeper is no longer available: {exc}") from None
+        results.extend(
+            AdminDuplicateActionResult(itemId=str(track_id), kind="track", ok=True)
+            for track_id in removed
+        )
     for raw_id in body.jobIds:
         try:
             job_id = uuid.UUID(raw_id)
@@ -2105,26 +2201,6 @@ async def admin_duplicate_action(
         except (ValueError, HTTPException) as exc:
             reason = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else "Invalid job id"
             results.append(AdminDuplicateActionResult(itemId=raw_id, kind="job", ok=False, reason=reason))
-    if body.action == "keep":
-        if not body.keeperTrackId:
-            return [AdminDuplicateActionResult(
-                itemId="group", kind="track", ok=False, reason="A keeper track is required"
-            ), *results]
-        for raw_id in body.trackIds:
-            if raw_id == body.keeperTrackId:
-                continue
-            try:
-                track_id = uuid.UUID(raw_id)
-                track = await _tracks(request).get(track_id)
-                if track is None:
-                    raise HTTPException(404, "Track not found")
-                if track.deleted_at is not None:
-                    continue
-                await _set_track_deleted(request, raw_id, True)
-                results.append(AdminDuplicateActionResult(itemId=raw_id, kind="track", ok=True))
-            except (ValueError, HTTPException) as exc:
-                reason = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else "Invalid track id"
-                results.append(AdminDuplicateActionResult(itemId=raw_id, kind="track", ok=False, reason=reason))
     return results
 
 

@@ -172,9 +172,24 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
     """
     pending: JobEvent | None = None
     pending_key: str | None = None
+    retry_attempt: int | None = None
     for event in events:
         detail = event.detail if isinstance(event.detail, dict) else {}
         event_key = detail.get("idempotency_key")
+        if event.event == "admin_retry_started":
+            # Retry is an authority boundary: older reservations and late
+            # receipts can never satisfy the reopened attempt (G7).
+            pending = None
+            pending_key = None
+            new_attempt = detail.get("new_attempt")
+            retry_attempt = new_attempt if isinstance(new_attempt, int) else None
+            continue
+        attempt = detail.get("attempt")
+        if (
+            retry_attempt is not None and isinstance(attempt, int)
+            and attempt < retry_attempt
+        ):
+            continue
         if event.event == _LEGACY_DISPATCH_UNCONFIRMED_EVENT:
             pending = event
             pending_key = None
@@ -1040,6 +1055,13 @@ class JobRepository:
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             previous_code = job.error_code
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id)
+            )).all())
+            if pending_runpod_dispatch(historical) is not None:
+                # Missing provider id is not proof that an accepted request
+                # never existed. Reconcile/cancel it before any reopen.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             expired = await self._expire_open_assignments(
                 session, job_id, reason="expired by administrator retry", now=now
             )
@@ -1540,6 +1562,38 @@ class TrackRepository:
                 detail={"s3_objects_deleted": False},
             ))
             return track
+
+    async def remove_nonkeepers_for_admin(
+        self, track_ids: Iterable[uuid.UUID], *, keeper_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """Lock and validate the keeper before soft-removing alternatives."""
+        ids = sorted(set(track_ids), key=str)
+        async with self._sf() as session, session.begin():
+            tracks = list((await session.scalars(
+                select(Track).where(Track.id.in_(ids)).order_by(Track.id).with_for_update()
+            )).all()) if ids else []
+            by_id = {track.id: track for track in tracks}
+            keeper = by_id.get(keeper_id)
+            if keeper is None or keeper.deleted_at is not None:
+                raise LookupError("keeper is missing or already removed")
+            keeper_job = await session.scalar(select(Job).where(Job.track_id == keeper_id))
+            if keeper_job is not None and keeper_job.status != JobStage.ready:
+                raise LookupError("keeper is no longer ready")
+            removed: list[uuid.UUID] = []
+            now = utcnow()
+            for track in tracks:
+                if track.id == keeper_id or track.deleted_at is not None:
+                    continue
+                track.deleted_at = now
+                session.add(TrackGenerationEvent(
+                    track_id=track.id,
+                    event="admin_removed",
+                    from_generation=track.generation,
+                    to_generation=track.generation,
+                    detail={"s3_objects_deleted": False, "keeper_id": str(keeper_id)},
+                ))
+                removed.append(track.id)
+            return removed
 
 
 class PlaybackTelemetryRepository:

@@ -792,12 +792,20 @@ triggers immediate RunPod fallback; `only` waits, while `download_only` and
 explicit admin-only failed-to-pending transition, an obtainable source, a
 monotonically fresh dispatch attempt, and one locked transaction that expires
 open assignments, clears old execution state and appends `admin_retry_started`.
-Ordinary `advance()` remains unable to reopen failed jobs. Uncertain RunPod work
-is cancelled best-effort and the outcome recorded; failure to confirm it
-stopped refuses the retry. A verifying/publishing failure with a selected
-package first uses completion-checked publication recovery without another
-separation, and records why if it falls back to restart. Dismissed jobs require
-restore first. Concurrent retries or an orchestrator lease produce one winner.
+Ordinary `advance()` remains unable to reopen failed jobs. An unresolved accepted
+reservation refuses reopening even when no provider id was recorded; the retry
+event is an append-only authority boundary so old reservations/receipts cannot
+satisfy the new attempt. Uncertain RunPod work is cancelled best-effort and the
+outcome recorded; node identities instead expire their assignments and never
+call RunPod cancellation. Failure to confirm an executor stopped refuses the
+retry. A verifying/publishing failure with a selected package first uses
+completion, package-byte and source-identity-checked publication recovery
+without another separation, and records why if it falls back to the ordinary
+source-checked restart. S3-only uploads are restored and validated at the
+expected local path before downloading. A completed URL assignment satisfies
+only its own attempt; retry creates a fresh node download. Dismissed jobs
+require restore first. Concurrent retries or an orchestrator lease produce one
+winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
 - Guarded by: `library/tests/test_admin_actions.py`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`
 
@@ -805,7 +813,9 @@ restore first. Concurrent retries or an orchestrator lease produce one winner.
 
 **Invariant:** Only failed jobs can be dismissed/restored. Dismissal appends an
 event, expires open assignments, and removes only the exact
-`DATA_DIR/<job hex>` working directory (never a symlink or outside path). It
+`DATA_DIR/<job hex>` working directory (never a symlink or outside path). A
+filesystem failure is an actionable per-item refusal before the dismissal
+marker commits, and bulk/group processing continues with later items. It
 deletes no database rows or S3 objects. Dismissed jobs disappear from public
 and default admin history/counts, are visible through explicit filters, and
 cannot be retried until restored.
@@ -826,9 +836,12 @@ job ids are explicit in the admin API.
 **Invariant:** Duplicate groups use input checksum, YouTube video id, then
 case/whitespace/punctuation-folded title+artist, never expose source URLs, and
 select only the newest ready non-deleted track as keeper (none when no such
-track exists). Group actions dismiss failed jobs and soft-remove non-keeper
-tracks through the same reversible single-item rules; no-keeper groups only
-dismiss failed jobs. No action hard-deletes rows or media.
+track exists). Before any cleanup, the action revalidates keeper existence,
+readiness, deletion state and exact group membership, then locks keeper and
+alternative rows so a stale/unavailable keeper cannot cause the last live
+alternative to be removed. Group actions dismiss failed jobs and soft-remove
+non-keeper tracks through the same reversible single-item rules; no-keeper
+groups only dismiss failed jobs. No action hard-deletes rows or media.
 - Where: `library/src/shizzle_server/api/admin.py`
 - Guarded by: `library/tests/test_admin_actions.py::test_duplicate_grouping_rules_and_url_redaction`, `library/tests/test_admin_actions.py::test_duplicate_keeper_choice_and_group_actions`, `player/e2e/admin-dashboard.spec.ts`
 
