@@ -218,7 +218,7 @@ generation can activate only when its immutable manifest equals the rebuilt
 candidate; mismatches fail closed for reconciliation.
 - Recovery guards: `library/tests/test_publication_recovery.py`
 - Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
+- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`, `library/tests/test_runtime_routing.py::test_reserve_dispatch_rechecks_lease_after_capacity_wait`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
   pair without re-reading owner and expiry under lock.
 
@@ -733,9 +733,9 @@ and URL-shaped strings scrubbed (defense in depth on top of E2/E3).
 
 ### G3 — the RunPod limit parks without spending an attempt and never disturbs dispatched work
 
-**Invariant:** With `runpod_max_concurrent` at or above the count of jobs
-holding a RunPod reservation or confirmed RunPod job in `dispatched`, a FRESH
-dispatch MUST park instead of submitting: no attempt is consumed and exactly
+**Invariant:** When the count of jobs holding a RunPod reservation or
+confirmed RunPod job in `dispatched` is at or above `runpod_max_concurrent`,
+a FRESH dispatch MUST park instead of submitting: no attempt is consumed and exactly
 one deduplicated `runpod_wait` event is appended per wait outage (the B6/B9
 pattern). Work already dispatched is never cancelled, expired or otherwise
 disturbed to make room; the count only gates fresh dispatches. The count
@@ -751,7 +751,7 @@ count reads jobs, events and separation assignments in one SQL statement, so
 a concurrent confirmation cannot split them across snapshots or hide live
 work; it does not use per-job queries.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`reserve_dispatch`, `_count_runpod_work`)
-- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/test_capacity_retry.py::test_retry_reservation_counts_despite_closed_execution`, `library/tests/test_capacity_retry.py::test_submit_timeout_reservation_counts_and_predecessor_does_not`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_see_a_retry_reservation_slot`, `library/tests/contract/test_admin_postgres.py::test_capacity_count_cannot_miss_a_concurrent_confirmation`, `library/tests/test_runtime_routing.py::test_capacity_count_uses_one_consistent_snapshot`
+- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/test_capacity_retry.py::test_retry_reservation_counts_despite_closed_execution`, `library/tests/test_capacity_retry.py::test_submit_timeout_reservation_counts_and_predecessor_does_not`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_see_a_retry_reservation_slot`, `library/tests/contract/test_admin_postgres.py::test_capacity_count_cannot_miss_a_concurrent_confirmation`, `library/tests/test_runtime_routing.py::test_capacity_count_uses_one_consistent_snapshot`, `library/tests/test_runtime_routing.py::test_reserve_dispatch_rechecks_lease_after_capacity_wait`
 - Violation smell: counting node-held work or closed executions, spending an
   attempt or appending a `runpod_wait` per poll, cancelling/polling-failing a
 dispatched job when the limit is reached, or checking capacity outside the

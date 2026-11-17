@@ -583,6 +583,11 @@ class JobRepository:
                     )
                 if await _count_runpod_work(session) >= max_concurrent:
                     return False
+            # Row/advisory lock waits can outlive the lease captured at entry.
+            # The row lock prevents reclaim during this transaction, but it
+            # must not authorize a paid submission after the lease expires.
+            if lease_expires_at <= utcnow():
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
             dispatch_events = (
                 await session.execute(
                     select(JobEvent)
@@ -1667,6 +1672,41 @@ class NodeRepository:
             assignment.updated_at = now
             await self._free_node(session, assignment, now)
             return True
+
+    async def release_terminal_assignment(
+        self, assignment_id: uuid.UUID, *, reason: str
+    ) -> NodeAssignment | None:
+        """Expire terminal-job work and write its admin audit atomically.
+
+        The job is re-checked under lock so a live-job race cannot turn the
+        administrator's release into an unfenced assignment expiry. Any audit
+        insert failure rolls back both the assignment and node-pointer changes.
+        """
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+                return None
+            job = await session.get(Job, assignment.job_id, with_for_update=True)
+            if job is None or job.status not in TERMINAL_STAGES:
+                return None
+            assignment.status = NodeAssignmentStatus.expired
+            assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
+            assignment.updated_at = now
+            await self._free_node(session, assignment, now)
+            session.add(
+                JobEvent(
+                    job_id=job.id,
+                    event="admin_assignment_released",
+                    detail={
+                        "assignment_id": str(assignment.id),
+                        "node_id": assignment.node_id,
+                        "kind": assignment.kind.value,
+                        "reason": reason,
+                    },
+                )
+            )
+            return assignment
 
     async def reject(
         self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None

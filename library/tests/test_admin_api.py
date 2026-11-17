@@ -328,6 +328,43 @@ async def test_open_assignment_on_a_terminal_job_is_flagged_and_releasable(
     assert again.status_code == 409
 
 
+async def test_release_rolls_back_when_audit_event_write_fails(
+    admin_client, session_factory, monkeypatch
+):
+    """The assignment, node pointer and audit event commit atomically."""
+    c, app = admin_client
+    await app.state.node_repo.heartbeat("mac-mini", capabilities={"download": True})
+    job = await _make_job(app, source_type=SourceType.url, source_ref=CRED_URL)
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed.id == job.id
+    assignment = await app.state.node_repo.create_assignment(
+        job.id,
+        worker_id="w",
+        node_id="mac-mini",
+        kind=NodeAssignmentKind.download,
+        payload={},
+    )
+    assert assignment is not None
+    await _set_job(session_factory, job.id, status=JobStage.failed)
+
+    from shizzle_server.db import repository as repository_module
+
+    def _audit_write_fails(*args, **kwargs):
+        raise RuntimeError("simulated audit write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repository_module, "JobEvent", _audit_write_fails)
+        with pytest.raises(RuntimeError, match="simulated audit write failure"):
+            await c.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS)
+
+    fresh = await app.state.node_repo.get_assignment(assignment.id)
+    assert fresh.status == NodeAssignmentStatus.assigned
+    assert (await app.state.node_repo.get("mac-mini")).busy_assignment_id == assignment.id
+    assert "admin_assignment_released" not in [
+        event.event for event in await app.state.job_repo.list_events(job.id)
+    ]
+
+
 async def test_release_refuses_live_jobs_and_unknown_ids(admin_client):
     c, app = admin_client
     await app.state.node_repo.heartbeat("mac-mini", capabilities={"download": True})
@@ -815,6 +852,20 @@ async def test_failed_during_dispatched_keeps_its_stages_and_attempt_key(
     evidence = {i["name"]: i for i in verified.json()["evidence"]}
     assert evidence["source"]["status"] == "ok"  # applies, not not_yet
     assert evidence["handoff"]["status"] == "not_yet"  # verifying never reached
+
+
+async def test_legacy_verifying_transition_uses_the_base_package_prefix(
+    admin_client,
+):
+    """A transition without package_prefix predates attempts/<hash> layout."""
+    from shizzle_server.orchestrator import cloud
+
+    c, app = admin_client
+    job = await _failed_at(app, at=JobStage.verifying, verifying_detail_for=lambda _job: {})
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["attemptPrefix"] == cloud.separation_prefix(
+        track_id_for_job(job.id)
+    )
 
 
 async def test_failed_during_verifying_and_publishing_use_the_selected_prefix(
@@ -1558,6 +1609,58 @@ async def test_retry_handoff_recovery_overrides_the_dead_confirmation(
     identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
     assert identity["status"] == "ok"
     assert f"recovered from handoff.json key={key1}" in identity["observed"]
+
+
+async def test_newer_confirmation_supersedes_old_recovery_identity(admin_client):
+    """Recovery is authoritative only inside the latest reservation window."""
+    c, app = admin_client
+    job = await _make_job(app, title="Confirmed retry")
+    claimed = await app.state.job_repo.claim_next(worker_id="w0", lease_seconds=600)
+    assert claimed.id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await app.state.job_repo.advance(
+            job.id, worker_id="w0", from_stage=from_stage, to_stage=to_stage
+        )
+    key0 = f"{job.id.hex}:0"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="w0", idempotency_key=key0
+    )
+    await app.state.job_repo.append_event(
+        job.id,
+        "runpod_dispatch_recovered",
+        {"idempotency_key": key0, "runpod_job_id": "rp-old", "source": "handoff.json"},
+        worker_id="w0",
+    )
+    await app.state.job_repo.confirm_dispatch(
+        job.id, idempotency_key=key0, runpod_job_id="rp-old"
+    )
+    await app.state.job_repo.record_worker_progress(
+        job.id, phase="failed", worker_id="w0"
+    )
+    await app.state.job_repo.schedule_retry(
+        job.id,
+        worker_id="w0",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="old execution failed",
+        retry_in_seconds=0,
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w1", lease_seconds=600)
+    assert claimed.id == job.id
+    key1 = f"{job.id.hex}:1"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="w1", idempotency_key=key1
+    )
+    await app.state.job_repo.confirm_dispatch(
+        job.id, idempotency_key=key1, runpod_job_id="rp-new"
+    )
+
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key1
+    identity = next(item for item in body["evidence"] if item["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
 
 
 async def test_recovered_identity_must_match_the_selected_package_prefix(

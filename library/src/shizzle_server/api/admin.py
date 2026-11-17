@@ -495,7 +495,9 @@ def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str])
             prefix = detail.get("package_prefix")
             if isinstance(prefix, str) and prefix.startswith(f"{base}/attempts/"):
                 return prefix
-            break
+            # Rolling-upgrade fallback: this transition predates the
+            # attempts/<hash> layout, exactly as cloud._selected_package_prefix.
+            return base
     if "dispatched" in stages:
         return cloud.attempt_prefix(track_id, f"{job.id.hex}:{job.attempt}")
     return None
@@ -521,14 +523,23 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
             transition_index = index
     history = events[:transition_index] if transition_index is not None else events
     pending = pending_runpod_dispatch(history)
-    # An outstanding reservation opens the current execution's authority
-    # window. Confirmations/recoveries from before it belong to closed attempts
-    # and must not override the reservation; a same-attempt recovery after it
-    # remains authoritative because pending_runpod_dispatch retains that row.
-    if pending is not None:
-        pending_index = next(
-            index for index, event in enumerate(history) if event is pending
-        )
+    # The latest keyed reservation opens the current execution's authority
+    # window even after it is confirmed. Otherwise an old handoff recovery
+    # would outrank a newer confirmed retry and select the wrong attempt.
+    latest_reservation_index = next(
+        (
+            index
+            for index in range(len(history) - 1, -1, -1)
+            if history[index].event == "runpod_dispatch_started"
+            and isinstance(_event_detail(history[index]).get("idempotency_key"), str)
+        ),
+        None,
+    )
+    if latest_reservation_index is not None:
+        history = history[latest_reservation_index:]
+    elif pending is not None:
+        # Legacy unconfirmed rows have no key but still fail closed (B5).
+        pending_index = next(index for index, event in enumerate(history) if event is pending)
         history = history[pending_index:]
 
     for event_name in ("runpod_dispatch_recovered", "runpod_dispatched"):
@@ -630,10 +641,19 @@ def _build_db_evidence(
     # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
     authority_start = 0
-    if pending is not None:
-        authority_start = next(
-            index for index, event in enumerate(events) if event is pending
-        )
+    latest_reservation_index = next(
+        (
+            index
+            for index in range(len(events) - 1, -1, -1)
+            if events[index].event == "runpod_dispatch_started"
+            and isinstance(_event_detail(events[index]).get("idempotency_key"), str)
+        ),
+        None,
+    )
+    if latest_reservation_index is not None:
+        authority_start = latest_reservation_index
+    elif pending is not None:
+        authority_start = next(index for index, event in enumerate(events) if event is pending)
     recovered = None
     confirmed = None
     for event in reversed(events[authority_start:]):
@@ -1545,19 +1565,9 @@ async def admin_release_assignment(
     if assignment.status not in NODE_ASSIGNMENT_OPEN:
         raise HTTPException(409, f"Assignment is already {assignment.status.value}")
     reason = "released by an administrator"
-    released = await _node_repo(request).expire(parsed, reason=reason)
-    if not released:
-        raise HTTPException(409, "Assignment is already closed")
-    await _jobs(request).append_event(
-        assignment.job_id,
-        "admin_assignment_released",
-        {
-            "assignment_id": str(assignment.id),
-            "node_id": assignment.node_id,
-            "kind": assignment.kind.value,
-            "reason": reason,
-        },
-    )
+    released = await _node_repo(request).release_terminal_assignment(parsed, reason=reason)
+    if released is None:
+        raise HTTPException(409, "Assignment is already closed or its job is no longer terminal")
     return AdminReleaseResponse(
         ok=True,
         assignmentId=str(assignment.id),

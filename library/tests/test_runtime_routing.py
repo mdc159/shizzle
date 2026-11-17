@@ -602,6 +602,42 @@ async def test_reserve_dispatch_enforces_the_cap_in_one_transaction(job_repo, up
     )  # the outstanding reservation blocks, independent of the cap
 
 
+async def test_reserve_dispatch_rechecks_lease_after_capacity_wait(
+    job_repo, upload_job, monkeypatch
+):
+    """Time spent on row/capacity locks cannot authorize a late submission."""
+    from datetime import UTC, datetime, timedelta
+
+    from shizzle_server.db import repository as repository_module
+    from shizzle_server.db.repository import InvalidTransition
+
+    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    expires = claimed.lease_expires_at
+    assert expires is not None
+    aware_expiry = expires if expires.tzinfo is not None else expires.replace(tzinfo=UTC)
+    times = iter((datetime.now(UTC), aware_expiry + timedelta(seconds=1)))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repository_module, "utcnow", lambda: next(times))
+        with pytest.raises(InvalidTransition):
+            await job_repo.reserve_dispatch(
+                upload_job.id,
+                worker_id="w",
+                idempotency_key=f"{upload_job.id.hex}:0",
+                max_concurrent=1,
+            )
+    assert "runpod_dispatch_started" not in [
+        event.event for event in await job_repo.list_events(upload_job.id)
+    ]
+
+
 async def test_concurrent_first_setting_writes_use_an_atomic_upsert(session_factory):
     from shizzle_server.db.repository import RuntimeSettingsRepository
 
