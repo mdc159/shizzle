@@ -213,17 +213,33 @@ export class AdminUnavailableError extends Error {
 
 async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
-  if (response.status === 404) throw new AdminUnavailableError();
-  if (!response.ok) throw new Error(`Admin request failed: ${response.statusText}`);
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const detail = body !== null && typeof body === 'object' && 'detail' in body
+      ? (body as { detail?: unknown }).detail
+      : undefined;
+    if (response.status === 404 && (detail === undefined || detail === 'Not Found')) {
+      throw new AdminUnavailableError();
+    }
+    const message = typeof detail === 'string'
+      ? detail
+      : detail !== undefined
+        ? JSON.stringify(detail)
+        : response.statusText;
+    throw new Error(`Admin request failed: ${message}`);
+  }
   return response.json() as Promise<T>;
 }
 
 export async function getAdminJobs(
   status?: JobStatus['status'],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  limit = 50,
+  offset = 0
 ): Promise<AdminJobsResponse> {
-  const query = status ? `?status=${status}` : '';
-  return adminFetch<AdminJobsResponse>(`/api/admin/jobs${query}`, { signal });
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (status) params.set('status', status);
+  return adminFetch<AdminJobsResponse>(`/api/admin/jobs?${params}`, { signal });
 }
 
 export async function getAdminJobDetail(
@@ -245,8 +261,8 @@ export async function setAdminNodeEnabled(nodeId: string, enabled: boolean): Pro
   });
 }
 
-export async function getAdminSettings(): Promise<AdminSettings> {
-  return adminFetch<AdminSettings>('/api/admin/settings');
+export async function getAdminSettings(signal?: AbortSignal): Promise<AdminSettings> {
+  return adminFetch<AdminSettings>('/api/admin/settings', { signal });
 }
 
 export async function putAdminSettings(update: {

@@ -236,6 +236,7 @@ export interface AdminJobDetail {
   evidence: EvidenceItem[];
 }
 
+/** Admin wire shape: `enabled` is the inverse of public NodeInfo.disabled. */
 export interface AdminNode {
   id: string;
   displayName: string;

@@ -1,5 +1,9 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 
+// Fully mocked UI checks should fail in seconds, not inherit the 15-minute
+// media-playback timeout from the shared Playwright config.
+test.use({ expect: { timeout: 5000 }, timeout: 60_000 });
+
 // Administrator page (/admin) against fully offline page.route() mocks, in
 // the style of auth-recovery.spec.ts / library-scroll.spec.ts. The real
 // /api/admin routes live behind the owner's Tailscale-only proxy (they 404
@@ -339,6 +343,135 @@ test.describe('Admin page (/admin)', () => {
     await page.getByLabel('Stop using Mac mini').click();
     await expect.poll(() => captured.nodePosts.length).toBe(1);
     expect(captured.nodePosts[0]).toContain('/api/admin/nodes/mac-mini/disable');
+  });
+
+  test('ignores a slower detail response after the selected job changes', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    let releaseSlow: (() => void) | undefined;
+    const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+    await page.route(`**/api/admin/jobs/${FAILED_ID}*`, async (route) => {
+      await slow;
+      await route.fulfill({ json: detailPayload(false) });
+    });
+    await page.route(`**/api/admin/jobs/${READY_ID}*`, (route) =>
+      route.fulfill({
+        json: {
+          ...detailPayload(false),
+          job: {
+            ...readyJob(),
+            idempotencyKey: `${READY_ID}:0`,
+            profileVersion: 1,
+            inputChecksum: null,
+            outputChecksums: null,
+            stageTimings: {},
+          },
+          derivedTrackId: READY_ID,
+          dispatchAttempt: { idempotencyKey: `${READY_ID}:0`, attemptPrefix: null, runpodJobId: null },
+          events: [{ id: 99, event: 'ready_job_selected', detail: {}, createdAt: NOW() }],
+          assignments: [],
+          evidence: [],
+        },
+      })
+    );
+    await page.goto('/admin');
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+    await page.locator('button', { hasText: 'Golden Take' }).click();
+    const detail = page.locator('section[aria-label="Job detail"]');
+    await expect(detail.getByText('ready_job_selected')).toBeVisible();
+    releaseSlow?.();
+    await page.waitForTimeout(150);
+    await expect(detail.getByText('ready_job_selected')).toBeVisible();
+    await expect(detail.getByText('runpod_dispatch_started')).toHaveCount(0);
+  });
+
+  test('preserves an unsaved RunPod limit across refreshes and saves that value', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.goto('/admin');
+    const input = page.getByLabel('RunPod concurrency limit');
+    await expect(input).toHaveValue('2');
+    await input.fill('7');
+    const refreshed = page.waitForResponse(
+      (response) => response.url().endsWith('/api/admin/settings') && response.request().method() === 'GET'
+    );
+    await page.getByTitle('Refresh').click();
+    await refreshed;
+    await expect(input).toHaveValue('7');
+    await page.getByRole('button', { name: 'Set limit' }).click();
+    await expect.poll(() => captured.puts.at(-1)).toEqual({ runpodMaxConcurrent: 7 });
+  });
+
+  test('navigates administrator job history with limit and offset', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    const offsets: number[] = [];
+    await page.route('**/api/admin/jobs?*', (route) => {
+      const url = new URL(route.request().url());
+      const offset = Number(url.searchParams.get('offset') ?? '0');
+      offsets.push(offset);
+      return route.fulfill({
+        json: {
+          jobs: [offset === 0 ? failedJob() : readyJob()],
+          total: 121,
+          limit: 50,
+          offset,
+          counts: { failed: 1, ready: 1 },
+        },
+      });
+    });
+    await page.goto('/admin');
+    await page.getByRole('button', { name: 'Next page' }).click();
+    await expect.poll(() => offsets.at(-1)).toBe(50);
+    await expect(page.locator('button', { hasText: 'Golden Take' })).toBeVisible();
+    await page.getByRole('button', { name: 'Previous page' }).click();
+    await expect.poll(() => offsets.at(-1)).toBe(0);
+  });
+
+  test('surfaces node toggle failures and keeps confirmed node state', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/nodes/mac-mini/disable', (route) =>
+      route.fulfill({ status: 500, json: { detail: 'database is read-only' } })
+    );
+    await page.goto('/admin');
+    const checkbox = page.getByLabel('Stop using Mac mini');
+    await expect(checkbox).toBeChecked();
+    await checkbox.click();
+    await expect(page.getByText('database is read-only')).toBeVisible();
+    await expect(page.getByLabel('Stop using Mac mini')).toBeChecked();
+  });
+
+  test('aborts a hung settings request at the refresh timeout', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/settings', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      await route.fulfill({ json: settingsPayload() }).catch(() => undefined);
+    });
+    await page.goto('/admin');
+    // Jobs and nodes must render when the shared controller aborts settings
+    // at 10 s, not wait for this route's 11 s response.
+    await expect(page.locator('button', { hasText: 'Broken Ballad' })).toBeVisible({ timeout: 10_500 });
+  });
+
+  test('distinguishes an unknown job from an unavailable admin network', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route(`**/api/admin/jobs/${FAILED_ID}*`, (route) =>
+      route.fulfill({ status: 404, json: { detail: 'Job not found' } })
+    );
+    await page.goto('/admin');
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+    await expect(page.locator('section[aria-label="Job detail"]').getByText('Job not found')).toBeVisible();
+    await expect(page.getByText('The admin API is not reachable from this network.')).toHaveCount(0);
+  });
+
+  test('offers splitting as an administrator status filter', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.goto('/admin');
+    await expect(page.getByLabel('Filter').locator('option[value="splitting"]')).toHaveCount(1);
   });
 
   test('says so plainly when the admin API answers 404 off the Tailscale network', async ({

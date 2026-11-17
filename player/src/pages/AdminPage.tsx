@@ -34,6 +34,7 @@ import { cn } from '@/lib/utils';
 
 const POLL_MS = 5000;
 const REQUEST_TIMEOUT_MS = 10_000;
+const JOB_PAGE_SIZE = 50;
 
 const STATUS_FILTERS: (JobStatus['status'] | 'all')[] = [
   'all',
@@ -42,6 +43,7 @@ const STATUS_FILTERS: (JobStatus['status'] | 'all')[] = [
   'pending',
   'downloading',
   'dispatched',
+  'splitting',
   'verifying',
   'publishing',
 ];
@@ -140,6 +142,8 @@ const sortFailedFirst = (jobs: AdminJobRow[]): AdminJobRow[] =>
  */
 export const AdminPage: React.FC = () => {
   const [jobs, setJobs] = useState<AdminJobRow[]>([]);
+  const [jobsTotal, setJobsTotal] = useState(0);
+  const [jobOffset, setJobOffset] = useState(0);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [statusFilter, setStatusFilter] = useState<JobStatus['status'] | 'all'>('all');
   const [nodes, setNodes] = useState<AdminNode[]>([]);
@@ -156,9 +160,15 @@ export const AdminPage: React.FC = () => {
   const [routingMessage, setRoutingMessage] = useState<string | null>(null);
   const [limitDraft, setLimitDraft] = useState<string>('');
   const pollAbort = useRef<AbortController | null>(null);
+  const detailAbort = useRef<AbortController | null>(null);
+  const detailRequest = useRef(0);
+  const limitDirty = useRef(false);
 
   const refresh = useCallback(async () => {
-    if (pollAbort.current) pollAbort.current.abort();
+    // Do not replace a slow poll at the next five-second tick: doing so
+    // forever discards its jobs/nodes before the ten-second timeout can
+    // settle. One controller covers all three requests and their partial results.
+    if (pollAbort.current) return;
     const controller = new AbortController();
     pollAbort.current = controller;
     const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -166,9 +176,9 @@ export const AdminPage: React.FC = () => {
     try {
       const query = statusFilter === 'all' ? undefined : statusFilter;
       const [jobsResult, nodesResult, settingsResult] = await Promise.allSettled([
-        getAdminJobs(query, controller.signal),
+        getAdminJobs(query, controller.signal, JOB_PAGE_SIZE, jobOffset),
         getAdminNodes(controller.signal),
-        getAdminSettings(),
+        getAdminSettings(controller.signal),
       ]);
       if (pollAbort.current !== controller) return;
       const failures: string[] = [];
@@ -188,12 +198,15 @@ export const AdminPage: React.FC = () => {
       setError(failures.length > 0 ? failures.join('; ') : null);
       if (jobsResult.status === 'fulfilled') {
         setJobs(jobsResult.value.jobs);
+        setJobsTotal(jobsResult.value.total);
         setCounts(jobsResult.value.counts);
       }
       if (nodesResult.status === 'fulfilled') setNodes(nodesResult.value.nodes);
       if (settingsResult.status === 'fulfilled') {
         setSettings(settingsResult.value);
-        setLimitDraft(limitDraftValue(settingsResult.value.runpodMaxConcurrent.value));
+        if (!limitDirty.current) {
+          setLimitDraft(limitDraftValue(settingsResult.value.runpodMaxConcurrent.value));
+        }
       }
       setLoaded(true);
     } finally {
@@ -203,7 +216,7 @@ export const AdminPage: React.FC = () => {
         setBusy(false);
       }
     }
-  }, [statusFilter]);
+  }, [statusFilter, jobOffset]);
 
   useEffect(() => {
     void refresh();
@@ -217,17 +230,30 @@ export const AdminPage: React.FC = () => {
 
   const loadDetail = useCallback(
     async (jobId: string, withS3: boolean) => {
+      detailAbort.current?.abort();
+      const controller = new AbortController();
+      detailAbort.current = controller;
+      const requestId = ++detailRequest.current;
       setSelectedJobId(jobId);
       setDetailError(null);
       setDetail(null);
       try {
-        setDetail(await getAdminJobDetail(jobId, withS3));
+        const next = await getAdminJobDetail(jobId, withS3, controller.signal);
+        if (detailRequest.current === requestId) setDetail(next);
       } catch (err) {
+        if (detailRequest.current !== requestId || controller.signal.aborted) return;
         setDetailError(err instanceof Error ? err.message : 'Failed to load job detail');
+      } finally {
+        if (detailRequest.current === requestId) detailAbort.current = null;
       }
     },
     []
   );
+
+  useEffect(() => () => {
+    detailRequest.current += 1;
+    detailAbort.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (selectedJobId) void loadDetail(selectedJobId, verifyS3);
@@ -239,7 +265,10 @@ export const AdminPage: React.FC = () => {
     try {
       const next = await putAdminSettings(update);
       setSettings(next);
-      setLimitDraft(limitDraftValue(next.runpodMaxConcurrent.value));
+      if ('runpodMaxConcurrent' in update) {
+        limitDirty.current = false;
+        setLimitDraft(limitDraftValue(next.runpodMaxConcurrent.value));
+      }
       setRoutingMessage('Saved. New jobs pick it up on the next pass.');
     } catch (err) {
       setRoutingMessage(err instanceof Error ? `Save failed: ${err.message}` : 'Save failed');
@@ -273,8 +302,9 @@ export const AdminPage: React.FC = () => {
             <div>
               <p className="font-medium">The admin API is not reachable from this network.</p>
               <p className="mt-1 text-amber-300/80">
-                This page is served only on the owner&rsquo;s Tailscale network; the public site
-                answers admin requests with 404 by design. Connect to Tailscale and refresh.
+                The page shell can be public, but admin data is served only on the owner&rsquo;s
+                Tailscale network; the public site answers admin API requests with 404 by design.
+                Connect to Tailscale and refresh.
               </p>
             </div>
           </div>
@@ -290,7 +320,10 @@ export const AdminPage: React.FC = () => {
               settings={settings}
               effectiveRouting={effectiveRouting}
               limitDraft={limitDraft}
-              setLimitDraft={setLimitDraft}
+              setLimitDraft={(value) => {
+                limitDirty.current = true;
+                setLimitDraft(value);
+              }}
               routingSaving={routingSaving}
               routingMessage={routingMessage}
               onSave={saveRouting}
@@ -310,7 +343,10 @@ export const AdminPage: React.FC = () => {
                   Filter
                   <select
                     value={statusFilter}
-                    onChange={(event) => setStatusFilter(event.target.value as JobStatus['status'] | 'all')}
+                    onChange={(event) => {
+                      setJobOffset(0);
+                      setStatusFilter(event.target.value as JobStatus['status'] | 'all');
+                    }}
                     className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200"
                   >
                     {STATUS_FILTERS.map((status) => (
@@ -388,6 +424,31 @@ export const AdminPage: React.FC = () => {
                   ))}
                 </div>
               )}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
+                <span>
+                  {jobsTotal === 0
+                    ? '0 jobs'
+                    : `${jobOffset + 1}–${Math.min(jobOffset + jobs.length, jobsTotal)} of ${jobsTotal}`}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={jobOffset === 0}
+                    onClick={() => setJobOffset((offset) => Math.max(0, offset - JOB_PAGE_SIZE))}
+                  >
+                    Previous page
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={jobOffset + JOB_PAGE_SIZE >= jobsTotal}
+                    onClick={() => setJobOffset((offset) => offset + JOB_PAGE_SIZE)}
+                  >
+                    Next page
+                  </Button>
+                </div>
+              </div>
             </section>
 
             {selectedJobId && (
@@ -515,6 +576,9 @@ const RoutingSection: React.FC<{
               Paused
             </Button>
           </div>
+          <p className="mt-2 text-xs text-zinc-500">
+            No limit stores an unlimited database override; it does not restore the environment default.
+          </p>
         </div>
         {routingSaving && <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />}
         {routingMessage && <p className="text-xs text-zinc-400">{routingMessage}</p>}
@@ -525,59 +589,78 @@ const RoutingSection: React.FC<{
 
 // --- nodes ------------------------------------------------------------------------
 
-const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({ nodes, onChanged }) => (
-  <section aria-label="Worker nodes">
-    <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h2>
-    {nodes.length === 0 ? (
-      <p className="text-sm text-zinc-600">No worker nodes registered.</p>
-    ) : (
-      <div className="grid gap-2 lg:grid-cols-2">
-        {nodes.map((node) => {
-          const device = node.capabilities?.device;
-          return (
-            <div
-              key={node.id}
-              className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3"
-              title={`${node.id}${node.agentVersion ? ` · agent ${node.agentVersion}` : ''}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2 font-medium text-zinc-200">
-                  <span
-                    role="img"
-                    aria-label={node.online ? 'online' : 'offline'}
-                    className={cn('h-2 w-2 rounded-full', node.online ? 'bg-green-400' : 'bg-zinc-600')}
-                  />
-                  {node.displayName}
-                  {typeof device === 'string' && device && (
-                    <span className="text-xs text-zinc-500">{device}</span>
-                  )}
-                </span>
-                <label className="flex items-center gap-2 text-xs text-zinc-400">
-                  {node.enabled ? 'in use' : 'not used'}
-                  <input
-                    type="checkbox"
-                    checked={node.enabled}
-                    onChange={(event) => {
-                      void setAdminNodeEnabled(node.id, event.target.checked).then(onChanged);
-                    }}
-                    aria-label={node.enabled ? `Stop using ${node.displayName}` : `Use ${node.displayName}`}
-                  />
-                </label>
+const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({ nodes, onChanged }) => {
+  const [error, setError] = useState<string | null>(null);
+  const [pendingNode, setPendingNode] = useState<string | null>(null);
+
+  const toggle = async (node: AdminNode, enabled: boolean) => {
+    setPendingNode(node.id);
+    setError(null);
+    try {
+      await setAdminNodeEnabled(node.id, enabled);
+      onChanged();
+    } catch (err) {
+      // No optimistic write: the checkbox remains at the confirmed state.
+      setError(err instanceof Error ? err.message : `Failed to update ${node.displayName}`);
+    } finally {
+      setPendingNode(null);
+    }
+  };
+
+  return (
+    <section aria-label="Worker nodes">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h2>
+      {error && <p role="alert" className="mb-2 text-sm text-red-400">{error}</p>}
+      {nodes.length === 0 ? (
+        <p className="text-sm text-zinc-600">No worker nodes registered.</p>
+      ) : (
+        <div className="grid gap-2 lg:grid-cols-2">
+          {nodes.map((node) => {
+            const device = node.capabilities?.device;
+            return (
+              <div
+                key={node.id}
+                className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3"
+                title={`${node.id}${node.agentVersion ? ` · agent ${node.agentVersion}` : ''}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-2 font-medium text-zinc-200">
+                    <span
+                      role="img"
+                      aria-label={node.online ? 'online' : 'offline'}
+                      className={cn('h-2 w-2 rounded-full', node.online ? 'bg-green-400' : 'bg-zinc-600')}
+                    />
+                    {node.displayName}
+                    {typeof device === 'string' && device && (
+                      <span className="text-xs text-zinc-500">{device}</span>
+                    )}
+                  </span>
+                  <label className="flex items-center gap-2 text-xs text-zinc-400">
+                    {node.enabled ? 'in use' : 'not used'}
+                    <input
+                      type="checkbox"
+                      checked={node.enabled}
+                      disabled={pendingNode === node.id}
+                      onChange={(event) => void toggle(node, event.target.checked)}
+                      aria-label={node.enabled ? `Stop using ${node.displayName}` : `Use ${node.displayName}`}
+                    />
+                  </label>
+                </div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  seen {age(node.lastSeenAt)} ·{' '}
+                  {node.currentAssignment
+                    ? `${node.currentAssignment.kind} ${node.currentAssignment.status} (${node.currentAssignment.phase ?? '—'}), heartbeat ${age(node.currentAssignment.heartbeatAt)}`
+                    : 'idle'}
+                  {!node.enabled && <span className="text-red-400"> · disabled</span>}
+                </div>
               </div>
-              <div className="mt-1 text-xs text-zinc-500">
-                seen {age(node.lastSeenAt)} ·{' '}
-                {node.currentAssignment
-                  ? `${node.currentAssignment.kind} ${node.currentAssignment.status} (${node.currentAssignment.phase ?? '—'}), heartbeat ${age(node.currentAssignment.heartbeatAt)}`
-                  : 'idle'}
-                {!node.enabled && <span className="text-red-400"> · disabled</span>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    )}
-  </section>
-);
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+};
 
 // --- job detail: timeline, assignments, evidence -----------------------------------
 

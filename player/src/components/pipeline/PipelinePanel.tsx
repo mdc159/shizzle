@@ -336,7 +336,7 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                     onClick={() => void showEvents(job)}
                     className="rounded border border-zinc-800 p-2 text-left text-sm hover:bg-zinc-900"
                   >
-                    <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center justify-between gap-2">
                       <span className="truncate text-zinc-300">{title(job)}</span>
                       <span className="ml-2 flex shrink-0 items-center gap-2 text-xs">
                         {executorLabel(job.executor) && (
@@ -344,16 +344,16 @@ export const PipelinePanel: React.FC<PipelinePanelProps> = ({ active, variant })
                         )}
                         <span className={job.status === 'ready' ? 'text-green-400' : 'text-red-400'}>{job.status}</span>
                       </span>
-                    </div>
+                    </span>
                     {job.status === 'failed' && (job.errorCode || job.error) && (
-                      <p className="mt-1 truncate text-xs text-zinc-500">
+                      <span className="mt-1 block truncate text-xs text-zinc-500">
                         {job.errorCode && (
                           <span className="mr-2 rounded bg-red-950/70 px-1.5 py-0.5 font-mono text-red-300">
                             {job.errorCode}
                           </span>
                         )}
                         {job.error}
-                      </p>
+                      </span>
                     )}
                   </button>
                 ))}
