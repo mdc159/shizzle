@@ -1,0 +1,149 @@
+# Shizzle staging stack — same services as production, isolated data, and a
+# tailnet-only plain-HTTP listener published on 127.0.0.1:18080.
+#
+# Lives at /opt/shizzle/staging on the production VPS and runs beside the
+# production project (`shizzle`) with its own .env (from .env.staging.example),
+# its own Postgres/appdata/Caddy volumes, and its own player directory. Every
+# container is CPU/memory limited so staging cannot starve production on the
+# shared 4-core / 15 GB host.
+#
+# Deployed by .github/workflows/deploy-staging.yml through
+# deploy/vps/deploy-staging.sh: pull the digest-pinned image, validate this
+# file, alembic upgrade head, start, health check on 127.0.0.1:18080.
+#
+# Reachability: Caddy listens on plain HTTP :80 inside the container and is
+# published ONLY to host loopback 18080. The host fronts it with
+#   tailscale serve --bg --https=8443 http://127.0.0.1:18080
+# which supplies real TLS at https://shizzle.tailfedd3b.ts.net:8443 (auth
+# cookies are Secure) and tailnet-only reachability.
+#
+# Isolation from production:
+#   - own database (shizzle-staging_pgdata volume) and job data volume
+#   - own media bucket via S3_MEDIA_BUCKET in .env; staging manifests carry
+#     file-scoped signed CloudFront URLs against the staging distribution
+#     (invariant E5), so — unlike production — no same-origin /cdn proxy is
+#     defined here. Without a staging distribution configured, the site runs
+#     but media will not play.
+#   - SHIZZLE_NODE_TOKENS stays empty in .env: staging can never take the
+#     Mac mini or Dell from production (see .env.staging.example).
+
+name: shizzle-staging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: shizzle-staging-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shizzle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shizzle}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published to the host — only the compose network reaches 5432.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shizzle} -d ${POSTGRES_DB:-shizzle}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    restart: unless-stopped
+
+  api:
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
+    container_name: shizzle-staging-api
+    # Migrations run as an explicit deploy step before services start.
+    command: uvicorn shizzle_server.main:app --host 0.0.0.0 --port 8001
+    env_file:
+      - path: ./.env
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
+      CLOUDFRONT_PRIVATE_KEY_PATH: /run/secrets/cloudfront_private_key.pem
+      # Admin routes (api/admin/*) 404 unless a request carries this header
+      # with this exact value. Caddy injects it on the staging listener below.
+      SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}
+    volumes:
+      - appdata:/app/data
+      - ./secrets/cloudfront_private_key.pem:/run/secrets/cloudfront_private_key.pem:ro
+    expose:
+      - "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
+    restart: unless-stopped
+
+  orchestrator:
+    image: ${SHIZZLE_API_IMAGE:?set SHIZZLE_API_IMAGE in .env}
+    container_name: shizzle-staging-orchestrator
+    command: python -m shizzle_server.orchestrator
+    env_file:
+      - path: ./.env
+        required: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATA_DIR: /app/data
+      # Staging separates for real on RunPod (same endpoint as production is
+      # fine: the dispatch payload names THIS stack's S3 bucket). Nodes are
+      # deliberately absent: SHIZZLE_NODE_TOKENS stays empty so staging never
+      # claims the Mac mini or Dell away from production. URL jobs therefore
+      # wait NODE_DOWNLOAD_WAIT_SECONDS and fail NO_NODE_AVAILABLE until a
+      # node agent is pointed at staging (docs/AUTOMATION.md).
+      SHIZZLE_PIPELINE: ${SHIZZLE_PIPELINE:-cloud}
+    volumes:
+      - appdata:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 768M
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: shizzle-staging-caddy
+    ports:
+      # Tailnet-only staging listener. The host's tailscale serve fronts
+      # 127.0.0.1:18080 with HTTPS on :8443; nothing else may publish.
+      - "127.0.0.1:18080:80"
+    environment:
+      # Read by the Caddyfile ({$SHIZZLE_ADMIN_PROXY_SECRET:}) to inject the
+      # admin header upstream so /api/admin/* and the /admin page work here.
+      SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./player:/srv/ui:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 192M
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  appdata:
+  caddy_config:
+  caddy_data:
+    # Plain HTTP behind tailscale serve: no ACME account/certs to preserve,
+    # so a private named volume (shizzle-staging_caddy_data) is enough.
