@@ -193,3 +193,79 @@ async def test_concurrent_reservations_one_instance_takes_the_final_slot(
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
+
+
+async def test_concurrent_reservations_see_a_retry_reservation_slot(pg_engine):
+    """G3 atomicity around retries: a job whose attempt 0 failed (row keeps
+    runpod_job_id + worker_phase='failed') holds a real slot once its retry's
+    reservation is outstanding (submit-timeout shape, B3). Two further jobs
+    racing with cap 2 — one slot already consumed — must not both win."""
+    from shizzle_server.db import create_engine, create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.errors import ErrorCode
+
+    engine = create_engine(PG_URL)
+    sf = create_session_factory(engine)
+    repo = JobRepository(sf)
+    try:
+        retried = await repo.create_job(
+            source_type=SourceType.upload, source_ref="source.mp4", title="retried"
+        )
+        assert (await repo.claim_next(worker_id="w0", lease_seconds=600)).id == retried.id
+        for from_stage, to_stage in (
+            (JobStage.pending, JobStage.downloading),
+            (JobStage.downloading, JobStage.dispatched),
+        ):
+            await repo.advance(
+                retried.id, worker_id="w0", from_stage=from_stage, to_stage=to_stage
+            )
+        key0 = f"{retried.id.hex}:0"
+        assert await repo.reserve_dispatch(retried.id, worker_id="w0", idempotency_key=key0)
+        await repo.confirm_dispatch(retried.id, idempotency_key=key0, runpod_job_id="rp-dead")
+        await repo.record_worker_progress(retried.id, phase="failed", worker_id="w0")
+        await repo.schedule_retry(
+            retried.id,
+            worker_id="w0",
+            error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+            error_detail="worker died",
+            retry_in_seconds=0.0,
+        )
+        assert (await repo.claim_next(worker_id="w0", lease_seconds=600)).id == retried.id
+        assert await repo.reserve_dispatch(
+            retried.id, worker_id="w0", idempotency_key=f"{retried.id.hex}:1"
+        )
+        assert await repo.count_runpod_dispatches() == 1
+
+        repo_a = JobRepository(create_session_factory(create_engine(PG_URL)))
+        repo_b = JobRepository(create_session_factory(create_engine(PG_URL)))
+        competitors = []
+        for worker in ("w1", "w2"):
+            job = await repo.create_job(
+                source_type=SourceType.upload, source_ref="source.mp4", title=worker
+            )
+            assert (await repo.claim_next(worker_id=worker, lease_seconds=600)).id == job.id
+            for from_stage, to_stage in (
+                (JobStage.pending, JobStage.downloading),
+                (JobStage.downloading, JobStage.dispatched),
+            ):
+                await repo.advance(
+                    job.id, worker_id=worker, from_stage=from_stage, to_stage=to_stage
+                )
+            competitors.append(job)
+
+        results = await asyncio.gather(
+            repo_a.reserve_dispatch(
+                competitors[0].id, worker_id="w1",
+                idempotency_key=f"{competitors[0].id.hex}:0", max_concurrent=2,
+            ),
+            repo_b.reserve_dispatch(
+                competitors[1].id, worker_id="w2",
+                idempotency_key=f"{competitors[1].id.hex}:0", max_concurrent=2,
+            ),
+        )
+        # One slot of two is taken by the retry reservation: exactly one more.
+        assert sorted(results) == [False, True]
+        assert await repo.count_runpod_dispatches() == 2
+    finally:
+        await engine.dispose()

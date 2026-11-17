@@ -1148,3 +1148,130 @@ async def test_open_assignment_on_runnable_job_is_not_terminal_leak(admin_client
     assert "assignment_ack_overdue" not in flags
     assert "assignment_stalled" not in flags
     assert "assignment_over_cap" not in flags
+
+
+# --- top-level diagnostic fields are redacted (G2) -------------------------------
+
+
+async def test_failed_job_error_detail_is_redacted_everywhere(admin_client):
+    """jobs.error_detail is a diagnostic string the pipeline fills with
+    upstream text (node errors quote URLs). Neither the list rows nor the
+    detail columns may echo it raw."""
+    c, app = admin_client
+    job = await _make_job(app, source_type=SourceType.url, source_ref=CRED_URL, title="Boom")
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.job_repo.fail_job(
+        job.id,
+        error_code=ErrorCode.NODE_FAILED,
+        error_detail=f"node mac-mini download refused {CRED_URL} (token expired)",
+        worker_id="w",
+    )
+    listing = await c.get("/api/admin/jobs?status=failed", headers=HEADERS)
+    row = listing.json()["jobs"][0]
+    assert row["errorCode"] == "NODE_FAILED"
+    assert CRED_FRAGMENT not in row["errorDetail"]
+    assert "[redacted]" in row["errorDetail"]
+
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    body = detail.json()
+    assert CRED_FRAGMENT not in detail.text
+    assert "https://" not in detail.text.replace("http://test", "")
+    assert "[redacted]" in body["job"]["errorDetail"]
+
+
+# --- dispatch identity survives later-stage retries (durable history) -------------
+
+
+async def _dispatched_selected_job(app, *, fail_after: JobStage | None):
+    """Attempt 0 confirmed, its package selected at verifying; optionally a
+    retry at ``fail_after`` increments jobs.attempt WITHOUT redispatching."""
+    import hashlib
+
+    job = await _make_job(app, title="Selected")
+    assert (await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)).id == job.id
+    key0 = f"{job.id.hex}:0"
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await app.state.job_repo.advance(
+            job.id, worker_id="w", from_stage=from_stage, to_stage=to_stage
+        )
+    assert await app.state.job_repo.reserve_dispatch(job.id, worker_id="w", idempotency_key=key0)
+    await app.state.job_repo.confirm_dispatch(
+        job.id, idempotency_key=key0, runpod_job_id="rp-1"
+    )
+    prefix = (
+        f"tracks/{track_id_for_job(job.id)}/1/separation/attempts/"
+        f"{hashlib.sha256(key0.encode()).hexdigest()}"
+    )
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.dispatched, to_stage=JobStage.verifying,
+        detail={"package_prefix": prefix},
+    )
+    if fail_after is not None:
+        await app.state.job_repo.advance(
+            job.id, worker_id="w", from_stage=JobStage.verifying, to_stage=JobStage.publishing
+        )
+    await app.state.job_repo.schedule_retry(
+        job.id,
+        worker_id="w",
+        error_code=ErrorCode.CHECKSUM_MISMATCH,
+        error_detail="retry without redispatch",
+        retry_in_seconds=60.0,
+    )
+    retried = await app.state.job_repo.get_job(job.id)
+    assert retried.attempt == 1  # the retry counter moved...
+    assert retried.runpod_job_id == "rp-1"  # ...without any new dispatch
+    return job, key0, prefix
+
+
+async def test_verification_retry_keeps_the_selected_dispatch_identity(admin_client):
+    """A verification retry bumps jobs.attempt but the job's identity is still
+    attempt 0's dispatch; the evidence compares consistent keys."""
+    c, app = admin_client
+    job, key0, prefix = await _dispatched_selected_job(app, fail_after=None)
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    body = detail.json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key0  # NOT <hex>:1
+    assert body["dispatchAttempt"]["attemptPrefix"] == prefix
+    assert body["job"]["attempt"] == 1  # the retry counter stays separate
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    assert f"key={key0}" in identity["observed"]
+    assert "retry counter now at" in identity["expected"]
+
+
+async def test_publication_retry_keeps_the_selected_dispatch_identity(admin_client):
+    c, app = admin_client
+    job, key0, prefix = await _dispatched_selected_job(app, fail_after=JobStage.publishing)
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    body = detail.json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key0
+    assert body["dispatchAttempt"]["attemptPrefix"] == prefix
+    assert body["job"]["attempt"] == 1
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+
+
+async def test_contradictory_confirmed_dispatch_is_a_mismatch(admin_client):
+    """When the LAST confirmation names a different key than the selected
+    dispatch (and no worker is marked failed), the identities contradict and
+    the evidence says so instead of ok."""
+    c, app = admin_client
+    job, key0, _prefix = await _dispatched_selected_job(app, fail_after=None)
+    await app.state.job_repo.append_event(
+        job.id,
+        "runpod_dispatched",
+        {"runpod_job_id": "rp-foreign", "idempotency_key": f"{job.id.hex}:9"},
+    )
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    body = detail.json()
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "mismatch"
+    assert f"key={job.id.hex}:9" in identity["observed"]
+    assert f"selected dispatch {key0}" in identity["observed"]

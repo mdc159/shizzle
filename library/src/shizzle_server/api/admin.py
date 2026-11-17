@@ -168,15 +168,15 @@ class AdminJobRow(BaseModel):
             status=job.status.value,
             stage=job.status.value,
             sourceType=job.source_type.value,
-            title=job.title,
-            artist=job.artist,
+            title=_redact_value(job.title),
+            artist=_redact_value(job.artist),
             attempt=job.attempt,
             executor=job.executor,
             runpodJobId=job.runpod_job_id,
-            workerPhase=job.worker_phase,
+            workerPhase=_redact_value(job.worker_phase),
             workerHeartbeatAt=job.worker_heartbeat_at,
             errorCode=job.error_code,
-            errorDetail=job.error_detail,
+            errorDetail=_redact_value(job.error_detail),
             leaseOwner=job.lease_owner,
             leaseExpiresAt=job.lease_expires_at,
             nextRetryAt=job.next_retry_at,
@@ -217,7 +217,7 @@ class AdminAssignmentInfo(BaseModel):
             kind=a.kind.value,
             status=a.status.value,
             idempotencyKey=a.idempotency_key,
-            phase=a.phase,
+            phase=_redact_value(a.phase),
             heartbeatAt=a.heartbeat_at,
             detail=_redact_value(dict(a.detail or {})),
             createdAt=a.created_at,
@@ -257,12 +257,12 @@ class AdminJobColumns(BaseModel):
         return cls(
             jobId=job.id.hex,
             sourceType=job.source_type.value,
-            title=job.title,
-            artist=job.artist,
+            title=_redact_value(job.title),
+            artist=_redact_value(job.artist),
             status=job.status.value,
             runpodJobId=job.runpod_job_id,
             executor=job.executor,
-            workerPhase=job.worker_phase,
+            workerPhase=_redact_value(job.worker_phase),
             workerHeartbeatAt=job.worker_heartbeat_at,
             attempt=job.attempt,
             idempotencyKey=job.idempotency_key,
@@ -271,9 +271,9 @@ class AdminJobColumns(BaseModel):
             nextRetryAt=job.next_retry_at,
             profileVersion=job.profile_version,
             inputChecksum=job.input_checksum,
-            outputChecksums=job.output_checksums,
+            outputChecksums=_redact_value(job.output_checksums),
             errorCode=job.error_code,
-            errorDetail=job.error_detail,
+            errorDetail=_redact_value(job.error_detail),
             stageTimings=job.stage_timings,
             trackId=str(job.track_id) if job.track_id else None,
             createdAt=job.created_at,
@@ -302,7 +302,7 @@ class AdminTrackInfo(BaseModel):
 
 
 class DispatchAttempt(BaseModel):
-    idempotencyKey: str
+    idempotencyKey: str | None = None
     attemptPrefix: str | None = None
     runpodJobId: str | None = None
 
@@ -483,6 +483,43 @@ def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str])
     return None
 
 
+def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
+    """The idempotency key of the dispatch the job's CURRENT identity rests on,
+    derived from durable dispatch history — never from ``jobs.attempt``.
+
+    Later-stage retries (verification, publication) increment the retry
+    counter WITHOUT redispatching: the selected package still belongs to the
+    dispatch that was confirmed before the dispatched->verifying transition.
+    A job still inside ``dispatched`` names its in-flight reservation or
+    confirmation when one exists, else the key a fresh dispatch would use.
+    """
+    transition_index = None
+    for index, event in enumerate(events):
+        detail = _event_detail(event)
+        if (
+            event.event == "stage_completed"
+            and detail.get("from") == "dispatched"
+            and detail.get("to") == "verifying"
+        ):
+            transition_index = index
+    if transition_index is not None:
+        for event in reversed(events[:transition_index]):
+            key = _event_detail(event).get("idempotency_key")
+            if event.event == "runpod_dispatched" and isinstance(key, str):
+                return key
+        return None  # legacy transition with no keyed confirmation
+    pending = pending_runpod_dispatch(events)
+    if pending is not None:
+        key = _event_detail(pending).get("idempotency_key")
+        if isinstance(key, str):
+            return key
+    for event in reversed(events):
+        key = _event_detail(event).get("idempotency_key")
+        if event.event == "runpod_dispatched" and isinstance(key, str):
+            return key
+    return f"{job.id.hex}:{job.attempt}"
+
+
 def _stages_reached(job: Job, events: list[JobEvent]) -> set[str]:
     """Every pipeline stage this job verifiably reached, from durable history.
 
@@ -562,7 +599,10 @@ def _build_db_evidence(
         status="ok" if created else "missing",
     )
 
-    # 2. Dispatch identity: reservation/confirmation under the current key.
+    # 2. Dispatch identity: the selected dispatch's durable key, compared
+    # against what history confirms. The RETRY COUNTER (jobs.attempt) is a
+    # separate fact: later-stage retries increment it without redispatching,
+    # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
     confirmed = None
     for event in reversed(events):
@@ -572,27 +612,44 @@ def _build_db_evidence(
         ):
             confirmed = detail
             break
-    current_key = f"{job.id.hex}:{job.attempt}"
-    if "dispatched" in stages:
-        if confirmed is not None:
-            observed = (
-                f"confirmed runpod_job_id={confirmed.get('runpod_job_id')} "
-                f"key={confirmed.get('idempotency_key')}"
-            )
-            status: EvidenceStatus = "ok"
-        elif pending is not None:
-            observed = f"reservation key={_event_detail(pending).get('idempotency_key')} unconfirmed"
+    selected_key = _selected_dispatch_key(job, events)
+    current_retry_key = f"{job.id.hex}:{job.attempt}"
+    if "dispatched" not in stages:
+        observed = "job has not reached dispatched"
+        status: EvidenceStatus = "not_yet"
+    elif confirmed is not None:
+        confirmed_key = str(confirmed.get("idempotency_key"))
+        observed = (
+            f"confirmed runpod_job_id={confirmed.get('runpod_job_id')} "
+            f"key={confirmed_key}"
+        )
+        if confirmed_key == selected_key:
+            status = "ok"
+        elif job.worker_phase == "failed":
+            # B12: the confirmed execution is closed and the retry dispatches
+            # fresh — consistent by design, not a contradiction.
+            observed += f"; worker failed, retry dispatches fresh under {selected_key}"
             status = "ok"
         else:
-            observed = "no dispatch recorded yet (waiting for a node or the RunPod cap)"
-            status = "not_yet"
+            observed += f"; expected the selected dispatch {selected_key}"
+            status = "mismatch"
+    elif pending is not None:
+        pending_key = str(_event_detail(pending).get("idempotency_key"))
+        observed = f"reservation key={pending_key} unconfirmed"
+        status = "ok" if pending_key == selected_key else "mismatch"
     else:
-        observed = "job has not reached dispatched"
+        observed = "no dispatch recorded yet (waiting for a node or the RunPod cap)"
         status = "not_yet"
+    expected = (
+        f"the selected dispatch key {selected_key} "
+        f"(retry counter now at {current_retry_key})"
+        if selected_key is not None
+        else "a keyed dispatch selects the package"
+    )
     ev.add(
         "dispatched",
         "dispatch_identity",
-        expected=f"dispatch under the current attempt key {current_key}",
+        expected=expected,
         observed=observed,
         proof="job_events (runpod_dispatch_started / runpod_dispatched)",
         status=status,
@@ -1209,7 +1266,9 @@ async def admin_job_detail(
         job=AdminJobColumns.from_job(job),
         derivedTrackId=str(track_id_for_job(job.id)),
         dispatchAttempt=DispatchAttempt(
-            idempotencyKey=f"{job.id.hex}:{job.attempt}",
+            # Durable dispatch history, not the retry counter: later-stage
+            # retries increment jobs.attempt without redispatching.
+            idempotencyKey=_selected_dispatch_key(job, events),
             attemptPrefix=prefix,
             runpodJobId=job.runpod_job_id,
         ),
@@ -1225,8 +1284,8 @@ async def admin_job_detail(
         track=(
             AdminTrackInfo(
                 id=str(track.id),
-                title=track.title,
-                artist=track.artist,
+                title=_redact_value(track.title),
+                artist=_redact_value(track.artist),
                 durationSeconds=track.duration_seconds,
                 s3Prefix=track.s3_prefix,
                 generation=track.generation,
@@ -1270,7 +1329,7 @@ async def admin_list_nodes(request: Request, _auth: None = Admin) -> AdminNodeLi
         infos.append(
             AdminNodeInfo(
                 id=node.id,
-                displayName=node.display_name or node.id,
+                displayName=_redact_value(node.display_name or node.id),
                 online=online,
                 enabled=node.disabled_at is None,
                 capabilities=dict(node.capabilities or {}),

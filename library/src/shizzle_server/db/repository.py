@@ -85,26 +85,25 @@ def _runpod_work_is_live(job: Job) -> bool:
 async def _count_runpod_work(session: AsyncSession) -> int:
     """Jobs currently holding a RunPod reservation or confirmed RunPod job.
 
-    Semantics (G3):
-    - a confirmed RunPod job counts while its worker is not marked failed;
-      a failed worker is a closed execution whose retry dispatches fresh
-      (B12) and must not count itself;
-    - an unresolved reservation counts unless it is provably node-bound —
-      proof is a separation assignment carrying the reservation's
-      idempotency key (assign_separation creates it just before reserving).
-      A retained ``executor = node:<id>`` from an earlier URL download is
-      NOT proof: the download assignment lives under a different key.
+    Semantics (G3) — unresolved reservations are inspected FIRST, because a
+    row can retain the artifacts of a closed execution (an old
+    ``runpod_job_id``, ``worker_phase='failed'``) while a retry's fresh
+    reservation is already outstanding:
+    - an unresolved reservation counts (it may be accepted at RunPod: a
+      submit timeout leaves it outstanding, B3) unless it is provably
+      node-bound — proof is a separation assignment carrying the
+      reservation's idempotency key (assign_separation creates it just
+      before reserving). A retained ``executor = node:<id>`` from an earlier
+      URL download is NOT proof: the download assignment lives under a
+      different key;
+    - otherwise the confirmed execution counts while its worker is not
+      marked failed — a failed worker is a closed execution whose retry
+      dispatches fresh (B12) and must not count itself.
     """
     res = await session.execute(select(Job).where(Job.status == JobStage.dispatched))
     jobs = list(res.scalars().all())
     count = 0
     for job in jobs:
-        if job.runpod_job_id:
-            if _runpod_work_is_live(job):
-                count += 1
-            continue
-        if job.worker_phase == "failed":
-            continue  # closed execution; the retry reserves under a fresh key
         events_res = await session.execute(
             select(JobEvent)
             .where(
@@ -120,23 +119,27 @@ async def _count_runpod_work(session: AsyncSession) -> int:
             .order_by(JobEvent.id)
         )
         pending = pending_runpod_dispatch(list(events_res.scalars()))
-        if pending is None:
-            continue
-        pending_detail = pending.detail if isinstance(pending.detail, dict) else {}
-        pending_key = pending_detail.get("idempotency_key")
-        if isinstance(pending_key, str):
-            bound = await session.execute(
-                select(NodeAssignment.id)
-                .where(
-                    NodeAssignment.job_id == job.id,
-                    NodeAssignment.kind == NodeAssignmentKind.separate,
-                    NodeAssignment.idempotency_key == pending_key,
+        if pending is not None:
+            pending_detail = pending.detail if isinstance(pending.detail, dict) else {}
+            pending_key = pending_detail.get("idempotency_key")
+            if isinstance(pending_key, str):
+                bound = await session.execute(
+                    select(NodeAssignment.id)
+                    .where(
+                        NodeAssignment.job_id == job.id,
+                        NodeAssignment.kind == NodeAssignmentKind.separate,
+                        NodeAssignment.idempotency_key == pending_key,
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-            )
-            if bound.first() is not None:
-                continue  # node-bound reservation, not RunPod capacity
-        count += 1
+                if bound.first() is not None:
+                    # Node-bound reservation: not RunPod capacity, and the
+                    # closed previous execution below must not count either.
+                    continue
+            count += 1
+            continue
+        if _runpod_work_is_live(job):
+            count += 1
     return count
 
 logger = logging.getLogger(__name__)
