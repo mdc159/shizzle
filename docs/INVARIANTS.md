@@ -589,10 +589,12 @@ browser evidence — the validator rejects credential-shaped keys recursively
 ### E2 — source_ref never exposed in API responses
 
 **Invariant:** `source_ref` (the raw submitted URL) is stored on the job row
-but MUST NEVER be exposed in API responses (`JobResponse` omits it).
-- Where: `library/src/shizzle_server/api/models.py`, `library/src/shizzle_server/db/models.py`
-- UNGUARDED — no test asserts the omission; a wanted test should post a job
-  with a credential-bearing URL and assert every response body lacks it.
+but MUST NEVER be exposed in API responses (`JobResponse` omits it). Public
+job responses and event details MUST also pass their free-text fields through
+the shared recursive redaction policy, so error text or nested diagnostics
+cannot echo credential-bearing URLs, access keys or API keys (E1/G6).
+- Where: `library/src/shizzle_server/api/models.py`, `library/src/shizzle_server/api/routes.py`, `library/src/shizzle_server/api/redaction.py`, `library/src/shizzle_server/db/models.py`
+- Guarded by: `library/tests/test_api.py::test_public_job_free_text_uses_the_shared_redaction_policy`
 
 ### E3 — secrets only in env
 
@@ -689,10 +691,12 @@ rather than being overwritten. Isolated contract databases may run
 
 ## G. Administrator surface (/api/admin, /admin)
 
-The admin routes and page exist to trace jobs end to end and to steer routing
-at runtime. They are reachable only through the owner's Tailscale-only reverse
-proxy, which adds the shared `X-Shizzle-Admin` header; the public proxy strips
-it. Runtime overrides live in the `runtime_settings` table (migration 0007)
+The admin API exists to trace jobs end to end and to steer routing at runtime.
+Every `/api/admin/*` route is reachable only through the owner's Tailscale-only
+reverse proxy, which adds the shared `X-Shizzle-Admin` header; the public proxy
+strips it. The public SPA fallback may still serve the `/admin` page shell, but
+it cannot fetch admin data off the tailnet. Runtime overrides live in the
+`runtime_settings` table (migration 0007)
 and are read by the orchestrator at each routing decision, so a change takes
 effect on the next pass without a restart; a missing key falls back to the
 environment `Settings` value.
@@ -720,9 +724,9 @@ unexpected places — the URL-download completion event stores
 `detail.source.source_ref`, node failure text quotes URLs, integrity blobs
 may embed signed URLs — every nested detail and diagnostic string an admin
 route returns is recursively redacted at the response boundary (G6):
-credential-shaped keys are replaced and URL-shaped strings scrubbed
-(defense in depth on top of E2/E3).
-- Where: `library/src/shizzle_server/api/admin.py`
+credential-shaped keys (including access-key and API-key fields) are replaced
+and URL-shaped strings scrubbed (defense in depth on top of E2/E3).
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`
 - Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`, `library/tests/test_admin_api.py::test_populated_history_and_reports_are_redacted`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
 - Violation smell: adding `source_ref` or the assignment `payload` to an admin
   schema, or echoing request URLs into evidence text.
@@ -742,9 +746,12 @@ that a separation reservation is node-bound (only a separation assignment
 carrying the reservation's idempotency key is). The check is ATOMIC with the
 reservation: on Postgres every capacity-gated `reserve_dispatch` takes the
 capacity advisory xact lock before counting, so two orchestrator instances
-racing for the last slot serialize and exactly one reserves.
+racing for the last slot serialize and exactly one reserves. The capacity
+count reads jobs, events and separation assignments in one SQL statement, so
+a concurrent confirmation cannot split them across snapshots or hide live
+work; it does not use per-job queries.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`reserve_dispatch`, `_count_runpod_work`)
-- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/test_capacity_retry.py::test_retry_reservation_counts_despite_closed_execution`, `library/tests/test_capacity_retry.py::test_submit_timeout_reservation_counts_and_predecessor_does_not`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_see_a_retry_reservation_slot`
+- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/test_capacity_retry.py::test_retry_reservation_counts_despite_closed_execution`, `library/tests/test_capacity_retry.py::test_submit_timeout_reservation_counts_and_predecessor_does_not`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_see_a_retry_reservation_slot`, `library/tests/contract/test_admin_postgres.py::test_capacity_count_cannot_miss_a_concurrent_confirmation`, `library/tests/test_runtime_routing.py::test_capacity_count_uses_one_consistent_snapshot`
 - Violation smell: counting node-held work or closed executions, spending an
   attempt or appending a `runpod_wait` per poll, cancelling/polling-failing a
 dispatched job when the limit is reached, or checking capacity outside the
@@ -755,9 +762,11 @@ reservation's lock.
 **Invariant:** In `download_only` routing, URL downloads are assigned to
 nodes exactly as in `prefer`, but separation MUST NEVER be assigned to a node:
 a fresh separation dispatch goes to RunPod at once, with no node wait and no
-`node_wait`/`fallback_runpod` events.
+`node_wait`/`fallback_runpod` events. Routing overrides apply only to fresh
+choices: a same-attempt node assignment left unconfirmed by a crash is adopted
+first (B16), never duplicated on RunPod.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runtime.py`
-- Guarded by: `library/tests/test_runtime_routing.py::test_download_only_url_job_downloads_via_node_then_separates_on_runpod`, `library/tests/test_runtime_routing.py::test_download_only_dispatches_runpod_with_no_node_wait`
+- Guarded by: `library/tests/test_runtime_routing.py::test_download_only_url_job_downloads_via_node_then_separates_on_runpod`, `library/tests/test_runtime_routing.py::test_download_only_dispatches_runpod_with_no_node_wait`, `library/tests/test_runtime_routing.py::test_routing_override_adopts_existing_separation_before_runpod`
 - Violation smell: a `separate` assignment created while the effective routing
   is `download_only`, or a wait window inserted before the RunPod dispatch.
 
@@ -781,8 +790,8 @@ framework-generated error responses. URL matching is case-insensitive, and
 keys that sanitize to the same placeholder are disambiguated without leaking
 or dropping entries. Serializers may redact earlier for defense in depth, but
 no admin response may depend on per-field redaction for safety.
-- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/main.py`
-- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`, `library/tests/test_admin_api.py::test_redaction_covers_url_keys_mixed_case_schemes_and_collisions`
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`, `library/src/shizzle_server/main.py`
+- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`, `library/tests/test_admin_api.py::test_redaction_covers_url_keys_mixed_case_schemes_and_collisions`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
 - Violation smell: returning a new admin field without response-boundary
   coverage, bypassing the middleware, or maintaining a second divergent
   redaction policy.

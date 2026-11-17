@@ -4,8 +4,8 @@ Covers: fail-closed auth (404 without the proxy secret header), E2 (no
 source_ref anywhere, assignment payloads excluded), the jobs list with
 counts/flags, the job-detail evidence trace, node enable/disable, runtime
 settings (env fallback, validation, RunPod-at-work count) and the
-assignment release path. The S3 verification path is exercised against
-moto; S3 errors are monkeypatched to prove they yield ``unknown``.
+assignment release path. The S3 verification boundary is synthetic and
+fully offline; S3 errors are monkeypatched to prove they yield ``unknown``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from datetime import timedelta
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from moto import mock_aws
 
 from shizzle_server.api import admin as admin_module
 from shizzle_server.api.media import _s3_client
@@ -55,14 +54,11 @@ async def node_repo(session_factory) -> NodeRepository:
     return NodeRepository(session_factory)
 
 
-_REAL_HEAD_BLOCKING = admin_module._head_blocking
-
-
 @pytest.fixture(autouse=True)
 def isolate_admin_s3(monkeypatch):
     """Keep every admin storage check offline and its client cache isolated.
 
-    Tests exercising the moto or synthetic HEAD paths explicitly replace this
+    Tests exercising specific synthetic HEAD paths explicitly replace this
     default. No ``verify=s3`` request may use or retain an unmocked AWS client.
     """
     _s3_client.cache_clear()
@@ -549,11 +545,9 @@ async def _published_job(app, session_factory):
 
 @pytest.mark.asyncio
 async def test_verify_s3_reports_ok_missing_and_mismatch(
-    admin_client, fake_aws_credentials, session_factory, monkeypatch
+    admin_client, session_factory, monkeypatch
 ):
-    with mock_aws():
-        monkeypatch.setattr(admin_module, "_head_blocking", _REAL_HEAD_BLOCKING)
-        await _run_verify_s3_checks(admin_client, session_factory)
+    await _run_verify_s3_checks(admin_client, session_factory, monkeypatch)
 
 
 async def test_verify_s3_checksum_mismatch_is_flagged(admin_client, session_factory, monkeypatch):
@@ -585,16 +579,11 @@ async def test_verify_s3_checksum_mismatch_is_flagged(admin_client, session_fact
     assert "sha256" in source["observed"]
 
 
-async def _run_verify_s3_checks(admin_client, session_factory):
+async def _run_verify_s3_checks(admin_client, session_factory, monkeypatch):
     _s3_client.cache_clear()
     c, app = admin_client
-    settings: Settings = app.state.settings
     job, track_id = await _published_job(app, session_factory)
-    import boto3
-
-    s3 = boto3.client("s3", region_name=settings.aws_region)
-    s3.create_bucket(Bucket=settings.s3_media_bucket)
-    # Source exists with the recorded checksum; manifest and video exist; one
+    # Source exists but has no remote checksum; manifest and video exist; one
     # stem is absent; video is the wrong size vs the recorded publisher report.
     import hashlib
 
@@ -603,25 +592,27 @@ async def _run_verify_s3_checks(admin_client, session_factory):
     body = b"source-bytes"
     checksum = hashlib.sha256(body).hexdigest()
     await _set_job(session_factory, job.id, input_checksum=checksum)
-    s3.put_object(
-        Bucket=settings.s3_media_bucket,
-        Key=cloud.source_key(track_id),
-        Body=body,
-        ChecksumSHA256=__import__("base64").b64encode(hashlib.sha256(body).digest()).decode(),
-    )
     prefix = f"tracks/{track_id}/1"
-    s3.put_object(Bucket=settings.s3_media_bucket, Key=f"{prefix}/manifest.json", Body=b"m" * 10)
-    s3.put_object(Bucket=settings.s3_media_bucket, Key=f"{prefix}/video.mp4", Body=b"v" * 21)
-    s3.put_object(Bucket=settings.s3_media_bucket, Key=f"{prefix}/stems/vocals.m4a", Body=b"a")
+    heads = {
+        cloud.source_key(track_id): {"ContentLength": len(body)},
+        f"{prefix}/manifest.json": {"ContentLength": 10},
+        f"{prefix}/video.mp4": {"ContentLength": 21},
+        f"{prefix}/stems/vocals.m4a": {"ContentLength": 1},
+    }
+
+    def _synthetic(_settings, key):
+        head = heads.get(key)
+        return admin_module._HeadOutcome(dict(head) if head else None, None)
+
+    monkeypatch.setattr(admin_module, "_head_blocking", _synthetic)
 
     response = await c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS)
     assert response.status_code == 200
     evidence = {(i["stage"], i["name"]): i for i in response.json()["evidence"]}
 
     source = evidence[("downloading", "source")]
-    assert source["status"] == "ok"
-    # moto does not surface ChecksumSHA256 on HEAD; the comparison path with
-    # real stored checksums is covered by the synthetic-head test below.
+    # A recorded digest with no remote checksum is not proof of a match.
+    assert source["status"] == "unknown"
     assert "no stored checksum to compare" in source["observed"]
     manifest = evidence[("ready", "manifest")]
     assert manifest["status"] == "ok"
@@ -731,10 +722,18 @@ async def test_track_integrity_is_redacted(admin_client, session_factory):
         from shizzle_server.db.models import Track
 
         row = await session.get(Track, track_id)
-        row.integrity = {"publisher": {"objects": []}, "signed_url": CRED_URL}
+        row.integrity = {
+            "publisher": {"objects": []},
+            "signed_url": CRED_URL,
+            "aws_access_key_id": "AKIA-PRIVATE-TEST-VALUE",
+            "apiKey": "private-api-key",
+        }
     response = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
     assert CRED_FRAGMENT not in response.text
-    assert response.json()["track"]["integrity"]["signed_url"] == "[redacted]"
+    integrity = response.json()["track"]["integrity"]
+    assert integrity["signed_url"] == "[redacted]"
+    assert integrity["aws_access_key_id"] == "[redacted]"
+    assert integrity["apiKey"] == "[redacted]"
 
 
 # --- failed-job stage/attempt inference (durable transition history) --------------
@@ -1134,6 +1133,30 @@ async def test_healthy_pipeline_rows_carry_no_flags(admin_client, session_factor
     flags_by_id = {row["jobId"]: row["flags"] for row in listing.json()["jobs"]}
     assert flags_by_id[done.id.hex] == []
     assert flags_by_id[fresh.id.hex] == []
+
+
+async def test_jobs_list_batches_evidence_queries(admin_client, engine):
+    """A 200-row page must not repeat event/assignment/node queries per row."""
+    from sqlalchemy import event
+
+    c, app = admin_client
+    for index in range(3):
+        await _make_job(app, title=f"Batch {index}")
+    statements: list[str] = []
+
+    def count_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", count_sql)
+    try:
+        response = await c.get("/api/admin/jobs?limit=200", headers=HEADERS)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", count_sql)
+    assert response.status_code == 200
+    assert len(response.json()["jobs"]) == 3
+    # list+total, status counts, then batched events/assignments/nodes. No
+    # track query is needed for these pending rows. The old path used 12.
+    assert len(statements) <= 7, statements
 
 
 async def test_open_assignment_on_runnable_job_is_not_terminal_leak(admin_client, node_repo):

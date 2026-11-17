@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+ROUTING_MODES = ("prefer", "only", "off", "download_only")
 
 
 class Settings(BaseSettings):
@@ -74,7 +75,7 @@ class Settings(BaseSettings):
     # once (admin page runtime override; null = no limit, 0 = pause dispatch).
     # Env name: RUNPOD_MAX_CONCURRENT (field has no SHIZZLE_ prefix, like the
     # other runpod_* knobs).
-    runpod_max_concurrent: int | None = None
+    runpod_max_concurrent: int | None = Field(default=None, ge=0)
 
     processing_profile_version: int = 1
 
@@ -157,7 +158,7 @@ class Settings(BaseSettings):
         # Fail at startup, not silently as "prefer": a typo here would make
         # URL jobs wait a day instead of failing fast.
         mode = value.strip().lower()
-        if mode not in ("prefer", "only", "off", "download_only"):
+        if mode not in ROUTING_MODES:
             raise ValueError(
                 "SHIZZLE_NODE_ROUTING must be one of prefer, only, off, download_only"
             )
@@ -168,7 +169,7 @@ class Settings(BaseSettings):
         # Normalized here as well: a value assigned after construction (tests,
         # tooling) bypasses the validator.
         mode = self.shizzle_node_routing.strip().lower()
-        if mode not in ("prefer", "only", "off", "download_only"):
+        if mode not in ROUTING_MODES:
             raise ValueError(
                 "SHIZZLE_NODE_ROUTING must be one of prefer, only, off, download_only"
             )

@@ -17,6 +17,7 @@ import pytest_asyncio
 from shizzle_server.db.models import (
     JobStage,
     NodeAssignmentKind,
+    RuntimeSetting,
     SourceType,
 )
 from shizzle_server.db.repository import RuntimeSettingsRepository
@@ -181,6 +182,61 @@ async def test_download_only_url_job_downloads_via_node_then_separates_on_runpod
     assert "node_wait" not in names and "fallback_runpod" not in names
 
 
+@pytest.mark.parametrize("routing", ["off", "download_only"])
+async def test_routing_override_adopts_existing_separation_before_runpod(
+    routing, cloud_settings, job_repo, node_repo, runtime_repo, upload_job
+):
+    """B16/G4: an override governs fresh choices, not crash recovery.
+
+    Simulate a crash after the same-attempt assignment commit but before its
+    reservation. The next pass must adopt that work even in RunPod-only modes.
+    """
+    from shizzle_server.orchestrator.stages import handle_dispatched
+
+    await runtime_repo.set_value(NODE_ROUTING_KEY, routing)
+    await _register(node_repo)
+    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    claimed = await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    dispatch_key = f"{upload_job.id.hex}:0"
+    assignment = await node_repo.create_assignment(
+        upload_job.id,
+        worker_id="w",
+        node_id=MAC,
+        kind=NodeAssignmentKind.separate,
+        payload={},
+        idempotency_key=dispatch_key,
+    )
+    assert assignment is not None
+    fake = FakeRunPodClient([])
+    ctx = SimpleNamespace(
+        job=claimed,
+        settings=cloud_settings,
+        jobs=job_repo,
+        runpod=fake,
+        worker_id="w",
+        nodes=node_repo,
+        runtime=runtime_repo,
+        detail={},
+        park_seconds=None,
+    )
+
+    assert await handle_dispatched(ctx) is None
+
+    assert fake.dispatched == []
+    assert ctx.park_seconds == cloud_settings.node_poll_seconds
+    adopted = await job_repo.get_job(upload_job.id)
+    assert adopted.runpod_job_id == f"node:{assignment.id}"
+    assert "node_assignment_adopted" in [
+        event.event for event in await job_repo.list_events(upload_job.id)
+    ]
+
+
 async def test_download_only_dispatches_runpod_with_no_node_wait(
     cloud_settings, job_repo, node_repo, runtime_repo, monkeypatch, upload_job
 ):
@@ -301,7 +357,7 @@ async def test_runpod_limit_zero_pauses_dispatch(
 
 
 async def test_runpod_limit_falls_back_to_env_when_cleared(
-    cloud_settings, job_repo, runtime_repo, upload_job, monkeypatch
+    cloud_settings, job_repo, runtime_repo, upload_job, monkeypatch, session_factory
 ):
     _stub_cloud_intake(monkeypatch)
     cloud_settings.runpod_max_concurrent = 1
@@ -314,9 +370,12 @@ async def test_runpod_limit_falls_back_to_env_when_cleared(
         # The DB override (0) pauses dispatch first...
         await wait_for_status(job_repo, upload_job.id, JobStage.dispatched, timeout=10)
         await _wait_event_count(job_repo, upload_job.id, "runpod_wait", exactly=1)
-        # ...and clearing the key restores the environment value (limit 1).
-        await runtime_repo.set_value(RUNPOD_MAX_CONCURRENT_KEY, None)
-        # A null row means "no limit" for this key: the job dispatches now.
+        # ...and deleting the key restores the environment value (limit 1).
+        # JSON null is deliberately different: an explicit unlimited override.
+        async with session_factory() as session, session.begin():
+            row = await session.get(RuntimeSetting, RUNPOD_MAX_CONCURRENT_KEY)
+            assert row is not None
+            await session.delete(row)
         await _wait_runpod_confirm(job_repo, upload_job.id)
         await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
     finally:
@@ -485,6 +544,41 @@ async def test_count_includes_unconfirmed_reservations_ignoring_download_executo
     assert await job_repo.count_runpod_dispatches() == 0
 
 
+async def test_capacity_count_uses_one_consistent_snapshot(
+    job_repo, upload_job, session_factory, monkeypatch
+):
+    """One SQL statement gives one snapshot and avoids the old N+1 scan.
+
+    The exact confirmation interleaving is covered against real Postgres in
+    test_admin_postgres.py; SQLite test transactions cannot host that race.
+    """
+    from shizzle_server.db.repository import _count_runpod_work
+
+    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed is not None and claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    key = f"{upload_job.id.hex}:0"
+    assert await job_repo.reserve_dispatch(upload_job.id, worker_id="w", idempotency_key=key)
+
+    async with session_factory() as session:
+        original_execute = session.execute
+        calls = 0
+
+        async def count_statements(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return await original_execute(*args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", count_statements)
+        assert await _count_runpod_work(session) == 1
+        assert calls == 1
+
+
 async def test_reserve_dispatch_enforces_the_cap_in_one_transaction(job_repo, upload_job):
     """The capacity gate lives inside reserve_dispatch: even without the
     caller's cheap pre-check, an at-cap reservation is refused atomically."""
@@ -508,6 +602,20 @@ async def test_reserve_dispatch_enforces_the_cap_in_one_transaction(job_repo, up
     )  # the outstanding reservation blocks, independent of the cap
 
 
+async def test_concurrent_first_setting_writes_use_an_atomic_upsert(session_factory):
+    from shizzle_server.db.repository import RuntimeSettingsRepository
+
+    first = RuntimeSettingsRepository(session_factory)
+    second = RuntimeSettingsRepository(session_factory)
+    await asyncio.gather(
+        first.set_value(RUNPOD_MAX_CONCURRENT_KEY, 1),
+        second.set_value(RUNPOD_MAX_CONCURRENT_KEY, 2),
+    )
+    rows = await first.get_all()
+    assert set(rows) == {RUNPOD_MAX_CONCURRENT_KEY}
+    assert rows[RUNPOD_MAX_CONCURRENT_KEY].value in (1, 2)
+
+
 def test_runpod_max_concurrent_env_binding(monkeypatch):
     """The documented environment knob actually binds (RUNPOD_MAX_CONCURRENT,
     no SHIZZLE_ prefix — like the other runpod_* knobs)."""
@@ -519,3 +627,6 @@ def test_runpod_max_concurrent_env_binding(monkeypatch):
     assert Settings().runpod_max_concurrent == 3
     monkeypatch.setenv("RUNPOD_MAX_CONCURRENT", "0")
     assert Settings().runpod_max_concurrent == 0
+    monkeypatch.setenv("RUNPOD_MAX_CONCURRENT", "-1")
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        Settings()

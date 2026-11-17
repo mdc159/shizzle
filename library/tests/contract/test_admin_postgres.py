@@ -269,3 +269,59 @@ async def test_concurrent_reservations_see_a_retry_reservation_slot(pg_engine):
         assert await repo.count_runpod_dispatches() == 2
     finally:
         await engine.dispose()
+
+
+async def test_capacity_count_cannot_miss_a_concurrent_confirmation(pg_engine, monkeypatch):
+    """G3: job and event state come from one statement snapshot.
+
+    On the old multi-query path, confirmation commits after the Job was
+    cached but before its events are read. The new event makes the
+    reservation look resolved while the cached row still has no provider id.
+    """
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository, _count_runpod_work
+
+    sf = create_session_factory(pg_engine)
+    repo = JobRepository(sf)
+    job = await repo.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    assert (await repo.claim_next(worker_id="w", lease_seconds=600)).id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await repo.advance(job.id, worker_id="w", from_stage=from_stage, to_stage=to_stage)
+    key = f"{job.id.hex}:0"
+    assert await repo.reserve_dispatch(job.id, worker_id="w", idempotency_key=key)
+
+    async with sf() as session:
+        original_execute = session.execute
+        calls = 0
+
+        async def confirm_between_reads(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await repo.confirm_dispatch(job.id, idempotency_key=key, runpod_job_id="rp-live")
+            return await original_execute(*args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", confirm_between_reads)
+        assert await _count_runpod_work(session) == 1
+
+
+async def test_concurrent_first_runtime_setting_writes_are_atomic(pg_engine):
+    """Two admin tabs writing a missing key both finish without a 500."""
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.repository import RuntimeSettingsRepository
+    from shizzle_server.orchestrator.runtime import RUNPOD_MAX_CONCURRENT_KEY
+
+    sf = create_session_factory(pg_engine)
+    first = RuntimeSettingsRepository(sf)
+    second = RuntimeSettingsRepository(sf)
+    await asyncio.gather(
+        first.set_value(RUNPOD_MAX_CONCURRENT_KEY, 1),
+        second.set_value(RUNPOD_MAX_CONCURRENT_KEY, 2),
+    )
+    rows = await first.get_all()
+    assert set(rows) == {RUNPOD_MAX_CONCURRENT_KEY}
+    assert rows[RUNPOD_MAX_CONCURRENT_KEY].value in (1, 2)

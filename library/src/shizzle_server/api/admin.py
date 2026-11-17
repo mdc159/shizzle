@@ -26,7 +26,6 @@ import asyncio
 import base64
 import hmac
 import json
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -67,6 +66,7 @@ from ..orchestrator.runtime import (
 )
 from ..settings import Settings
 from .media import s3_client
+from .redaction import _redact_value
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -393,49 +393,8 @@ def _event_detail(event: JobEvent) -> dict[str, Any]:
 
 
 # E2/E3 defense in depth for the admin surface: nested job/assignment details
-# and diagnostic strings can echo values the pipeline stored — e.g. a
-# URL-download completion event carries detail.source.source_ref, and node
-# failure text can quote the submitted URL. Nothing credential-shaped or
-# URL-shaped leaves an admin route, whatever the database happens to hold.
-_REDACTED = "[redacted]"
-_REDACT_KEY_FRAGMENTS = (
-    "source_ref",
-    "authorization",
-    "cookie",
-    "password",
-    "passcode",
-    "token",
-    "secret",
-    "url",
-)
-_URL_SCRUB_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
-
-
-def _redact_value(value: Any) -> Any:
-    """Recursively redact credential-shaped keys and scrub URLs from strings."""
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, child in value.items():
-            original_key = str(key)
-            lowered = original_key.lower()
-            base_key = _URL_SCRUB_RE.sub(_REDACTED, original_key)
-            # Two credential-bearing keys can scrub to the same placeholder.
-            # Keep both entries without reintroducing their sensitive text.
-            redacted_key = base_key
-            suffix = 2
-            while redacted_key in redacted:
-                redacted_key = f"{base_key} ({suffix})"
-                suffix += 1
-            if any(fragment in lowered for fragment in _REDACT_KEY_FRAGMENTS):
-                redacted[redacted_key] = _REDACTED
-            else:
-                redacted[redacted_key] = _redact_value(child)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_value(child) for child in value]
-    if isinstance(value, str):
-        return _URL_SCRUB_RE.sub(_REDACTED, value)
-    return value
+# and diagnostic strings can echo values the pipeline stored. Every response
+# crosses the shared recursive policy in redaction.py, whatever the DB holds.
 
 
 class AdminResponseRedactionMiddleware:
@@ -1164,6 +1123,8 @@ async def _add_s3_evidence(
         if expected_sha256 is not None:
             if stored is None:
                 observations.append("no stored checksum to compare")
+                if status == "ok":
+                    status = "unknown"
             elif stored != expected_sha256:
                 observations.append(f"sha256 {stored} != recorded {expected_sha256}")
                 status = "mismatch"
@@ -1298,11 +1259,34 @@ async def _add_s3_evidence(
 
 
 async def _flags_for(request: Request, jobs: list[Job]) -> dict[str, list[str]]:
+    """Build every row's flags from batched inputs, never per-job queries."""
+    job_ids = [job.id for job in jobs]
+    track_ids = [
+        job.track_id or track_id_for_job(job.id)
+        for job in jobs
+        if job.track_id is not None or job.status.value == "ready"
+    ]
+    events_by_job, assignments_by_job, nodes_list, tracks = await asyncio.gather(
+        _jobs(request).list_events_for_jobs(job_ids),
+        _node_repo(request).list_for_jobs(job_ids),
+        _node_repo(request).list_nodes(),
+        _tracks(request).get_many(track_ids),
+    )
+    busy_pointers = {
+        str(node.busy_assignment_id): node.id
+        for node in nodes_list
+        if node.busy_assignment_id is not None
+    }
     flags: dict[str, list[str]] = {}
     for job in jobs:
-        events, assignments, busy_pointers, track = await _job_db_state(request, job)
+        track = tracks.get(job.track_id or track_id_for_job(job.id))
         evidence = _build_db_evidence(
-            job, events, assignments, busy_pointers, track, _settings(request)
+            job,
+            events_by_job.get(job.id, []),
+            assignments_by_job.get(job.id, []),
+            busy_pointers,
+            track,
+            _settings(request),
         )
         flags[job.id.hex] = evidence.flags
     return flags

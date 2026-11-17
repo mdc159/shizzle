@@ -584,14 +584,16 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
     if ctx.nodes:
         # A previous attempt's open assignment is history now: free its node.
         await nodes.expire_superseded_assignments(ctx, dispatch_key=dispatch_key)
+    if ctx.nodes and await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
+        # B16 crash recovery precedes the current routing override. An
+        # assignment committed before a crash remains authoritative even when
+        # the new policy would choose RunPod for fresh work (G4).
+        ctx.park_seconds = ctx.settings.node_poll_seconds
+        return None
     routing = await effective_node_routing(ctx)
     if ctx.nodes and routing in ("prefer", "only"):
         # Routing (B17): a node first, RunPod only after the wait window.
-        # "download_only" and "off" skip this block entirely: separation
-        # goes to RunPod at once, with no node wait.
-        if await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
-            ctx.park_seconds = ctx.settings.node_poll_seconds
-            return None
+        # "download_only" and "off" skip fresh node selection entirely.
         choice = await nodes.choose_separation_node(
             ctx, dispatch_key=dispatch_key, routing=routing
         )

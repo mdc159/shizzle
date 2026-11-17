@@ -58,6 +58,7 @@ from .models import (
     SubmitUrlRequest,
     TrackInfo,
 )
+from .redaction import _redact_value
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +333,11 @@ async def get_job_events(
     events = await _jobs(request).list_events(parsed_id)
     return {
         "events": [
-            {"event": event.event, "detail": event.detail, "createdAt": event.created_at}
+            {
+                "event": _redact_value(event.event),
+                "detail": _redact_value(event.detail),
+                "createdAt": event.created_at,
+            }
             for event in events
         ]
     }

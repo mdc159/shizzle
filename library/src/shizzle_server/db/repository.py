@@ -13,7 +13,9 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -100,14 +102,16 @@ async def _count_runpod_work(session: AsyncSession) -> int:
       marked failed — a failed worker is a closed execution whose retry
       dispatches fresh (B12) and must not count itself.
     """
-    res = await session.execute(select(Job).where(Job.status == JobStage.dispatched))
-    jobs = list(res.scalars().all())
-    count = 0
-    for job in jobs:
-        events_res = await session.execute(
-            select(JobEvent)
-            .where(
-                JobEvent.job_id == job.id,
+    # One statement is deliberate: on PostgreSQL READ COMMITTED, separate
+    # job/event queries can observe different commits. A confirmation landing
+    # between them used to hide live work from the capacity gate (G3). The
+    # joins also replace the old per-job event/assignment query scan.
+    res = await session.execute(
+        select(Job, JobEvent, NodeAssignment)
+        .outerjoin(
+            JobEvent,
+            and_(
+                JobEvent.job_id == Job.id,
                 JobEvent.event.in_(
                     (
                         _DISPATCH_STARTED_EVENT,
@@ -115,27 +119,39 @@ async def _count_runpod_work(session: AsyncSession) -> int:
                         _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
                     )
                 ),
-            )
-            .order_by(JobEvent.id)
+            ),
         )
-        pending = pending_runpod_dispatch(list(events_res.scalars()))
+        .outerjoin(
+            NodeAssignment,
+            and_(
+                NodeAssignment.job_id == Job.id,
+                NodeAssignment.kind == NodeAssignmentKind.separate,
+            ),
+        )
+        .where(Job.status == JobStage.dispatched)
+        .order_by(Job.id, JobEvent.id, NodeAssignment.id)
+    )
+    jobs: dict[uuid.UUID, Job] = {}
+    events: dict[uuid.UUID, dict[int, JobEvent]] = {}
+    assignment_keys: dict[uuid.UUID, set[str]] = {}
+    for job, event, assignment in res.all():
+        jobs[job.id] = job
+        if event is not None:
+            events.setdefault(job.id, {})[event.id] = event
+        if assignment is not None and assignment.idempotency_key is not None:
+            assignment_keys.setdefault(job.id, set()).add(assignment.idempotency_key)
+
+    count = 0
+    for job in jobs.values():
+        job_events = sorted(events.get(job.id, {}).values(), key=lambda event: event.id)
+        pending = pending_runpod_dispatch(job_events)
         if pending is not None:
             pending_detail = pending.detail if isinstance(pending.detail, dict) else {}
             pending_key = pending_detail.get("idempotency_key")
-            if isinstance(pending_key, str):
-                bound = await session.execute(
-                    select(NodeAssignment.id)
-                    .where(
-                        NodeAssignment.job_id == job.id,
-                        NodeAssignment.kind == NodeAssignmentKind.separate,
-                        NodeAssignment.idempotency_key == pending_key,
-                    )
-                    .limit(1)
-                )
-                if bound.first() is not None:
-                    # Node-bound reservation: not RunPod capacity, and the
-                    # closed previous execution below must not count either.
-                    continue
+            if isinstance(pending_key, str) and pending_key in assignment_keys.get(job.id, set()):
+                # Node-bound reservation: not RunPod capacity, and the
+                # closed previous execution below must not count either.
+                continue
             count += 1
             continue
         if _runpod_work_is_live(job):
@@ -394,6 +410,24 @@ class JobRepository:
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )
             return list(res.scalars().all())
+
+    async def list_events_for_jobs(
+        self, job_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, list[JobEvent]]:
+        """Batch job histories for admin lists (one query, not one per row)."""
+        ids = list(dict.fromkeys(job_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(
+                select(JobEvent)
+                .where(JobEvent.job_id.in_(ids))
+                .order_by(JobEvent.job_id, JobEvent.id)
+            )
+            grouped: dict[uuid.UUID, list[JobEvent]] = {job_id: [] for job_id in ids}
+            for event in res.scalars():
+                grouped[event.job_id].append(event)
+            return grouped
 
     async def append_event(
         self,
@@ -1145,6 +1179,15 @@ class TrackRepository:
         async with self._sf() as session:
             return await session.get(Track, track_id)
 
+    async def get_many(self, track_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, Track]:
+        """Batch track joins for administrator job rows."""
+        ids = list(dict.fromkeys(track_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(select(Track).where(Track.id.in_(ids)))
+            return {track.id: track for track in res.scalars()}
+
     async def list_tracks(self, *, include_deleted: bool = False) -> list[Track]:
         async with self._sf() as session:
             # Invariant C7, defensive: a row whose objects are not under
@@ -1583,6 +1626,24 @@ class NodeRepository:
             )
             return list(res.scalars().all())
 
+    async def list_for_jobs(
+        self, job_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, list[NodeAssignment]]:
+        """Batch assignment histories for administrator job rows."""
+        ids = list(dict.fromkeys(job_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(
+                select(NodeAssignment)
+                .where(NodeAssignment.job_id.in_(ids))
+                .order_by(NodeAssignment.job_id, NodeAssignment.created_at, NodeAssignment.id)
+            )
+            grouped: dict[uuid.UUID, list[NodeAssignment]] = {job_id: [] for job_id in ids}
+            for assignment in res.scalars():
+                grouped[assignment.job_id].append(assignment)
+            return grouped
+
     async def expire(
         self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None
     ) -> bool:
@@ -1760,15 +1821,28 @@ class RuntimeSettingsRepository:
             return {row.key: row for row in res.scalars().all()}
 
     async def set_value(self, key: str, value: Any) -> RuntimeSetting:
-        """Upsert one setting (validated by the admin API before it lands)."""
+        """Atomically upsert one setting, including concurrent first writes."""
         async with self._sf() as session, session.begin():
-            row = await session.get(RuntimeSetting, key, with_for_update=True)
-            if row is None:
-                row = RuntimeSetting(key=key, value=value)
-                session.add(row)
+            bind = session.bind
+            dialect = bind.dialect.name if bind is not None else ""
+            now = utcnow()
+            values = {"key": key, "value": value, "updated_at": now}
+            if dialect == "postgresql":
+                pg_statement = postgresql_insert(RuntimeSetting).values(
+                    **values
+                ).on_conflict_do_update(
+                    index_elements=[RuntimeSetting.key],
+                    set_={"value": value, "updated_at": now},
+                ).returning(RuntimeSetting)
+                row: RuntimeSetting = (await session.execute(pg_statement)).scalar_one()
+            elif dialect == "sqlite":
+                sqlite_statement = sqlite_insert(RuntimeSetting).values(
+                    **values
+                ).on_conflict_do_update(
+                    index_elements=[RuntimeSetting.key],
+                    set_={"value": value, "updated_at": now},
+                ).returning(RuntimeSetting)
+                row = (await session.execute(sqlite_statement)).scalar_one()
             else:
-                row.value = value
-                row.updated_at = utcnow()
-            await session.flush()
-            await session.refresh(row)
+                raise RuntimeError(f"unsupported runtime-settings dialect: {dialect}")
             return row

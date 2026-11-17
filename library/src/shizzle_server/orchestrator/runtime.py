@@ -12,11 +12,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..db.repository import RuntimeSettingsRepository
+from ..settings import ROUTING_MODES
 
 if TYPE_CHECKING:  # runtime import cycle with stages.py
     from .stages import StageContext
 
-ROUTING_MODES = ("prefer", "only", "off", "download_only")
 RUNPOD_MAX_CONCURRENT_KEY = "runpod_max_concurrent"
 NODE_ROUTING_KEY = "node_routing"
 
