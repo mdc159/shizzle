@@ -9,6 +9,7 @@ import uuid
 from datetime import timedelta
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -18,6 +19,7 @@ from shizzle_server.api.media import _s3_client
 from shizzle_server.db.models import (
     ALLOWED_TRANSITIONS,
     Job,
+    JobEvent,
     JobStage,
     NodeAssignmentKind,
     NodeAssignmentStatus,
@@ -26,10 +28,11 @@ from shizzle_server.db.models import (
     utcnow,
 )
 from shizzle_server.db.repository import (
+    InvalidTransition,
     pending_runpod_dispatch,
     track_id_for_job,
 )
-from shizzle_server.errors import ErrorCode
+from shizzle_server.errors import ErrorCode, StageError
 from shizzle_server.main import create_app
 from shizzle_server.orchestrator import cloud
 
@@ -55,6 +58,14 @@ def offline_s3(monkeypatch):
         "_head_blocking",
         lambda _settings, _key: admin_module._HeadOutcome(None, None),
     )
+
+    async def empty_attempt(_ctx, *, idempotency_key):
+        assert isinstance(idempotency_key, str)
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=False
+        )
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", empty_attempt)
     yield
     _s3_client.cache_clear()
 
@@ -113,6 +124,43 @@ async def _fail(app, job, stage, code=ErrorCode.RUNPOD_DISPATCH_FAILED):
         error_detail="action test failure",
     )
     return claimed
+
+
+async def _fail_with_pending(
+    app,
+    *,
+    code=ErrorCode.RUNPOD_TIMEOUT,
+    detail="submit may have been accepted",
+    provider_accepted=None,
+    input_checksum=None,
+):
+    job = await _job(app, input_checksum=input_checksum)
+    _source(app, job)
+    await _claim_and_advance(app, job, JobStage.dispatched)
+    key = f"{job.id.hex}:0"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="action-test", idempotency_key=key
+    )
+    await app.state.job_repo.fail_job(
+        job.id,
+        worker_id="action-test",
+        error_code=code,
+        error_detail=detail,
+        provider_accepted=provider_accepted,
+    )
+    pending = next(
+        event
+        for event in await app.state.job_repo.list_events(job.id)
+        if event.event == "runpod_dispatch_started"
+    )
+    return job, key, pending
+
+
+async def _age_reservation(session_factory, pending, settings, extra=1.0):
+    window = admin_module.dispatch_reconciliation_window(settings)
+    async with session_factory() as session, session.begin():
+        event = await session.get(JobEvent, pending.id)
+        event.created_at = utcnow() - timedelta(seconds=window + extra)
 
 
 def _write_real_lossless_package(root, job, checksum):
@@ -568,6 +616,419 @@ async def test_retry_refuses_unresolved_reservation_and_fences_old_receipts(
     assert admin_module._selected_dispatch_key(job, events) == f"{job.id.hex}:1"
 
 
+@pytest.mark.parametrize("rejection", ["http_409", "not_configured"])
+async def test_terminal_dispatch_rejection_retries_with_real_fresh_key_fence(
+    admin_client, monkeypatch, rejection
+):
+    """A real handle_dispatched rejection resolves its exact reservation."""
+    from shizzle_server.orchestrator.runpod_client import (
+        HttpRunPodClient,
+        NotConfiguredRunPodClient,
+    )
+    from shizzle_server.orchestrator.stages import StageContext, handle_dispatched
+
+    c, app = admin_client
+    job = await _job(app)
+    _source(app, job)
+    claimed = await _claim_and_advance(app, job, JobStage.dispatched)
+    if rejection == "http_409":
+        runpod = HttpRunPodClient(
+            api_key="test",
+            endpoint_id="endpoint",
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(409)
+            ),
+        )
+    else:
+        runpod = NotConfiguredRunPodClient()
+    ctx = StageContext(
+        job=claimed,
+        settings=app.state.settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=app.state.job_repo,
+        runpod=runpod,
+        worker_id="action-test",
+    )
+    with pytest.raises(StageError) as raised:
+        await handle_dispatched(ctx)
+    assert raised.value.provider_accepted is False
+    await app.state.job_repo.fail_job(
+        job.id,
+        worker_id="action-test",
+        error_code=raised.value.code,
+        error_detail=raised.value.detail,
+        provider_accepted=raised.value.provider_accepted,
+    )
+
+    async def inspection_must_not_run(*_args, **_kwargs):
+        raise AssertionError("definitive provider rejection must not inspect S3")
+
+    monkeypatch.setattr(
+        cloud, "inspect_dispatch_attempt", inspection_must_not_run
+    )
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    events = await app.state.job_repo.list_events(job.id)
+    failure = next(event for event in events if event.event == "failed")
+    assert failure.detail["provider_accepted"] is False
+    retry = next(event for event in events if event.event == "admin_retry_started")
+    assert retry.detail["reservation_resolution"] == "provider_rejected"
+
+    # Exercise the real SQL selectors: the retry boundary hides the old key,
+    # the fresh key reserves, and neither before nor after that reservation
+    # can a late confirmation attach the old provider execution.
+    next_job = await app.state.job_repo.claim_next(
+        worker_id="fresh-dispatch", lease_seconds=60
+    )
+    assert next_job is not None and next_job.attempt == 1
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        next_job = await app.state.job_repo.advance(
+            job.id,
+            worker_id="fresh-dispatch",
+            from_stage=from_stage,
+            to_stage=to_stage,
+        )
+    old_key = f"{job.id.hex}:0"
+    assert await app.state.job_repo.count_runpod_dispatches() == 0
+    with pytest.raises(InvalidTransition):
+        await app.state.job_repo.confirm_dispatch(
+            job.id, idempotency_key=old_key, runpod_job_id="rp-late-old"
+        )
+    new_key = f"{job.id.hex}:1"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="fresh-dispatch", idempotency_key=new_key
+    )
+    with pytest.raises(InvalidTransition):
+        await app.state.job_repo.confirm_dispatch(
+            job.id, idempotency_key=old_key, runpod_job_id="rp-late-old"
+        )
+    assert await app.state.job_repo.confirm_dispatch(
+        job.id, idempotency_key=new_key, runpod_job_id="rp-fresh"
+    )
+    assert (await app.state.job_repo.get_job(job.id)).runpod_job_id == "rp-fresh"
+
+    # A delayed preflight from attempt 0 cannot reopen this newer confirmed
+    # execution after it fails: its reservation token is now stale/absent.
+    await app.state.job_repo.fail_job(
+        job.id,
+        worker_id="fresh-dispatch",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="RunPod returned HTTP 401",
+    )
+    with pytest.raises(InvalidTransition):
+        await app.state.job_repo.admin_restart_job(
+            job.id,
+            reason="stale delayed retry",
+            runpod_outcome=retry.detail["runpod"],
+        )
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.failed
+    assert current.attempt == 1 and current.runpod_job_id == "rp-fresh"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "RunPod returned HTTP 409",
+        admin_module.NotConfiguredRunPodClient._DETAIL,
+    ],
+)
+async def test_legacy_exact_terminal_rejection_retries_without_structured_field(
+    admin_client, monkeypatch, detail
+):
+    c, app = admin_client
+    job, _key, _pending = await _fail_with_pending(
+        app, code=ErrorCode.RUNPOD_DISPATCH_FAILED, detail=detail
+    )
+
+    async def inspection_must_not_run(*_args, **_kwargs):
+        raise AssertionError("legacy exact rejection must not inspect S3")
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", inspection_must_not_run)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    retry = next(
+        event
+        for event in await app.state.job_repo.list_events(job.id)
+        if event.event == "admin_retry_started"
+    )
+    assert retry.detail["reservation_resolution"] == "provider_rejected"
+
+
+async def test_unconfirmed_reservation_inside_window_reports_retryable_time(
+    admin_client,
+):
+    c, app = admin_client
+    job, _key, _pending = await _fail_with_pending(app)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "unresolved" in detail and "available after" in detail
+    assert "Dismiss is available" in detail
+    assert (await app.state.job_repo.get_job(job.id)).status == JobStage.failed
+
+
+async def test_empty_attempt_after_deadline_retries_and_cancel_is_best_effort(
+    admin_client, session_factory, monkeypatch
+):
+    c, app = admin_client
+    job, _key, pending = await _fail_with_pending(app)
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.runpod_job_id = "rp-uncertain"
+    await _age_reservation(session_factory, pending, app.state.settings)
+
+    class CancelUnavailable:
+        async def cancel(self, provider_id):
+            assert provider_id == "rp-uncertain"
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(
+        admin_module, "_runpod_for", lambda _settings: CancelUnavailable()
+    )
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    retry = next(
+        event
+        for event in await app.state.job_repo.list_events(job.id)
+        if event.event == "admin_retry_started"
+    )
+    assert retry.detail["reservation_resolution"] == "no_receipt_after_deadline"
+    assert retry.detail["runpod"]["provider_cancel"]["status"] == "cancel_failed"
+
+
+async def test_receipt_after_deadline_refuses_retry(admin_client, session_factory, monkeypatch):
+    c, app = admin_client
+    job, _key, pending = await _fail_with_pending(app)
+    await _age_reservation(session_factory, pending, app.state.settings)
+
+    async def receipt(_ctx, *, idempotency_key):
+        return cloud.DispatchAttemptInspection(
+            receipt_present=True,
+            runpod_job_id="rp-worker-ran",
+            handoff_present=False,
+        )
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", receipt)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409
+    assert "dispatch.json receipt" in response.json()["detail"]
+    assert "Dismiss is available" in response.json()["detail"]
+    assert (await app.state.job_repo.get_job(job.id)).status == JobStage.failed
+
+
+async def test_storage_error_refuses_with_storage_reason(admin_client, monkeypatch):
+    c, app = admin_client
+    job, _key, _pending = await _fail_with_pending(app)
+
+    async def storage_error(_ctx, *, idempotency_key):
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            "dispatch retry read failed: storage unavailable",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", storage_error)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409
+    assert "Storage could not be checked" in response.json()["detail"]
+    assert "storage unavailable" in response.json()["detail"]
+    assert "Dismiss is available" in response.json()["detail"]
+
+
+async def test_missing_source_precedes_reservation_storage_check(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job, _key, _pending = await _fail_with_pending(app)
+    (app.state.settings.data_dir / job.id.hex / "source.mp4").unlink()
+
+    async def inspection_must_not_run(*_args, **_kwargs):
+        raise AssertionError("source check must come first")
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", inspection_must_not_run)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409
+    assert "source no longer exists" in response.json()["detail"]
+    assert "Dismiss is available" in response.json()["detail"]
+
+
+async def test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job, key, _pending = await _fail_with_pending(app, input_checksum=checksum)
+    shared_package = app.state.settings.data_dir / job.id.hex / "package"
+    _write_real_lossless_package(shared_package, job, checksum)
+    first_stem = shared_package / "stems" / "vocals.wav"
+    fresh_first_stem = first_stem.read_bytes()
+    stale_bytes = bytearray(fresh_first_stem)
+    stale_bytes[-1] ^= 1  # same size, different bytes and sha256
+    first_stem.write_bytes(stale_bytes)
+    stale_handoff = json.loads((shared_package / "handoff.json").read_text())
+    stale_handoff["stems"][0]["sha256"] = hashlib.sha256(stale_bytes).hexdigest()
+    (shared_package / "handoff.json").write_text(json.dumps(stale_handoff))
+
+    async def handoff(_ctx, *, idempotency_key):
+        assert idempotency_key == key
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=True
+        )
+
+    def download(_s3, _bucket, prefix, destination):
+        assert prefix == cloud.attempt_prefix(track_id_for_job(job.id), key)
+        if destination == shared_package and (destination / "handoff.json").exists():
+            return  # exposes stale-cache reuse unless verification cleans it
+        _write_real_lossless_package(destination, job, checksum)
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", handoff)
+    monkeypatch.setattr(admin_module, "download_package", download)
+    monkeypatch.setattr(cloud, "download_package", download)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "recovered"
+    assert response.json()["status"] == "verifying"
+    assert response.json()["attempt"] == 0
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.verifying
+    assert current.runpod_job_id is None
+    events = await app.state.job_repo.list_events(job.id)
+    retry = next(event for event in events if event.event == "admin_retry_started")
+    assert retry.detail["reservation_resolution"] == "handoff"
+    assert retry.detail["dispatch_key"] == key
+
+    # Verification consumes the recovery-selected immutable attempt, not the
+    # legacy base prefix, and re-proves the real package bytes.
+    from shizzle_server.orchestrator.stages import StageContext, handle_verifying
+
+    app.state.settings.shizzle_pipeline = "cloud"
+    ctx = StageContext(
+        job=current,
+        settings=app.state.settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=app.state.job_repo,
+        runpod=admin_module._runpod_for(app.state.settings),
+        worker_id="verify-handoff-recovery",
+    )
+    assert await handle_verifying(ctx) == JobStage.publishing
+    assert ctx.detail["package"]["sample_count"] == 4410
+    assert first_stem.read_bytes() == fresh_first_stem
+
+
+async def test_invalid_handoff_preflight_is_actionable_409(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job, _key, _pending = await _fail_with_pending(app, input_checksum=checksum)
+
+    async def handoff(_ctx, *, idempotency_key):
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=True
+        )
+
+    def invalid_package(*_args, **_kwargs):
+        raise ValueError("invalid selected package")
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", handoff)
+    monkeypatch.setattr(admin_module, "download_package", invalid_package)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409, response.text
+    assert "publication recovery preflight failed" in response.json()["detail"]
+    assert "invalid selected package" in response.json()["detail"]
+    assert "Dismiss is available" in response.json()["detail"]
+    assert any(
+        event.event == "admin_retry_refused"
+        for event in await app.state.job_repo.list_events(job.id)
+    )
+
+
+async def test_handoff_preflight_cannot_recreate_dismissed_workdir(
+    admin_client, monkeypatch
+):
+    import asyncio
+    import threading
+
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job, _key, _pending = await _fail_with_pending(app, input_checksum=checksum)
+
+    async def handoff(_ctx, *, idempotency_key):
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=True
+        )
+
+    started = threading.Event()
+    resume = threading.Event()
+
+    def paused_download(_s3, _bucket, prefix, destination):
+        started.set()
+        assert resume.wait(timeout=5)
+        _write_real_lossless_package(destination, job, checksum)
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", handoff)
+    monkeypatch.setattr(admin_module, "download_package", paused_download)
+    retry_task = asyncio.create_task(
+        c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    dismissed = await c.post(f"/api/admin/jobs/{job.id}/dismiss", headers=HEADERS)
+    assert dismissed.status_code == 200, dismissed.text
+    resume.set()
+    refused = await retry_task
+    assert refused.status_code == 409
+    assert not (app.state.settings.data_dir / job.id.hex).exists()
+    assert not any(
+        path.name.startswith(f".retry-{job.id.hex}-")
+        for path in app.state.settings.data_dir.iterdir()
+    )
+
+
+async def test_cancelled_handoff_preflight_waits_for_thread_before_cleanup(
+    admin_client, monkeypatch
+):
+    import asyncio
+    import threading
+
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job, _key, _pending = await _fail_with_pending(app, input_checksum=checksum)
+
+    async def handoff(_ctx, *, idempotency_key):
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=True
+        )
+
+    started = threading.Event()
+    resume = threading.Event()
+
+    def paused_download(_s3, _bucket, _prefix, destination):
+        started.set()
+        assert resume.wait(timeout=5)
+        _write_real_lossless_package(destination, job, checksum)
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", handoff)
+    monkeypatch.setattr(admin_module, "download_package", paused_download)
+    retry_task = asyncio.create_task(
+        c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    retry_task.cancel()
+    await asyncio.sleep(0)
+    assert not retry_task.done()  # the S3 thread is still writing
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+    assert not any(
+        path.name.startswith(f".retry-{job.id.hex}-")
+        for path in app.state.settings.data_dir.iterdir()
+    )
+
+
 async def test_duplicate_keep_revalidates_stale_keeper_before_cleanup(
     admin_client, session_factory
 ):
@@ -583,6 +1044,7 @@ async def test_duplicate_keep_revalidates_stale_keeper_before_cleanup(
     await _fail(app, failed, JobStage.pending)
     groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
     assert groups[0]["keeperTrackId"] == str(keeper_id)
+    displayed = groups[0]
 
     # The displayed keeper was removed before the operator clicked Keep.
     removed = await c.post(f"/api/admin/tracks/{keeper_id}/remove", headers=HEADERS)
@@ -592,8 +1054,8 @@ async def test_duplicate_keep_revalidates_stale_keeper_before_cleanup(
         headers=HEADERS,
         json={
             "action": "keep",
-            "jobIds": [keeper.id.hex, alternative.id.hex, failed.id.hex],
-            "trackIds": [str(keeper_id), str(alternative_id)],
+            "jobIds": [member["id"] for member in displayed["jobs"]],
+            "trackIds": [member["id"] for member in displayed["tracks"]],
             "keeperTrackId": str(keeper_id),
         },
     )
@@ -646,6 +1108,38 @@ async def test_node_backed_failure_expires_assignment_without_runpod_cancel(
     assert response.status_code == 200, response.text
     assert (await app.state.node_repo.get_assignment(assignment.id)).status == NodeAssignmentStatus.expired
     assert (await app.state.node_repo.get("mac-mini")).busy_assignment_id is None
+
+
+async def test_failed_node_identity_does_not_hide_later_runpod_rejection(
+    admin_client, session_factory, monkeypatch
+):
+    c, app = admin_client
+    job, _key, _pending = await _fail_with_pending(
+        app,
+        code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        detail="RunPod returned HTTP 409",
+        provider_accepted=False,
+    )
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.runpod_job_id = "node:failed-predecessor"
+        row.worker_phase = "failed"
+
+    class NoNodeCancellation:
+        async def cancel(self, _provider_id):
+            raise AssertionError("failed node identity must not reach RunPod cancel")
+
+    monkeypatch.setattr(
+        admin_module, "_runpod_for", lambda _settings: NoNodeCancellation()
+    )
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    retry = next(
+        event
+        for event in await app.state.job_repo.list_events(job.id)
+        if event.event == "admin_retry_started"
+    )
+    assert retry.detail["reservation_resolution"] == "provider_rejected"
 
 
 @pytest.mark.parametrize(
@@ -854,6 +1348,65 @@ async def _linked_track(session_factory, job, *, title, created_seconds, deleted
     return track_id
 
 
+async def test_title_only_group_does_not_claim_a_unique_checksum_is_shared(
+    admin_client,
+):
+    c, app = admin_client
+    await _job(app, title="Same Song", artist="Artist", input_checksum="1" * 64)
+    await _job(app, title="same song!", artist="artist", input_checksum="2" * 64)
+    groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
+    assert len(groups) == 1
+    assert groups[0]["identity"] == "title:same song artist"
+
+
+async def test_single_ready_job_and_its_track_are_not_a_duplicate_group(
+    admin_client, session_factory
+):
+    c, app = admin_client
+    job = await _job(app, title="One song", input_checksum="d" * 64)
+    await _linked_track(session_factory, job, title="One song", created_seconds=0)
+    groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
+    assert groups == []
+
+
+async def test_two_ready_jobs_same_file_form_one_two_item_group(
+    admin_client, session_factory
+):
+    c, app = admin_client
+    checksum = "e" * 64
+    first = await _job(app, title="Same recording", input_checksum=checksum)
+    second = await _job(app, title="Same recording", input_checksum=checksum)
+    first_id = await _linked_track(
+        session_factory, first, title="Same recording", created_seconds=1
+    )
+    second_id = await _linked_track(
+        session_factory, second, title="Same recording", created_seconds=2
+    )
+    groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
+    assert len(groups) == 1
+    assert groups[0]["jobs"] == []
+    assert {member["id"] for member in groups[0]["tracks"]} == {
+        str(first_id), str(second_id)
+    }
+
+
+async def test_failed_job_plus_different_ready_item_is_a_duplicate_group(
+    admin_client, session_factory
+):
+    c, app = admin_client
+    checksum = "f" * 64
+    ready = await _job(app, title="Song", input_checksum=checksum)
+    track_id = await _linked_track(
+        session_factory, ready, title="Song", created_seconds=1
+    )
+    failed = await _job(app, title="Failed upload", input_checksum=checksum)
+    await _fail(app, failed, JobStage.pending)
+    groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
+    assert len(groups) == 1
+    assert [member["id"] for member in groups[0]["jobs"]] == [failed.id.hex]
+    assert [member["id"] for member in groups[0]["tracks"]] == [str(track_id)]
+
+
 async def test_duplicate_keeper_choice_and_group_actions(admin_client, session_factory):
     c, app = admin_client
     checksum = "b" * 64
@@ -866,12 +1419,14 @@ async def test_duplicate_keeper_choice_and_group_actions(admin_client, session_f
 
     groups = (await c.get("/api/admin/duplicates", headers=HEADERS)).json()["groups"]
     assert len(groups) == 1 and groups[0]["keeperTrackId"] == str(newer_id)
+    assert [member["id"] for member in groups[0]["jobs"]] == [failed.id.hex]
+    assert len(groups[0]["tracks"]) == 2
     result = await c.post(
         "/api/admin/duplicates/action",
         headers=HEADERS,
         json={
             "action": "keep",
-            "jobIds": [older.id.hex, newer.id.hex, failed.id.hex],
+            "jobIds": [failed.id.hex],
             "trackIds": [str(older_id), str(newer_id)],
             "keeperTrackId": str(newer_id),
         },

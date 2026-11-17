@@ -28,8 +28,9 @@ import hmac
 import json
 import re
 import shutil
+import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -59,6 +60,7 @@ from ..db.repository import (
     pending_runpod_dispatch,
     track_id_for_job,
 )
+from ..errors import StageError
 from ..orchestrator import cloud
 from ..orchestrator import nodes as node_routing
 from ..orchestrator.recover_publication import (
@@ -70,6 +72,7 @@ from ..orchestrator.runpod_client import (
     HttpRunPodClient,
     NotConfiguredRunPodClient,
     RunPodClient,
+    is_terminal_dispatch_rejection,
 )
 from ..orchestrator.runtime import (
     NODE_ROUTING_KEY,
@@ -78,7 +81,12 @@ from ..orchestrator.runtime import (
     parse_runpod_limit,
     validate_setting,
 )
-from ..orchestrator.stages import StageContext, _confirmed_dispatch_key
+from ..orchestrator.stages import (
+    StageContext,
+    _confirmed_dispatch_key,
+    dispatch_reconciliation_window,
+)
+from ..publish.lossless_intake import download_package
 from ..settings import Settings
 from .media import s3_client
 from .redaction import _redact_value
@@ -1741,9 +1749,11 @@ def _runpod_for(settings: Settings) -> RunPodClient:
     return NotConfiguredRunPodClient()
 
 
-async def _source_is_obtainable(request: Request, job: Job) -> bool:
-    """Ensure an upload source is present where downloading expects it."""
-    if job.source_type == SourceType.url:
+async def _source_is_obtainable(
+    request: Request, job: Job, *, recovery: bool = False
+) -> bool:
+    """Ensure the source is present where downloading/recovery expects it."""
+    if job.source_type == SourceType.url and not recovery:
         return True  # A node re-downloads the submitted URL on the fresh run.
     settings = _settings(request)
     destination = settings.data_dir / job.id.hex / "source.mp4"
@@ -1770,17 +1780,149 @@ async def _source_is_obtainable(request: Request, job: Job) -> bool:
     return destination.is_file()
 
 
+def _provider_rejected_reservation(
+    job: Job, events: list[JobEvent], pending: JobEvent
+) -> bool:
+    """Use new structured evidence, or the enumerated legacy client shapes."""
+    pending_key = _event_detail(pending).get("idempotency_key")
+    for event in reversed(events):
+        if event.id <= pending.id or event.event != "failed":
+            continue
+        detail = _event_detail(event)
+        if detail.get("stage") != JobStage.dispatched.value:
+            continue
+        if (
+            detail.get("provider_accepted") is False
+            and detail.get("idempotency_key") == pending_key
+        ):
+            return True
+        code = detail.get("error_code")
+        error_detail = detail.get("error_detail")
+        if (
+            not job.runpod_job_id
+            and isinstance(code, str)
+            and isinstance(error_detail, str)
+            and detail.get("idempotency_key") in (None, pending_key)
+            and is_terminal_dispatch_rejection(code, error_detail)
+        ):
+            return True
+    return False
+
+
+async def _resolve_dispatch_reservation(
+    request: Request, job: Job, events: list[JobEvent], pending: JobEvent
+) -> dict[str, Any]:
+    """Resolve only from provider rejection or exact-prefix durable evidence."""
+    detail = _event_detail(pending)
+    dispatch_key = detail.get("idempotency_key")
+    latest_failure = next(
+        (event for event in reversed(events) if event.event == "failed"),
+        None,
+    )
+    base: dict[str, Any] = {
+        "reservation_event_id": pending.id,
+        "failure_event_id": latest_failure.id if latest_failure is not None else None,
+        "idempotency_key": dispatch_key,
+    }
+    if not isinstance(dispatch_key, str):
+        return {
+            **base,
+            "status": "unresolved_reservation",
+            "reason": "A legacy unconfirmed dispatch has no immutable attempt key; "
+            "retry remains refused. Dismiss is available.",
+        }
+    if _provider_rejected_reservation(job, events, pending):
+        return {
+            **base,
+            "status": "resolved_reservation",
+            "reservation_resolution": "provider_rejected",
+        }
+
+    settings = _settings(request)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=_jobs(request),
+        runpod=_runpod_for(settings),
+        worker_id=f"admin-inspect-{uuid.uuid4().hex}",
+    )
+    try:
+        inspection = await cloud.inspect_dispatch_attempt(
+            ctx, idempotency_key=dispatch_key
+        )
+    except StageError as exc:
+        return {
+            **base,
+            "status": "storage_error",
+            "reason": f"Storage could not be checked for the earlier dispatch: "
+            f"{exc.detail}. Retry is refused; Dismiss is available.",
+        }
+    if inspection.receipt_present or inspection.handoff_present:
+        return {
+            **base,
+            "status": "worker_evidence",
+            "reservation_resolution": (
+                "handoff" if inspection.handoff_present else "receipt"
+            ),
+            "receipt_present": inspection.receipt_present,
+            "handoff_present": inspection.handoff_present,
+            "runpod_job_id": inspection.runpod_job_id,
+        }
+
+    window = dispatch_reconciliation_window(settings)
+    pending_for = _age_seconds(pending.created_at) or 0.0
+    if pending_for <= window:
+        retry_at = (_aware(pending.created_at) or utcnow()) + timedelta(seconds=window)
+        return {
+            **base,
+            "status": "unresolved_reservation",
+            "retryable_at": retry_at.isoformat(),
+            "reason": f"The earlier dispatch reservation is unresolved: no receipt "
+            f"or handoff exists and it is still inside the reconciliation window. "
+            f"If storage stays empty, Retry becomes "
+            f"available after {retry_at.isoformat()}. Dismiss is available.",
+        }
+    return {
+        **base,
+        "status": "resolved_reservation",
+        "reservation_resolution": "no_receipt_after_deadline",
+    }
+
+
 async def _stop_runpod_for_restart(
     request: Request, job: Job, events: list[JobEvent]
 ) -> dict[str, Any]:
     """Cancel uncertain provider work; never claim success when it fails."""
-    if job.runpod_job_id and job.runpod_job_id.startswith("node:"):
+    if (
+        job.runpod_job_id
+        and job.runpod_job_id.startswith("node:")
+        and job.worker_phase != "failed"
+    ):
         return {"status": "node_assignment", "assignment": job.runpod_job_id}
     if (pending := pending_runpod_dispatch(events)) is not None:
-        return {
-            "status": "unresolved_reservation",
-            "idempotency_key": _event_detail(pending).get("idempotency_key"),
-        }
+        outcome = await _resolve_dispatch_reservation(request, job, events, pending)
+        if outcome["status"] != "resolved_reservation":
+            return outcome
+        # Resolution makes cancellation best-effort, never a new permanent
+        # blocker. Preserve the provider id and outcome in the retry ledger.
+        if job.runpod_job_id and not job.runpod_job_id.startswith("node:"):
+            try:
+                await _runpod_for(_settings(request)).cancel(job.runpod_job_id)
+            except Exception as exc:
+                outcome["provider_cancel"] = {
+                    "status": "cancel_failed",
+                    "runpod_job_id": job.runpod_job_id,
+                    "error_type": type(exc).__name__,
+                }
+            else:
+                outcome["provider_cancel"] = {
+                    "status": "cancelled",
+                    "runpod_job_id": job.runpod_job_id,
+                }
+        return outcome
+    if job.runpod_job_id and job.runpod_job_id.startswith("node:"):
+        return {"status": "node_assignment", "assignment": job.runpod_job_id}
     if not job.runpod_job_id:
         return {"status": "not_recorded"}
     if job.worker_phase == "failed" or any(
@@ -1854,6 +1996,161 @@ async def _try_publication_retry(
     return recovered, None
 
 
+async def _refuse_reservation_if_needed(
+    request: Request,
+    job: Job,
+    outcome: dict[str, Any],
+    fallback_reason: str | None,
+) -> None:
+    reason: str | None = None
+    if outcome["status"] in {"unresolved_reservation", "storage_error"}:
+        reason = str(outcome["reason"])
+    elif outcome["status"] == "worker_evidence":
+        reason = (
+            "The earlier dispatch has a dispatch.json receipt, so a worker may "
+            "have run; Retry is refused. Dismiss is available."
+        )
+    if reason is not None:
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_unresolved",
+            {**outcome, "fallback_reason": fallback_reason},
+        )
+        raise HTTPException(409, reason)
+
+
+async def _recover_handoff_reservation(
+    request: Request,
+    job: Job,
+    outcome: dict[str, Any],
+    fallback_reason: str | None,
+) -> AdminRetryResponse:
+    """Reuse a complete unconfirmed attempt after package/source preflight."""
+    dispatch_key = outcome.get("idempotency_key")
+    reservation_id = outcome.get("reservation_event_id")
+    if (
+        not isinstance(dispatch_key, str)
+        or not isinstance(reservation_id, int)
+        or not job.input_checksum
+    ):
+        raise HTTPException(
+            409,
+            "The earlier dispatch has handoff.json but lacks source/reservation "
+            "identity for publication recovery; Retry is refused. Dismiss is available.",
+        )
+    expected_checksum = job.input_checksum
+    assert expected_checksum is not None
+    if not await _source_is_obtainable(request, job, recovery=True):
+        raise HTTPException(
+            409,
+            "The upload source no longer exists locally or in S3; the complete "
+            "handoff cannot be recovered. Dismiss is available.",
+        )
+
+    settings = _settings(request)
+    recovery_id = uuid.uuid4()
+    worker_id = f"admin-retry-{recovery_id.hex}"
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=_jobs(request),
+        runpod=_runpod_for(settings),
+        worker_id=worker_id,
+    )
+    prefix = cloud.attempt_prefix(track_id_for_job(job.id), dispatch_key)
+    # Scratch lives outside DATA_DIR/<job>: a concurrent Dismiss can remove
+    # that workdir without this blocked preflight recreating it afterwards.
+    scratch = Path(tempfile.mkdtemp(
+        prefix=f".retry-{job.id.hex}-{recovery_id.hex}-",
+        dir=settings.data_dir,
+    ))
+    async def preflight() -> None:
+        await asyncio.to_thread(
+            download_package,
+            s3_client(settings),
+            settings.s3_media_bucket,
+            prefix,
+            scratch / "package",
+        )
+        await verify_publication_assets(
+            ctx, expected_checksum, package_dir=scratch / "package"
+        )
+
+    # Cancelling a coroutine does not stop its S3 thread. Keep the operation
+    # shielded and wait for it before cleanup, or that thread would recreate
+    # an orphan scratch package after rmtree.
+    operation = asyncio.create_task(preflight())
+    cancelled = False
+    error: Exception | None = None
+    try:
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception as exc:
+                error = exc
+        try:
+            await operation
+        except Exception as exc:
+            error = exc
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    current = asyncio.current_task()
+    if cancelled or (current is not None and current.cancelling()):
+        raise asyncio.CancelledError
+    if error is not None:
+        reason = (
+            f"The earlier dispatch has handoff.json, but publication recovery "
+            f"preflight failed: {type(error).__name__}: {error}. Retry is refused; "
+            "Dismiss is available."
+        )
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_refused",
+            {
+                "reason": reason,
+                "reservation_resolution": "handoff",
+                "fallback_reason": fallback_reason,
+            },
+        )
+        raise HTTPException(409, reason) from error
+    if await _jobs(request).expire_terminal_assignments(
+        job.id, reason="expired by administrator handoff recovery"
+    ) is None:
+        raise HTTPException(
+            409,
+            "The handoff recovery could not fence the existing lease; Retry is refused.",
+        )
+    try:
+        recovered = await _jobs(request).recover_publication(
+            job.id,
+            expected_provider_id=outcome.get("runpod_job_id") or job.runpod_job_id,
+            expected_checksum=expected_checksum,
+            expected_idempotency_key=job.idempotency_key,
+            expected_dispatch_key=dispatch_key,
+            expected_reservation_id=reservation_id,
+            expected_failure_event_id=outcome.get("failure_event_id"),
+            reservation_resolution="handoff",
+            recovery_id=recovery_id,
+            worker_id=worker_id,
+            lease_seconds=60,
+            admin_retry=True,
+        )
+    except InvalidTransition:
+        raise HTTPException(
+            409, "The job is being processed or is no longer retryable"
+        ) from None
+    await _jobs(request).release_lease(job.id, worker_id=worker_id)
+    return AdminRetryResponse(
+        status=recovered.status.value,
+        resumeStage=JobStage.verifying.value,
+        attempt=recovered.attempt,
+        action="recovered",
+    )
+
+
 async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
     job = await _jobs(request).get_job(job_id)
     if job is None:
@@ -1871,16 +2168,40 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
             attempt=recovered.attempt,
             action="recovered",
         )
+    # Source refusal precedes reservation/storage refusal for uploads: show
+    # the actionable missing-input blocker instead of an execution mystery.
+    if job.source_type == SourceType.upload and not await _source_is_obtainable(request, job):
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_refused",
+            {"reason": "upload source unavailable", "fallback_reason": fallback_reason},
+        )
+        raise HTTPException(
+            409,
+            "The upload source no longer exists locally or in S3; Retry is refused. "
+            "Dismiss is available.",
+        )
+    outcome = await _stop_runpod_for_restart(request, job, events)
+    if (
+        outcome["status"] == "worker_evidence"
+        and outcome.get("handoff_present") is True
+    ):
+        return await _recover_handoff_reservation(
+            request, job, outcome, fallback_reason
+        )
+    await _refuse_reservation_if_needed(request, job, outcome, fallback_reason)
+    if outcome["status"] == "cancel_failed":
+        await _jobs(request).append_event(
+            job.id,
+            "admin_retry_cancel_failed",
+            {**outcome, "fallback_reason": fallback_reason},
+        )
+        raise HTTPException(
+            409,
+            "The recorded RunPod executor could not be confirmed stopped; Retry "
+            "was refused. Dismiss is available.",
+        )
     if job.source_type == SourceType.url:
-        outcome = await _stop_runpod_for_restart(request, job, events)
-        if outcome["status"] == "unresolved_reservation":
-            await _jobs(request).append_event(job.id, "admin_retry_unresolved", outcome)
-            raise HTTPException(409, "An earlier dispatch reservation is unresolved; reconcile it first")
-        if outcome["status"] == "cancel_failed":
-            await _jobs(request).append_event(
-                job.id, "admin_retry_cancel_failed", {**outcome, "fallback_reason": fallback_reason}
-            )
-            raise HTTPException(409, "The recorded RunPod executor could not be confirmed stopped")
         try:
             new_job = await _jobs(request).admin_resubmit_url_job(
                 job.id, runpod_outcome=outcome, fallback_reason=fallback_reason
@@ -1893,30 +2214,6 @@ async def _retry_job(request: Request, job_id: uuid.UUID) -> AdminRetryResponse:
             attempt=new_job.attempt,
             action="resubmitted",
             newJobId=new_job.id.hex,
-        )
-    if not await _source_is_obtainable(request, job):
-        await _jobs(request).append_event(
-            job.id,
-            "admin_retry_refused",
-            {"reason": "upload source unavailable", "fallback_reason": fallback_reason},
-        )
-        raise HTTPException(409, "The upload source no longer exists locally or in S3")
-    outcome = await _stop_runpod_for_restart(request, job, events)
-    if outcome["status"] == "unresolved_reservation":
-        await _jobs(request).append_event(job.id, "admin_retry_unresolved", outcome)
-        raise HTTPException(
-            409,
-            "An earlier dispatch reservation is unresolved; reconcile its executor before retrying",
-        )
-    if outcome["status"] == "cancel_failed":
-        await _jobs(request).append_event(
-            job.id,
-            "admin_retry_cancel_failed",
-            {**outcome, "fallback_reason": fallback_reason},
-        )
-        raise HTTPException(
-            409,
-            "The recorded RunPod executor could not be confirmed stopped; retry was refused",
         )
     try:
         retried = await _jobs(request).admin_restart_job(
@@ -2129,12 +2426,23 @@ def _duplicate_track(track: Track) -> AdminDuplicateMember:
 async def admin_duplicates(request: Request, _auth: None = Admin) -> AdminDuplicateListResponse:
     jobs = await _jobs(request).list_all_jobs()
     tracks = await _tracks(request).list_tracks(include_deleted=True)
-    job_by_track = {job.track_id: job for job in jobs if job.track_id is not None}
-    entities: list[tuple[str, Any]] = [("job", job) for job in jobs]
-    entities.extend(
-        ("track", track) for track in tracks if track.id not in job_by_track
+    track_by_id = {track.id: track for track in tracks}
+    # One item retains the job's source/checksum evidence and its product's
+    # display/library identity. A job + its own track is never two duplicates.
+    items: list[tuple[Job | None, Track | None]] = [
+        (
+            job,
+            track_by_id.get(job.track_id)
+            if job.track_id is not None
+            else None,
+        )
+        for job in jobs
+    ]
+    linked_tracks = {job.track_id for job in jobs if job.track_id is not None}
+    items.extend(
+        (None, track) for track in tracks if track.id not in linked_tracks
     )
-    parent = list(range(len(entities)))
+    parent = list(range(len(items)))
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -2148,52 +2456,65 @@ async def admin_duplicates(request: Request, _auth: None = Admin) -> AdminDuplic
             parent[right_root] = left_root
 
     first_seen: dict[tuple[str, str], int] = {}
-    identity_by_root: dict[int, str] = {}
-    for index, (kind, value) in enumerate(entities):
+    identity_options: list[list[tuple[int, str, str]]] = []
+    for index, (job, track) in enumerate(items):
+        value = job or track
+        assert value is not None
         identities: list[tuple[int, str, str]] = []
-        if kind == "job":
-            if value.input_checksum:
-                identities.append((0, "checksum", value.input_checksum))
-            if value.source_type == SourceType.url:
-                video_id = node_routing.youtube_video_id(value.source_ref)
+        if job is not None:
+            if job.input_checksum:
+                identities.append((0, "checksum", job.input_checksum))
+            if job.source_type == SourceType.url:
+                video_id = node_routing.youtube_video_id(job.source_ref)
                 if video_id:
                     identities.append((1, "youtube", video_id))
         normalized = _normalized_song(value.title, value.artist)
         if normalized:
             identities.append((2, "title", normalized))
+        identity_options.append(identities)
         for _confidence, identity_kind, identity in identities:
             key = (identity_kind, identity)
             if key in first_seen:
                 union(index, first_seen[key])
             else:
                 first_seen[key] = index
-            identity_by_root.setdefault(find(index), f"{identity_kind}:{identity}")
+
+    def group_identity(indices: list[int]) -> str:
+        counts: dict[tuple[int, str, str], int] = {}
+        for index in indices:
+            for option in set(identity_options[index]):
+                counts[option] = counts.get(option, 0) + 1
+        shared = [option for option, count in counts.items() if count >= 2]
+        if not shared:
+            return "song"
+        _confidence, kind, identity = min(shared)
+        return f"{kind}:{identity}"
 
     grouped: dict[int, dict[str, Any]] = {}
-    entity_roots: dict[int, int] = {}
-    for index, (kind, value) in enumerate(entities):
+    for index, item in enumerate(items):
         root = find(index)
-        entity_roots[index] = root
-        group = grouped.setdefault(root, {"jobs": [], "tracks": [], "identity": identity_by_root.get(root, "song")})
-        group["jobs" if kind == "job" else "tracks"].append(value)
-    for track in tracks:
-        job = job_by_track.get(track.id)
-        if job is None:
-            continue
-        job_index = next(index for index, (kind, value) in enumerate(entities) if kind == "job" and value is job)
-        grouped[entity_roots[job_index]]["tracks"].append(track)
+        group = grouped.setdefault(root, {"items": [], "indices": []})
+        group["items"].append(item)
+        group["indices"].append(index)
 
     responses: list[AdminDuplicateGroup] = []
     for root, group in grouped.items():
-        if len(group["jobs"]) + len(group["tracks"]) < 2:
+        group_items: list[tuple[Job | None, Track | None]] = group["items"]
+        if len(group_items) < 2:
             continue
-        available_tracks = [track for track in group["tracks"] if track.deleted_at is None]
+        group_jobs = [
+            job for job, track in group_items if job is not None and track is None
+        ]
+        group_tracks = [
+            track for _job, track in group_items if track is not None
+        ]
+        available_tracks = [track for track in group_tracks if track.deleted_at is None]
         keeper = max(available_tracks, key=lambda track: (track.created_at, str(track.id)), default=None)
         responses.append(AdminDuplicateGroup(
             groupId=str(root),
-            identity=group["identity"],
-            jobs=[_duplicate_member(job) for job in group["jobs"]],
-            tracks=[_duplicate_track(track) for track in group["tracks"]],
+            identity=group_identity(group["indices"]),
+            jobs=[_duplicate_member(job) for job in group_jobs],
+            tracks=[_duplicate_track(track) for track in group_tracks],
             keeperTrackId=str(keeper.id) if keeper is not None else None,
         ))
     responses.sort(key=lambda group: group.groupId)

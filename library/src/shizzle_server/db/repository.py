@@ -67,6 +67,7 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
 _DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
 _DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
 _LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+_ADMIN_RETRY_STARTED_EVENT = "admin_retry_started"
 
 # Advisory-lock key for the RunPod capacity gate (Postgres only): every
 # capacity-gated reservation takes this xact lock, so two orchestrator
@@ -120,6 +121,7 @@ async def _count_runpod_work(session: AsyncSession) -> int:
                         _DISPATCH_STARTED_EVENT,
                         _DISPATCH_CONFIRMED_EVENT,
                         _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                        _ADMIN_RETRY_STARTED_EVENT,
                     )
                 ),
             ),
@@ -178,8 +180,11 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
         detail = event.detail if isinstance(event.detail, dict) else {}
         event_key = detail.get("idempotency_key")
         if event.event == "admin_retry_started":
-            # Retry is an authority boundary: older reservations and late
-            # receipts can never satisfy the reopened attempt (G7).
+            # Only a fresh pending restart opens a new dispatch authority
+            # window. Publication recovery resumes the SAME reservation and
+            # must not erase its handoff evidence.
+            if detail.get("resume_stage") != JobStage.pending.value:
+                continue
             pending = None
             pending_key = None
             new_attempt = detail.get("new_attempt")
@@ -208,6 +213,26 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
             pending = None
             pending_key = None
     return pending
+
+
+def _retry_reservation_is_resolved(
+    pending: JobEvent,
+    runpod_outcome: dict[str, Any],
+    historical: list[JobEvent],
+) -> bool:
+    """Bind API evidence to the exact reservation + failure under lock."""
+    latest_failure = next(
+        (event for event in reversed(historical) if event.event == "failed"),
+        None,
+    )
+    return (
+        runpod_outcome.get("status") == "resolved_reservation"
+        and runpod_outcome.get("reservation_event_id") == pending.id
+        and latest_failure is not None
+        and runpod_outcome.get("failure_event_id") == latest_failure.id
+        and runpod_outcome.get("reservation_resolution")
+        in {"provider_rejected", "no_receipt_after_deadline"}
+    )
 
 
 def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
@@ -655,6 +680,7 @@ class JobRepository:
                                 _DISPATCH_STARTED_EVENT,
                                 _DISPATCH_CONFIRMED_EVENT,
                                 _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                                _ADMIN_RETRY_STARTED_EVENT,
                             )
                         ),
                     )
@@ -701,6 +727,7 @@ class JobRepository:
                                     _DISPATCH_STARTED_EVENT,
                                     _DISPATCH_CONFIRMED_EVENT,
                                     _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                                    _ADMIN_RETRY_STARTED_EVENT,
                                 )
                             ),
                         )
@@ -951,6 +978,7 @@ class JobRepository:
         error_code: ErrorCode,
         error_detail: str,
         worker_id: str,
+        provider_accepted: bool | None = None,
     ) -> Job:
         """Terminal failure from any non-terminal stage; idempotent on re-call.
 
@@ -975,16 +1003,21 @@ class JobRepository:
             job.lease_expires_at = None
             job.next_retry_at = None
             job.updated_at = utcnow()
+            failure_detail: dict[str, Any] = {
+                "stage": from_stage.value,
+                "error_code": error_code.value,
+                "error_detail": error_detail[:500],
+                "worker": worker_id,
+            }
+            if provider_accepted is not None:
+                failure_detail["provider_accepted"] = provider_accepted
+                if from_stage == JobStage.dispatched:
+                    failure_detail["idempotency_key"] = f"{job.id.hex}:{job.attempt}"
             session.add(
                 JobEvent(
                     job_id=job.id,
                     event="failed",
-                    detail={
-                        "stage": from_stage.value,
-                        "error_code": error_code.value,
-                        "error_detail": error_detail[:500],
-                        "worker": worker_id,
-                    },
+                    detail=failure_detail,
                 )
             )
             return job
@@ -1059,9 +1092,18 @@ class JobRepository:
             historical = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id)
             )).all())
-            if pending_runpod_dispatch(historical) is not None:
+            pending = pending_runpod_dispatch(historical)
+            if (
+                pending is None
+                and runpod_outcome.get("reservation_event_id") is not None
+            ) or (
+                pending is not None and not _retry_reservation_is_resolved(
+                    pending, runpod_outcome, historical
+                )
+            ):
                 # Missing provider id is not proof that an accepted request
-                # never existed. Reconcile/cancel it before any reopen.
+                # never existed. Only the exact preflighted reservation may
+                # be reopened, and the event id closes prefill/commit races.
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             expired = await self._expire_open_assignments(
                 session, job_id, reason="expired by administrator retry", now=now
@@ -1089,6 +1131,7 @@ class JobRepository:
                     "reason": reason,
                     "fallback_reason": fallback_reason,
                     "new_attempt": job.attempt,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
                     "dispatch_key": f"{job.id.hex}:{job.attempt}",
                     "expired_assignment_ids": expired,
                     "runpod": runpod_outcome,
@@ -1119,7 +1162,15 @@ class JobRepository:
             historical = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
-            if pending_runpod_dispatch(historical) is not None:
+            pending = pending_runpod_dispatch(historical)
+            if (
+                pending is None
+                and runpod_outcome.get("reservation_event_id") is not None
+            ) or (
+                pending is not None and not _retry_reservation_is_resolved(
+                    pending, runpod_outcome, historical
+                )
+            ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             expired = await self._expire_open_assignments(
                 session, job_id, reason="expired by administrator URL resubmission", now=now
@@ -1145,6 +1196,7 @@ class JobRepository:
                     "new_job_id": str(new.id),
                     "previous_failure_code": old.error_code,
                     "fallback_reason": fallback_reason,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
                     "expired_assignment_ids": expired,
                     "runpod": runpod_outcome,
                 },
@@ -1158,6 +1210,18 @@ class JobRepository:
                 job_id=new.id,
                 event="created",
                 detail={"source_type": SourceType.url.value},
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="admin_retry_started",
+                detail={
+                    "previous_failure_code": old.error_code,
+                    "resume_stage": JobStage.pending.value,
+                    "reason": "resubmit URL as a fresh job",
+                    "new_attempt": new.attempt,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
+                    "dispatch_key": f"{new.id.hex}:{new.attempt}",
+                },
             ))
             session.add(JobEvent(
                 job_id=new.id,
@@ -1233,7 +1297,7 @@ class JobRepository:
         self,
         job_id: uuid.UUID,
         *,
-        expected_provider_id: str,
+        expected_provider_id: str | None,
         expected_checksum: str,
         expected_idempotency_key: str,
         expected_dispatch_key: str,
@@ -1241,6 +1305,9 @@ class JobRepository:
         worker_id: str,
         lease_seconds: float,
         admin_retry: bool = False,
+        expected_reservation_id: int | None = None,
+        expected_failure_event_id: int | None = None,
+        reservation_resolution: str | None = None,
     ) -> Job:
         """Operator-only claim of a proven failed publication; never dispatch.
 
@@ -1251,6 +1318,9 @@ class JobRepository:
         """
         if not worker_id or not 0 < lease_seconds <= 3600:
             raise ValueError("A bounded recovery lease and owner are required")
+        handoff_recovery = reservation_resolution == "handoff"
+        if reservation_resolution is not None and not handoff_recovery:
+            raise ValueError("Only handoff evidence can recover an unconfirmed reservation")
         async with self._sf() as session, session.begin():
             result = await session.execute(
                 select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
@@ -1259,9 +1329,19 @@ class JobRepository:
             now = utcnow()
             if (
                 job is None or job.status != JobStage.failed
-                or not expected_provider_id or not expected_checksum
-                or not expected_idempotency_key
-                or job.runpod_job_id != expected_provider_id
+                or (not handoff_recovery and not expected_provider_id)
+                or not expected_checksum or not expected_idempotency_key
+                or (
+                    not handoff_recovery
+                    and job.runpod_job_id != expected_provider_id
+                )
+                or (
+                    handoff_recovery
+                    and (
+                        expected_reservation_id is None
+                        or expected_failure_event_id is None
+                    )
+                )
                 or job.input_checksum != expected_checksum
                 or job.idempotency_key != expected_idempotency_key
                 or job.track_id is not None or job.dismissed_at is not None
@@ -1271,23 +1351,59 @@ class JobRepository:
             events = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
-            if not recoverable_publication_failure(job, events) or any(
+            failure = next(
+                (event for event in reversed(events) if event.event == "failed"),
+                None,
+            )
+            if failure is None or any(
                 event.event == "publication_recovery_started"
                 and (event.detail or {}).get("recovery_id") == str(recovery_id)
                 for event in events
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
-            failure = next(event for event in reversed(events) if event.event == "failed")
-            dispatch = await session.scalar(
-                select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event == "runpod_dispatched")
-                .order_by(JobEvent.id.desc()).limit(1)
-            )
-            if (
-                dispatch is None or not expected_dispatch_key
-                or (dispatch.detail or {}).get("idempotency_key") != expected_dispatch_key
-                or (dispatch.detail or {}).get("runpod_job_id") != expected_provider_id
-                or await session.get(Track, track_id_for_job(job.id)) is not None
-            ):
+            if handoff_recovery:
+                pending = pending_runpod_dispatch(events)
+                pending_detail = pending.detail if pending is not None else None
+                failure_detail = (
+                    failure.detail if isinstance(failure.detail, dict) else {}
+                )
+                prior_handoff_recovery = any(
+                    event.id < failure.id
+                    and event.event == "admin_retry_started"
+                    and isinstance(event.detail, dict)
+                    and event.detail.get("reservation_resolution") == "handoff"
+                    and event.detail.get("dispatch_key") == expected_dispatch_key
+                    for event in events
+                )
+                if (
+                    pending is None or not isinstance(pending_detail, dict)
+                    or pending.id != expected_reservation_id
+                    or failure.id != expected_failure_event_id
+                    or pending_detail.get("idempotency_key") != expected_dispatch_key
+                    or (
+                        failure_detail.get("stage") != JobStage.dispatched.value
+                        and not prior_handoff_recovery
+                    )
+                ):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            else:
+                if not recoverable_publication_failure(job, events):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+                dispatch = await session.scalar(
+                    select(JobEvent)
+                    .where(
+                        JobEvent.job_id == job_id,
+                        JobEvent.event == "runpod_dispatched",
+                    )
+                    .order_by(JobEvent.id.desc()).limit(1)
+                )
+                if (
+                    dispatch is None or not expected_dispatch_key
+                    or (dispatch.detail or {}).get("idempotency_key") != expected_dispatch_key
+                    or (dispatch.detail or {}).get("runpod_job_id") != expected_provider_id
+                ):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            if await session.get(Track, track_id_for_job(job.id)) is not None:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             # Preserve the reservation/provider ID and attempt counter. A
             # crash after commit can only resume verification/publication.
@@ -1298,7 +1414,21 @@ class JobRepository:
             job.next_retry_at = None
             job.error_code = None
             job.error_detail = None
+            if handoff_recovery and expected_provider_id and not job.runpod_job_id:
+                job.runpod_job_id = expected_provider_id
             job.updated_at = now
+            if handoff_recovery:
+                recovered_detail: dict[str, Any] = {
+                    "idempotency_key": expected_dispatch_key,
+                    "source": "handoff.json",
+                }
+                if expected_provider_id:
+                    recovered_detail["runpod_job_id"] = expected_provider_id
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="runpod_dispatch_recovered",
+                    detail=recovered_detail,
+                ))
             session.add(JobEvent(job_id=job.id, event="publication_recovery_started", detail={
                 "recovery_id": str(recovery_id), "worker": worker_id,
                 "provider_job_id": expected_provider_id,
@@ -1316,6 +1446,7 @@ class JobRepository:
                         "resume_stage": JobStage.verifying.value,
                         "reason": "reuse the selected separation package",
                         "recovery_id": str(recovery_id),
+                        "reservation_resolution": reservation_resolution,
                         "dispatch_key": expected_dispatch_key,
                     },
                 ))

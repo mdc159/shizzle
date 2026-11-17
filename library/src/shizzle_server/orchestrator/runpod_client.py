@@ -19,6 +19,33 @@ _KNOWN_STATUSES = frozenset(
 )
 
 
+def _http_failure_is_retryable(status: int) -> bool:
+    """The one RunPod HTTP distinction used by dispatch and legacy recovery."""
+    return status == 429 or status >= 500
+
+
+def is_terminal_dispatch_rejection(code: str, detail: str) -> bool:
+    """Recognize only the exact legacy shapes a fresh dispatch can emit.
+
+    New failures carry ``provider_accepted=False`` in their event. This helper
+    is deliberately limited to historical rows from before that field existed;
+    callers must also establish that no provider id was recorded.
+    """
+    if code != ErrorCode.RUNPOD_DISPATCH_FAILED.value:
+        return False
+    if detail == NotConfiguredRunPodClient._DETAIL:
+        return True
+    prefix = "RunPod returned HTTP "
+    if not detail.startswith(prefix):
+        return False
+    status_text = detail[len(prefix):]
+    # Exact shape: no response body, punctuation, or appended retry detail.
+    if len(status_text) != 3 or not status_text.isdigit():
+        return False
+    status = int(status_text)
+    return 400 <= status < 500 and not _http_failure_is_retryable(status)
+
+
 class RunPodClient(Protocol):
     """Submit, inspect, and cancel RunPod serverless jobs."""
 
@@ -70,7 +97,12 @@ class NotConfiguredRunPodClient:
         self, *, job_id: uuid.UUID, idempotency_key: str, payload: dict[str, Any]
     ) -> str:
         del job_id, idempotency_key, payload
-        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
+        raise StageError(
+            ErrorCode.RUNPOD_DISPATCH_FAILED,
+            self._DETAIL,
+            retryable=False,
+            provider_accepted=False,
+        )
 
     async def poll(self, runpod_job_id: str) -> dict[str, Any]:
         del runpod_job_id
@@ -111,9 +143,14 @@ class HttpRunPodClient:
     ) -> str:
         # RunPod exposes no idempotency header; this key is trace context only.
         logger.info("job %s: dispatching to RunPod (trace=%s)", job_id, idempotency_key)
-        response = await self._call(
-            lambda: self._request("POST", "/run", json={"input": payload})
-        )
+        try:
+            response = await self._call(
+                lambda: self._request("POST", "/run", json={"input": payload})
+            )
+        except StageError as exc:
+            if not exc.retryable and exc.code == ErrorCode.RUNPOD_DISPATCH_FAILED:
+                exc.provider_accepted = False
+            raise
         try:
             runpod_job_id = response.json()["id"]
         except (KeyError, TypeError, ValueError) as exc:
@@ -181,7 +218,7 @@ class HttpRunPodClient:
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,
                 f"RunPod returned HTTP {response.status_code}",
-                retryable=False,
+                retryable=_http_failure_is_retryable(response.status_code),
             )
         return response
 
@@ -198,9 +235,7 @@ class HttpRunPodClient:
                 ErrorCode.RUNPOD_DISPATCH_FAILED, str(exc), retryable=True
             ) from exc
 
-        if response.status_code < 400 or (
-            400 <= response.status_code < 500 and response.status_code != 429
-        ):
+        if response.status_code < 400 or not _http_failure_is_retryable(response.status_code):
             return response
         raise StageError(
             ErrorCode.RUNPOD_DISPATCH_FAILED,

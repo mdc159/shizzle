@@ -20,6 +20,7 @@ import json
 import logging
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,15 @@ SEPARATION_SEGMENT = "separation"
 DISPATCH_RECEIPT = "dispatch.json"
 
 
+@dataclass(frozen=True)
+class DispatchAttemptInspection:
+    """Durable worker evidence at one exact attempt prefix."""
+
+    receipt_present: bool
+    runpod_job_id: str | None
+    handoff_present: bool
+
+
 def source_key(track_id: uuid.UUID | str) -> str:
     """Private upload source outside the browser cookie's ``tracks/*`` scope."""
     return f"sources/{track_id}/source.mp4"
@@ -79,6 +89,38 @@ def dispatch_receipt_key(
         else separation_prefix(track_id)
     )
     return f"{prefix}/{DISPATCH_RECEIPT}"
+
+
+def _receipt_runpod_id(
+    ctx: StageContext,
+    receipt: dict[str, Any],
+    key: str,
+    idempotency_key: str | None,
+) -> str | None:
+    track_id = track_id_for_job(ctx.job.id)
+    expected = {
+        "track_id": str(track_id),
+        "generation": GENERATION,
+    }
+    if idempotency_key is not None:
+        expected.update(
+            {
+                "idempotency_key": idempotency_key,
+                "package_prefix": attempt_prefix(track_id, idempotency_key),
+            }
+        )
+    if any(receipt.get(field) != value for field, value in expected.items()):
+        logger.warning(
+            "job %s: ignoring stale or mismatched dispatch receipt at %s",
+            ctx.job.id,
+            key,
+        )
+        return None
+    runpod_job_id = receipt.get("runpod_job_id")
+    if not isinstance(runpod_job_id, str) or not runpod_job_id:
+        logger.warning("job %s: dispatch receipt has no RunPod id", ctx.job.id)
+        return None
+    return runpod_job_id
 
 
 async def accepted_dispatch_id(
@@ -109,29 +151,7 @@ async def accepted_dispatch_id(
     if receipt is None:
         return None
 
-    expected = {
-        "track_id": str(track_id),
-        "generation": GENERATION,
-    }
-    if idempotency_key is not None:
-        expected.update(
-            {
-                "idempotency_key": idempotency_key,
-                "package_prefix": attempt_prefix(track_id, idempotency_key),
-            }
-        )
-    if any(receipt.get(field) != value for field, value in expected.items()):
-        logger.warning(
-            "job %s: ignoring stale or mismatched dispatch receipt at %s",
-            ctx.job.id,
-            key,
-        )
-        return None
-    runpod_job_id = receipt.get("runpod_job_id")
-    if not isinstance(runpod_job_id, str) or not runpod_job_id:
-        logger.warning("job %s: dispatch receipt has no RunPod id", ctx.job.id)
-        return None
-    return runpod_job_id
+    return _receipt_runpod_id(ctx, receipt, key, idempotency_key)
 
 
 async def package_ready(
@@ -159,6 +179,56 @@ async def package_ready(
             retryable=True,
         ) from exc
     return head is not None
+
+
+async def inspect_dispatch_attempt(
+    ctx: StageContext, *, idempotency_key: str
+) -> DispatchAttemptInspection:
+    """Read receipt + handoff at the reservation's exact immutable prefix.
+
+    A malformed or mismatched receipt still counts as present: it is durable
+    worker evidence and must never turn into permission to dispatch afresh.
+    Both blocking S3 operations run in threads; every storage error propagates
+    as ``S3_UPLOAD_FAILED`` so callers fail closed rather than as "empty".
+    """
+    track_id = track_id_for_job(ctx.job.id)
+    receipt_key = dispatch_receipt_key(track_id, idempotency_key)
+    handoff_key = f"{attempt_prefix(track_id, idempotency_key)}/handoff.json"
+    try:
+        receipt = await asyncio.to_thread(
+            _read_json_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            receipt_key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch retry failed to read {receipt_key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    try:
+        handoff = await asyncio.to_thread(
+            _head_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            handoff_key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch retry failed to inspect {handoff_key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    return DispatchAttemptInspection(
+        receipt_present=receipt is not None,
+        runpod_job_id=(
+            _receipt_runpod_id(ctx, receipt, receipt_key, idempotency_key)
+            if receipt is not None
+            else None
+        ),
+        handoff_present=handoff is not None,
+    )
 
 
 # --- WS1: upload source to S3 ------------------------------------------------
@@ -216,8 +286,21 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
     """
     track_id = track_id_for_job(ctx.job.id)
     pkg_dir = ctx.job_dir / "package"
-    pkg_dir.mkdir(parents=True, exist_ok=True)
     prefix = await _selected_package_prefix(ctx, track_id)
+    if ctx.jobs is not None:
+        events = await ctx.jobs.list_events(ctx.job.id)
+        if any(
+            event.event == "admin_retry_started"
+            and isinstance(event.detail, dict)
+            and event.detail.get("reservation_resolution") == "handoff"
+            and isinstance(event.detail.get("dispatch_key"), str)
+            and attempt_prefix(track_id, event.detail["dispatch_key"]) == prefix
+            for event in events
+        ):
+            # A same-size cache from another attempt is not proof of this
+            # handoff. Recovered attempts always re-download into a clean dir.
+            await asyncio.to_thread(shutil.rmtree, pkg_dir, ignore_errors=True)
+    pkg_dir.mkdir(parents=True, exist_ok=True)
     try:
         await asyncio.to_thread(
             download_package,
@@ -276,6 +359,10 @@ async def _selected_package_prefix(
     events = await ctx.jobs.list_events(ctx.job.id)
     for event in reversed(events):
         detail = event.detail if isinstance(event.detail, dict) else {}
+        if event.event == "publication_recovery_started":
+            dispatch_key = detail.get("dispatch_key")
+            if isinstance(dispatch_key, str) and dispatch_key:
+                return attempt_prefix(track_id, dispatch_key)
         if (
             event.event == "stage_completed"
             and detail.get("from") == JobStage.dispatched.value

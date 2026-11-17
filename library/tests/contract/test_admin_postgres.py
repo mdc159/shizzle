@@ -334,6 +334,69 @@ async def test_retry_racing_an_orchestrator_pass_is_refused(retry_env):
     assert current.status == JobStage.failed and current.attempt == 0
 
 
+async def test_retry_with_resolved_reservation_racing_orchestrator_is_refused(
+    pg_engine, data_dir
+):
+    """A proven dispatch rejection does not bypass the job/lease fence."""
+    from datetime import timedelta
+
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.models import utcnow
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.errors import ErrorCode
+
+    sf = create_session_factory(pg_engine)
+    jobs = JobRepository(sf)
+    job = await jobs.create_job(
+        source_type=SourceType.upload, source_ref="source.mp4"
+    )
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"retry source")
+    claimed = await jobs.claim_next(worker_id="dispatch", lease_seconds=60)
+    assert claimed is not None
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await jobs.advance(
+            job.id, worker_id="dispatch", from_stage=from_stage, to_stage=to_stage
+        )
+    key = f"{job.id.hex}:0"
+    assert await jobs.reserve_dispatch(
+        job.id, worker_id="dispatch", idempotency_key=key
+    )
+    await jobs.fail_job(
+        job.id,
+        worker_id="dispatch",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="RunPod returned HTTP 409",
+        provider_accepted=False,
+    )
+    settings = Settings(
+        database_url=PG_URL,
+        data_dir=data_dir,
+        shizzle_embedded_orchestrator=False,
+        shizzle_admin_proxy_secret=SECRET,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client, sf() as session, session.begin():
+        row = await session.get(Job, job.id, with_for_update=True)
+        row.lease_owner = "orchestrator-pass"
+        row.lease_expires_at = utcnow() + timedelta(seconds=60)
+        response = await client.post(
+            f"/api/admin/jobs/{job.id}/retry", headers=HEADERS
+        )
+        assert response.status_code == 409
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.attempt == 0
+    assert not any(
+        event.event == "admin_retry_started" for event in await jobs.list_events(job.id)
+    )
+
+
 async def test_dismiss_cleanup_lock_fences_retry(retry_env):
     _, jobs, job, client = retry_env
     started = asyncio.Event()

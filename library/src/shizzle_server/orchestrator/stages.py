@@ -45,6 +45,17 @@ def _age_seconds(since: datetime | None) -> float | None:
     return (utcnow() - since).total_seconds()
 
 
+def dispatch_reconciliation_window(settings: Settings) -> float:
+    """B10's one fail-closed window, shared with administrator retry."""
+    return (
+        max(
+            settings.runpod_queue_timeout_seconds,
+            settings.runpod_cold_start_seconds,
+        )
+        + settings.runpod_worker_stall_seconds
+    )
+
+
 async def _cancel_best_effort(
     ctx: StageContext, runpod_job_id: str, *, reason: str
 ) -> None:
@@ -543,13 +554,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         # which, since a cold start extends that wait, is now
         # max(queue_timeout, cold_start) rather than the plain queue timeout —
         # plus one more running-stall window after that.
-        fail_closed_after = (
-            max(
-                ctx.settings.runpod_queue_timeout_seconds,
-                ctx.settings.runpod_cold_start_seconds,
-            )
-            + ctx.settings.runpod_worker_stall_seconds
-        )
+        fail_closed_after = dispatch_reconciliation_window(ctx.settings)
         if pending_for > fail_closed_after:
             failure_detail: dict[str, Any] = {
                 "pending_seconds": round(pending_for, 1),

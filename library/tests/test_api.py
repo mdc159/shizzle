@@ -279,6 +279,7 @@ async def test_public_job_free_text_uses_the_shared_redaction_policy(client):
         {
             "message": f"downloader refused {credential_url}",
             "aws_access_key_id": "AKIA-PRIVATE-TEST-VALUE",
+            "source_ref": credential_url,
             "nested": {"apiKey": "private-api-key"},
         },
     )
@@ -300,6 +301,7 @@ async def test_public_job_free_text_uses_the_shared_redaction_policy(client):
         assert "https://" not in response.text
         assert "AKIA-PRIVATE-TEST-VALUE" not in response.text
         assert "private-api-key" not in response.text
+        assert "source_ref" not in response.text
 
     detail = responses[0].json()
     assert detail["errorCode"] == "NODE_FAILED"
@@ -310,8 +312,9 @@ async def test_public_job_free_text_uses_the_shared_redaction_policy(client):
         if event["event"] == "diagnostic"
     )
     assert diagnostic["message"] == "downloader refused [redacted]"
-    assert diagnostic["aws_access_key_id"] == "[redacted]"
-    assert diagnostic["nested"]["apiKey"] == "[redacted]"
+    assert "aws_access_key_id" not in diagnostic
+    assert "source_ref" not in diagnostic
+    assert diagnostic["nested"] == {}
 
 
 async def test_library_track_serving_and_soft_delete(client, upload_job, session_factory):

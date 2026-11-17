@@ -743,11 +743,8 @@ async def test_populated_history_and_reports_are_redacted(
         e for e in text["events"]
         if e["event"] == "stage_completed" and e["detail"].get("to") == "dispatched"
     )
-    assert stage["detail"]["source"] == {
-        "node_id": "mac-mini",
-        "source_ref": "[redacted]",
-        "url": "[redacted]",
-    }
+    assert stage["detail"]["source"] == {"node_id": "mac-mini"}
+    assert "source_ref" not in response.text
     reported = text["assignments"][0]["detail"]
     assert reported["code"] == "DOWNLOAD_FAILED"
     assert CRED_FRAGMENT not in reported["detail"]
@@ -770,9 +767,10 @@ async def test_track_integrity_is_redacted(admin_client, session_factory):
     response = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
     assert CRED_FRAGMENT not in response.text
     integrity = response.json()["track"]["integrity"]
-    assert integrity["signed_url"] == "[redacted]"
-    assert integrity["aws_access_key_id"] == "[redacted]"
-    assert integrity["apiKey"] == "[redacted]"
+    assert "signed_url" not in integrity
+    assert "aws_access_key_id" not in integrity
+    assert "apiKey" not in integrity
+    assert integrity["publisher"] == {"objects": []}
 
 
 # --- failed-job stage/attempt inference (durable transition history) --------------
@@ -1421,7 +1419,11 @@ async def test_every_admin_response_string_uses_the_redaction_choke_point(
     await app.state.job_repo.append_event(
         job.id,
         "diagnostic",
-        {"detail": f"event {CRED_URL}", "nested": [f"history {CRED_URL}"]},
+        {
+            "detail": f"event {CRED_URL}",
+            "nested": [f"history {CRED_URL}"],
+            "source": {"source_ref": CRED_URL},
+        },
     )
 
     track_id = track_id_for_job(job.id)
@@ -1500,6 +1502,7 @@ async def test_every_admin_response_string_uses_the_redaction_choke_point(
         assert response.status_code in (200, 422), label
         assert CRED_FRAGMENT not in response.text, label
         assert "https://" not in response.text, label
+        assert "source_ref" not in response.text, label
 
 
 # --- handoff recovery selects the recovered reservation's identity ----------------
@@ -1696,7 +1699,7 @@ async def test_redaction_covers_url_keys_mixed_case_schemes_and_collisions(
     await app.state.job_repo.advance(
         job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
     )
-    event_key = "event HTTPS://example.test/?token=event-key-secret"
+    event_key = "event HTTPS://example.test/path"
     await app.state.job_repo.append_event(
         job.id,
         "diagnostic",
@@ -1705,9 +1708,9 @@ async def test_redaction_covers_url_keys_mixed_case_schemes_and_collisions(
     await app.state.node_repo.heartbeat(
         "mac-mini",
         capabilities={
-            "HTTPS://example.test/?token=capability-one-secret": "first",
+            "HTTPS://example.test/one": "first",
             "[redacted]": "pre-existing collision",
-            "HTTP://example.test/?token=capability-two-secret": "second",
+            "HTTP://example.test/two": "second",
         },
     )
     assignment = await app.state.node_repo.create_assignment(
@@ -1730,22 +1733,18 @@ async def test_redaction_covers_url_keys_mixed_case_schemes_and_collisions(
         assert response.status_code == 200
         assert "http://" not in response.text.lower()
         for secret in (
-            "event-key-secret",
             "event-value-secret",
-            "capability-one-secret",
-            "capability-two-secret",
             "phase-secret",
         ):
             assert secret not in response.text
 
     event = next(e for e in detail.json()["events"] if e["event"] == "diagnostic")
-    assert event["detail"] == {"event [redacted]": "[redacted]"}
+    assert event["detail"] == {"event [redacted]": "value [redacted]"}
     current = nodes.json()["nodes"][0]["currentAssignment"]
     assert current["phase"] == "fetching [redacted]"
     capabilities = nodes.json()["nodes"][0]["capabilities"]
     assert len(capabilities) == 3  # both sanitized collisions were retained
-    assert list(capabilities.values()).count("[redacted]") == 2
-    assert "pre-existing collision" in capabilities.values()
+    assert {"first", "second", "pre-existing collision"} == set(capabilities.values())
     assert all("token" not in key.lower() for key in capabilities)
 
 

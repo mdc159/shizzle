@@ -724,6 +724,19 @@ const LibrarySection: React.FC<{
   </section>
 );
 
+const duplicateHeading = (group: AdminDuplicateGroup): string => {
+  const member = [...group.tracks, ...group.jobs][0];
+  const title = member?.title?.trim() || 'Untitled song';
+  const artist = member?.artist?.trim();
+  return artist ? `${title} — ${artist}` : title;
+};
+
+const duplicateReason = (group: AdminDuplicateGroup): string => {
+  if (group.identity.startsWith('checksum:')) return 'Same file';
+  if (group.identity.startsWith('youtube:')) return 'Same YouTube video';
+  return 'Same title and artist';
+};
+
 const DuplicatesSection: React.FC<{
   groups: AdminDuplicateGroup[];
   results: Record<string, AdminDuplicateActionResult[]>;
@@ -736,7 +749,8 @@ const DuplicatesSection: React.FC<{
       <div className="space-y-3">
         {groups.map((group) => (
           <div key={group.groupId} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-sm">
-            <p className="text-xs text-zinc-500">{group.identity}</p>
+            <p className="font-medium text-zinc-200">{duplicateHeading(group)}</p>
+            <p className="mt-1 text-xs text-zinc-500">{duplicateReason(group)}</p>
             <p className="mt-1 text-zinc-300">
               {group.jobs.length} jobs · {group.tracks.length} tracks
               {group.keeperTrackId ? ` · keeper ${group.keeperTrackId.slice(0, 8)}` : ' · no ready keeper'}

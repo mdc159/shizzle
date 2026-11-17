@@ -740,9 +740,27 @@ test.describe('Admin page (/admin)', () => {
     });
     await page.goto('/admin');
     const duplicates = page.locator('section[aria-label="Duplicates"]');
+    await expect(duplicates.getByText('Good — A', { exact: true })).toBeVisible();
+    await expect(duplicates.getByText('Same file', { exact: true })).toBeVisible();
+    await expect(duplicates).not.toContainText('checksum:');
+    await expect(duplicates).not.toContainText('abc');
     await duplicates.getByRole('button', { name: 'Keep the good one, clear the rest' }).click();
     await expect(duplicates.getByText(`job ${FAILED_ID.slice(0, 8)}: ok`)).toBeVisible();
     await expect(duplicates.getByText('track old-trac: ok')).toBeVisible();
+  });
+
+  test('does not show a lone published song as a duplicate', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/duplicates', (route) =>
+      route.fulfill({ json: { groups: [] } })
+    );
+    await page.goto('/admin');
+    const duplicates = page.locator('section[aria-label="Duplicates"]');
+    await expect(duplicates.getByText('No duplicate jobs or tracks.')).toBeVisible();
+    await expect(duplicates).not.toContainText('Published Song');
+    await expect(duplicates).not.toContainText('Golden Take');
+    await expect(duplicates.getByRole('button', { name: 'Keep the good one, clear the rest' })).toHaveCount(0);
   });
 
   test('offers dismiss failed for a duplicate group with no keeper', async ({ page }) => {
@@ -768,6 +786,8 @@ test.describe('Admin page (/admin)', () => {
     });
     await page.goto('/admin');
     const duplicates = page.locator('section[aria-label="Duplicates"]');
+    await expect(duplicates.getByText('Same YouTube video', { exact: true })).toBeVisible();
+    await expect(duplicates).not.toContainText('youtube:');
     await duplicates.getByRole('button', { name: 'Dismiss failed', exact: true }).click();
     await expect(duplicates.getByText(`job ${FAILED_ID.slice(0, 8)}: ok`)).toBeVisible();
   });

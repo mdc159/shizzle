@@ -725,8 +725,9 @@ unexpected places — the URL-download completion event stores
 `detail.source.source_ref`, node failure text quotes URLs, integrity blobs
 may embed signed URLs — every nested detail and diagnostic string an admin
 route returns is recursively redacted at the response boundary (G6):
-credential-shaped keys (including access-key and API-key fields) are replaced
-and URL-shaped strings scrubbed (defense in depth on top of E2/E3).
+credential-shaped keys (including access-key, API-key and source_ref fields)
+are omitted entirely and URL-shaped strings scrubbed (defense in depth on top
+of E2/E3).
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`
 - Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`, `library/tests/test_admin_api.py::test_populated_history_and_reports_are_redacted`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
 - Violation smell: adding `source_ref` or the assignment `payload` to an admin
@@ -793,12 +794,24 @@ uses the explicit admin-only failed-to-pending transition, an obtainable source,
 a monotonically fresh dispatch attempt, and one locked transaction that expires
 open assignments, clears old execution state and appends `admin_retry_started`.
 Ordinary `advance()` remains unable to reopen failed jobs. An unresolved accepted
-reservation refuses reopening even when no provider id was recorded; the retry
-event is an append-only authority boundary so old reservations/receipts cannot
-satisfy the new attempt. Uncertain RunPod work is cancelled best-effort and the
-outcome recorded; node identities instead expire their assignments and never
-call RunPod cancellation. Failure to confirm an executor stopped refuses the
-retry. A verifying/publishing failure with a selected package first uses
+reservation refuses reopening even when no provider id was recorded, but it is
+resolved by durable evidence in a fixed order: a structured terminal dispatch
+rejection (`provider_accepted: false`, with only the client's exact legacy
+rejection shapes as fallback); otherwise exact-attempt `dispatch.json` and
+`handoff.json` inspection; otherwise an empty prefix older than B10's shared
+reconciliation deadline. Receipt presence, handoff presence and every storage
+error fail closed. A valid handoff can instead enter publication recovery for
+the same reservation and immutable package. Inside the deadline, refusal reports
+when retry becomes eligible; all such operator refusals name Dismiss. The locked
+transaction revalidates the exact reservation event id, and resolution/cancel
+outcome is recorded as `reservation_resolution` on the retry event. The pending
+restart event is an append-only authority boundary so old reservations/receipts
+cannot satisfy the new attempt, including through the repository's filtered SQL
+queries; publication recovery does not open a fresh authority window. Resolved
+RunPod work is cancelled best-effort and the outcome recorded; node identities
+instead expire their assignments and never call RunPod cancellation. Failure to
+confirm other uncertain executors stopped refuses the retry. A
+verifying/publishing failure with a selected package first uses
 completion, package-byte and source-identity-checked publication recovery
 without another separation, and records why if it falls back to the ordinary
 source-checked restart, whose preflight fallback reason is appended even when
@@ -813,7 +826,7 @@ per-attempt source/receipt naming or cross-attempt adoption is introduced.
 Dismissed jobs require restore first. Concurrent retries or an orchestrator
 lease produce one winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
-- Guarded by: `library/tests/test_admin_actions.py`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`
+- Guarded by: `library/tests/test_admin_actions.py` (including `test_terminal_dispatch_rejection_retries_with_real_fresh_key_fence`, `test_empty_attempt_after_deadline_retries_and_cancel_is_best_effort`, `test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix`), `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`, `library/tests/contract/test_admin_postgres.py::test_retry_with_resolved_reservation_racing_orchestrator_is_refused`
 
 ### G8 — dismissal hides history without deleting evidence
 
@@ -849,23 +862,28 @@ job ids are explicit in the admin API.
 **Invariant:** Duplicate groups use input checksum, YouTube video id, then
 case/whitespace/punctuation-folded title+artist, never expose source URLs, and
 select only the newest ready non-deleted track as keeper (none when no such
-track exists). Before any cleanup, the action revalidates keeper existence,
+track exists). A ready job and the track it produced are ONE item: the job
+retains grouping evidence internally while only its track is displayed, and a
+group requires at least two distinct items. Before any cleanup, the action
+revalidates keeper existence,
 readiness, deletion state and exact group membership, then locks keeper and
 alternative rows so a stale/unavailable keeper cannot cause the last live
 alternative to be removed. Group actions dismiss failed jobs and soft-remove
 non-keeper tracks through the same reversible single-item rules; no-keeper
 groups only dismiss failed jobs. No action hard-deletes rows or media.
 - Where: `library/src/shizzle_server/api/admin.py`
-- Guarded by: `library/tests/test_admin_actions.py::test_duplicate_grouping_rules_and_url_redaction`, `library/tests/test_admin_actions.py::test_duplicate_keeper_choice_and_group_actions`, `player/e2e/admin-dashboard.spec.ts`
+- Guarded by: `library/tests/test_admin_actions.py::test_duplicate_grouping_rules_and_url_redaction`, `library/tests/test_admin_actions.py::test_single_ready_job_and_its_track_are_not_a_duplicate_group`, `library/tests/test_admin_actions.py::test_two_ready_jobs_same_file_form_one_two_item_group`, `library/tests/test_admin_actions.py::test_failed_job_plus_different_ready_item_is_a_duplicate_group`, `library/tests/test_admin_actions.py::test_duplicate_keeper_choice_and_group_actions`, `player/e2e/admin-dashboard.spec.ts`
 
 ### G6 — every admin response string crosses one redaction boundary
 
 **Invariant:** Every string in every `/api/admin/*` response MUST pass through
 `AdminResponseRedactionMiddleware` and the single recursive `_redact_value`
 policy, including nested values, dictionary keys, newly added fields and
-framework-generated error responses. URL matching is case-insensitive, and
-keys that sanitize to the same placeholder are disambiguated without leaking
-or dropping entries. Serializers may redact earlier for defense in depth, but
+framework-generated error responses. Credential/source-reference keys are
+omitted rather than returned with placeholders. URL matching is
+case-insensitive, and noncredential keys that sanitize to the same placeholder
+are disambiguated without leaking or dropping entries. Serializers may redact
+earlier for defense in depth, but
 no admin response may depend on per-field redaction for safety.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`, `library/src/shizzle_server/main.py`
 - Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`, `library/tests/test_admin_api.py::test_redaction_covers_url_keys_mixed_case_schemes_and_collisions`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`

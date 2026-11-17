@@ -31,7 +31,7 @@ _URL_SCRUB_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def _redact_value(value: Any) -> Any:
-    """Recursively redact credential-shaped keys and scrub URLs from strings."""
+    """Omit credential/source keys recursively and scrub URLs from strings."""
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, child in value.items():
@@ -46,9 +46,10 @@ def _redact_value(value: Any) -> Any:
                 redacted_key = f"{base_key} ({suffix})"
                 suffix += 1
             if any(fragment in lowered for fragment in _REDACT_KEY_FRAGMENTS):
-                redacted[redacted_key] = _REDACTED
-            else:
-                redacted[redacted_key] = _redact_value(child)
+                # The key name itself is noise (notably source_ref); omit the
+                # whole field rather than returning a placeholder value.
+                continue
+            redacted[redacted_key] = _redact_value(child)
         return redacted
     if isinstance(value, list):
         return [_redact_value(child) for child in value]

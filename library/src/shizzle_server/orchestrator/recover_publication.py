@@ -59,9 +59,13 @@ async def completion_evidence(ctx: StageContext, *, allow_receipt: bool) -> str:
     return "live_provider"
 
 
-async def verify_publication_assets(ctx: StageContext, expected_checksum: str) -> None:
+async def verify_publication_assets(
+    ctx: StageContext, expected_checksum: str, *, package_dir: Path | None = None
+) -> None:
     """Verify the exact package and source bytes required for recovery."""
-    package = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
+    package = await asyncio.to_thread(
+        load_and_verify_package, package_dir or ctx.job_dir / "package"
+    )
     source = ctx.source_path if ctx.source_path.is_file() else ctx.job_dir / "source.mp4"
     source_hash = await asyncio.to_thread(source_digest, source)
     source_info = package.handoff.get("source", {})

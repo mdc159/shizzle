@@ -564,6 +564,56 @@ async def test_accepted_dispatch_id_reads_legacy_base_receipt(settings, monkeypa
     assert await cloud.accepted_dispatch_id(ctx, idempotency_key=None) == "rp-legacy"
 
 
+async def test_dispatch_inspection_distinguishes_mismatched_receipt_from_absence(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    dispatch_key = f"{ctx.job.id.hex}:0"
+    receipt = {
+        # Presence is worker evidence even when identity/provider id is bad.
+        "idempotency_key": "another-attempt",
+        "track_id": str(track_id_for_job(ctx.job.id)),
+        "generation": cloud.GENERATION,
+    }
+
+    class Body:
+        def read(self):
+            return json.dumps(receipt).encode()
+
+    class S3:
+        def get_object(self, **_kwargs):
+            return {"Body": Body()}
+
+        def head_object(self, **_kwargs):
+            return {"ContentLength": 100}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    inspection = await cloud.inspect_dispatch_attempt(
+        ctx, idempotency_key=dispatch_key
+    )
+    assert inspection.receipt_present is True
+    assert inspection.runpod_job_id is None
+    assert inspection.handoff_present is True
+
+
+async def test_dispatch_inspection_storage_error_is_not_empty_evidence(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+
+    class S3:
+        def get_object(self, **_kwargs):
+            raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    with pytest.raises(StageError) as raised:
+        await cloud.inspect_dispatch_attempt(
+            ctx, idempotency_key=f"{ctx.job.id.hex}:0"
+        )
+    assert raised.value.code == ErrorCode.S3_UPLOAD_FAILED
+    assert "storage unavailable" in raised.value.detail
+
+
 # --- WS4: dispatched reconciliation (FakeRunPodClient) ------------------------
 # These exercise handle_dispatched through the real loop: park-on-None, phase
 # recording on change, queue/stall watchdogs, and fresh re-dispatch after a

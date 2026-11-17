@@ -257,6 +257,7 @@ class Orchestrator:
                     error_code=err.code,
                     error_detail=err.detail,
                     worker_id=self.worker_id,
+                    provider_accepted=err.provider_accepted,
                 )
                 return
             if attempts_next >= max_attempts:
@@ -269,6 +270,7 @@ class Orchestrator:
                     error_code=err.code,
                     error_detail=f"{err.detail} (max attempts {max_attempts} exceeded)",
                     worker_id=self.worker_id,
+                    provider_accepted=err.provider_accepted,
                 )
                 return
             delay = min(
