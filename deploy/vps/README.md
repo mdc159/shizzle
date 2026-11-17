@@ -137,8 +137,10 @@ it does not create this application release or configure S3/CloudFront.
 request header. The admin surface is served by a second plain-HTTP Caddy
 listener published only on `127.0.0.1:18081`, which injects
 `X-Shizzle-Admin: $SHIZZLE_ADMIN_PROXY_SECRET` upstream; the value lives in
-`/opt/shizzle/prod/.env` (fail-closed: with it unset every admin route is a
-404 everywhere). The host fronts it with
+`/opt/shizzle/prod/.env`. The API-side check of that header is a separate
+application change and is **not present in this revision**; do not assume the
+proxy secret alone enforces application authorization. When that gate lands,
+an empty secret must keep every admin route fail-closed. The host fronts it with
 `tailscale serve --bg --https=8444 http://127.0.0.1:18081`, so the admin URL
 is `https://shizzle.tailfedd3b.ts.net:8444` — tailnet only, real TLS.
 Undo with `tailscale serve --https=8444 off`.
@@ -183,21 +185,26 @@ Do not disturb the pre-existing `tailscale serve` on 443 (proxy to
 Staging deploys run from the manual
 [deploy-staging workflow](../../.github/workflows/deploy-staging.yml): pick a
 branch or commit; the player is built from that ref in a job with no VPS
-credentials, the digest-pinned image comes from the reused `api-image.yml`,
-and the deploy job ships the player artifact plus `deploy-staging.sh`,
+credentials, the digest-pinned image comes from `api-image.yml` pinned to
+reviewed default-branch commit `b6cf7129606bb0b903daa709ddf7a7dd3b409d46`
+(not from the dispatched or selected feature ref), and the deploy job ships the player artifact plus `deploy-staging.sh`,
 `compose.staging.yml` and `Caddyfile.staging` taken from the **default
 branch** (a change to those deploy assets reaches staging only after it is
 merged). The deploy job runs under the `staging` GitHub environment, which
 holds the SSH secrets and whose **deployment-branch rule must allow the
 default branch only** (required setup — see the checklist below; a required
 reviewer is the optional stronger setting). The transaction on
-the box is pull, validate, migrate, start, health check on
-`127.0.0.1:18080`; the first run bootstraps a fresh directory. Rollback stops
-the failed services while their config is still active, then restores the
-prior files and restarts the previous image (or returns a fresh directory to
-its fresh state); the database is never downgraded, so an old image may meet
-a newer schema on staging — acceptable there, repaired by redeploying the
-newer ref. Honest boundary: the chosen ref's image still runs on this
+the box is pull, validate, migrate, start, then require both a healthy
+`127.0.0.1:18080/api/health` response and a service heartbeat attributable
+to the replacement orchestrator container; the first run bootstraps a fresh
+directory. Rollback stops the failed services while their config is still
+active, restores the prior files, and restarts the previous image only if
+the failed release was activated (or returns a fresh directory to its fresh
+state). A failed restore or restart is nonzero and retains
+`.staging-rollback.tar.gz`; any stale rollback archive or temporary archive
+blocks the next deploy until an operator recovers or explicitly removes it.
+The database is never downgraded, so an old image may meet a newer schema on
+staging — acceptable there, repaired by redeploying the newer ref. Honest boundary: the chosen ref's image still runs on this
 production host, and the staging SSH identity is root here — see
 [AUTOMATION §3b](../../docs/AUTOMATION.md) before assuming isolation.
 
@@ -208,10 +215,10 @@ Data isolation, in one paragraph each:
   `/opt/shizzle/staging/secrets/cloudfront_private_key.pem`). Manifests then
   carry file-scoped signed CloudFront URLs (E5) fetched directly by the
   browser, so staging's Caddyfile has no `/cdn` proxy; without the CloudFront
-  variables the site runs but media will not play. The bucket's CORS
-  configuration must allow the tailnet origins
-  `https://shizzle.tailfedd3b.ts.net:8443` and `:8444` (media elements use
-  `crossOrigin="anonymous"`).
+  variables the site runs but media will not play. The staging bucket's CORS
+  configuration must allow `https://shizzle.tailfedd3b.ts.net:8443` because
+  media elements use `crossOrigin="anonymous"`. Production's separate bucket
+  needs its own `:8444` admin origin; see step 7 below.
 - **Separation.** RunPod separation is real: the dispatch payload names the
   staging bucket (`job_input.bucket`), so the endpoint worker's IAM policy
   must allow read/write on it, or staging needs its own endpoint.
@@ -221,8 +228,9 @@ Data isolation, in one paragraph each:
   `NO_NODE_AVAILABLE`; fixing that takes a node agent repointed at the
   staging origin with staging-only credentials
   ([docs/WORKER-NODES.md](../../docs/WORKER-NODES.md)).
-- **Admin.** Staging's listener injects the same `X-Shizzle-Admin` header, so
-  `/admin` works on staging with the staging `.env`'s secret value.
+- **Admin.** Staging's listener injects the same `X-Shizzle-Admin` header
+  with the staging `.env`'s secret value. The API-side enforcement is pending
+  the separate application change noted above.
 
 ### Bringing staging up (ordered, one-time)
 
@@ -267,24 +275,38 @@ because it is scoped to the distribution ARN):
      }]
    }
    ```
-6. Bucket CORS (exact configuration — both tailnet origins, because media
-   elements use `crossOrigin="anonymous"` and the admin listener at :8444
-   plays media too):
+6. Staging bucket CORS (exact configuration — the staging tailnet origin,
+   because media elements use `crossOrigin="anonymous"`):
    ```json
    [
      {
        "AllowedHeaders": ["*"],
        "AllowedMethods": ["GET", "HEAD"],
        "AllowedOrigins": [
-         "https://shizzle.tailfedd3b.ts.net:8443",
-         "https://shizzle.tailfedd3b.ts.net:8444"
+         "https://shizzle.tailfedd3b.ts.net:8443"
        ],
        "ExposeHeaders": ["ETag", "Content-Range", "Content-Length"],
        "MaxAgeSeconds": 3000
      }
    ]
    ```
-7. If staging will separate uploads, give the RunPod endpoint worker's IAM
+7. Production admin playback uses production manifests and direct production
+   CloudFront URLs, not the staging bucket. Add
+   `https://shizzle.tailfedd3b.ts.net:8444` to the **production bucket's**
+   existing CORS `AllowedOrigins`, preserving its current origins, methods,
+   headers and exposed headers. If the production distribution has a
+   response-headers policy that overrides origin CORS, allow that origin
+   there too. Verify from the admin browser, or with a fresh production
+   signed media URL:
+   ```sh
+   curl -sS -D - -o /dev/null \
+     -H 'Origin: https://shizzle.tailfedd3b.ts.net:8444' \
+     -H 'Range: bytes=0-1023' '<production-signed-url>'
+   ```
+   Require `206` and `Access-Control-Allow-Origin:
+   https://shizzle.tailfedd3b.ts.net:8444`; a `206` without that header still
+   fails browser media playback. Do not record the signed query credentials.
+8. If staging will separate uploads, give the RunPod endpoint worker's IAM
    principal exactly the S3 access the worker code performs on the staging
    bucket (derived from `stemsplit/s3_ops.py` and
    `stemsplit/lossless_handler.py`): it reads the job source (boto3
@@ -335,7 +357,7 @@ because it is scoped to the distribution ARN):
    ```
    (Object permissions stay prefix-scoped; the worker never deletes; handoff
    .json lands last under `IfNoneMatch`, invariant A1.)
-8. Give the staging `.env` an IAM key (a new staging-only user is cleanest)
+9. Give the staging `.env` an IAM key (a new staging-only user is cleanest)
    allowed on the staging bucket only (`s3:*` on
    `arn:aws:s3:::shizzle-staging-media/*` plus `s3:ListBucket`).
 
@@ -349,9 +371,19 @@ cd /opt/shizzle/staging
 cp "$CHECKOUT/deploy/vps/.env.staging.example" .env   # then edit as below
 chmod 600 .env
 # set in .env: POSTGRES_PASSWORD, SHIZZLE_PASSCODE, TOKEN_SIGNING_SECRET,
-#      SHIZZLE_ADMIN_PROXY_SECRET, AWS keys, S3_MEDIA_BUCKET=shizzle-staging-media,
+#      DATABASE_URL (same credentials, URL-encoded userinfo), AWS keys,
+#      SHIZZLE_ADMIN_PROXY_SECRET, S3_MEDIA_BUCKET=shizzle-staging-media,
 #      CLOUDFRONT_DOMAIN=<dXXX from step 4>, CLOUDFRONT_KEY_PAIR_ID=<K… from step 3>,
 #      RUNPOD_* if staging separates (SHIZZLE_NODE_TOKENS stays empty)
+# URL-encode a raw password without putting it in shell history; paste the
+# result into the password component of DATABASE_URL in .env.
+python3 - <<'PY'
+from getpass import getpass
+from urllib.parse import quote
+print(quote(getpass('Raw PostgreSQL password: '), safe=''))
+PY
+# DATABASE_URL shape (use the actual encoded values, not this placeholder):
+# postgresql+asyncpg://shizzle:URL_ENCODED_PASSWORD@postgres:5432/shizzle
 install -m 600 /path/to/cf-staging-private-key.pem secrets/cloudfront_private_key.pem
 tailscale serve --bg --https=8443 http://127.0.0.1:18080
 tailscale serve --bg --https=8444 http://127.0.0.1:18081
@@ -372,12 +404,12 @@ cd /opt/shizzle/prod && docker compose -p shizzle -f compose.prod.yml \
 In GitHub (repository settings → Environments — NOT the production
 environment):
 
-9. Create an environment named `staging` and add environment secrets
+10. Create an environment named `staging` and add environment secrets
    `VPS_STAGING_HOST` (`72.60.173.171`), `VPS_STAGING_SSH_KEY` (root key
    material — the same trust level as the production deploy key, not a lesser
    one), `VPS_STAGING_SSH_HOST_KEY` (same pinned host key:
    `ssh-keyscan -t ed25519 72.60.173.171`).
-10. REQUIRED (the workflow cannot substitute for this): set the `staging`
+11. REQUIRED (the workflow cannot substitute for this): set the `staging`
    environment's deployment-branch rule to allow the **default branch only**.
    A manual dispatch runs the *dispatched ref's copy* of the workflow file,
    so a feature branch could otherwise rewrite the deploy job and still read
@@ -412,7 +444,8 @@ environment):
    A required reviewer on the environment is the optional stronger setting —
    every staging deploy then pauses for a human.
 
-Then dispatch the `deploy-staging` workflow with `master` (or any branch);
+Then dispatch the `deploy-staging` workflow **from `master` (the default
+branch)** and pass the branch or commit to deploy in its **`ref` input**;
 it bootstraps postgres, migrates, starts, health-checks, and staging is
 live at `https://shizzle.tailfedd3b.ts.net:8443`. The player's API base is
 relative, so no application setting names the tailnet origin.

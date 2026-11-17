@@ -53,8 +53,10 @@ update, the new template is preserved pending reconciliation.
 `deploy-staging.yml` is a separate manual-dispatch path (any branch or
 commit) onto the staging stack that lives beside production on the same VPS;
 see §3b. Only the image and the player bundle come from the chosen ref; the
-root-executed deploy assets come from the default branch, and staging deploys
-run under the `staging` GitHub environment, whose deployment-branch rule
+privileged reusable image builder is pinned to reviewed default-branch
+commit `b6cf7129606bb0b903daa709ddf7a7dd3b409d46`, root-executed deploy
+assets come from the default branch, and staging deploys run under the
+`staging` GitHub environment, whose deployment-branch rule
 (default branch only) is a required operator setup step because a dispatch
 runs the dispatched ref's copy of the workflow file (§3b). It never touches
 the production project or the public site.
@@ -184,10 +186,15 @@ two host-side `tailscale serve` frontings (§3c).
 Run workflow) with a branch or commit SHA — this is how a pull-request branch
 gets onto staging before merge. Job split and what it means for trust:
 
-- `resolve` turns the ref into a full SHA; `build-image` reuses `api-image.yml`
-  for the digest-pinned image; `build-player` builds the player **from the
-  chosen ref** in its own job that holds no VPS credentials and uploads the
-  bundle as an artifact.
+- `resolve` turns the ref into a full SHA; `build-image` reuses
+  `mdc159/shizzle/.github/workflows/api-image.yml` pinned to full commit
+  `b6cf7129606bb0b903daa709ddf7a7dd3b409d46` from the reviewed default
+  branch for the digest-pinned image. A local `./.github/workflows/...` call
+  would instead execute the dispatched ref's editable workflow with
+  `packages: write` before the protected `deploy` job. Updating the builder
+  requires an intentional pin bump. `build-player` builds the player **from
+  the chosen ref** in its own job that holds no VPS credentials and uploads
+  the bundle as an artifact.
 - `deploy` checks out the **default branch** — never the chosen ref — and
   ships `deploy-staging.sh`, `compose.staging.yml`, `Caddyfile.staging` and
   the player artifact over SSH (pinned host key), then runs the transaction
@@ -239,13 +246,23 @@ started services and returns the directory to its fresh state.
 
 **Rollback:** staging rollback is deliberately simpler — on any failure the
 script first stops the failed services while the failed release's own config
-is still active, then restores the prior `.env`/compose/Caddyfile/player and
-either restarts the previous image (existing releases) or returns a fresh
-directory to its fresh state (first deploy); a stop failure is surfaced, not
-swallowed. The database is never downgraded. An old image may therefore
+is still active, then restores the prior `.env`/compose/Caddyfile/player. It
+restarts the previous image only after an existing release was activated;
+pre-activation rollback leaves the untouched running services alone, and a
+failed first deploy returns a fresh directory to its fresh state. Stop,
+restore and restart failures are surfaced, not swallowed. A failed restore
+or restart retains `.staging-rollback.tar.gz`, and either that archive or its
+`.tmp` counterpart blocks the next run so no interrupted recovery is
+overwritten. The database is never downgraded. An old image may therefore
 start against a newer schema on staging; that is acceptable there (redeploy
 the newer ref to repair) and is the main way staging rollback differs from
 the production transaction in §3.
+
+The health gate requires the normal green `/api/health` response **and** a
+row in `orchestrator_heartbeats` whose `worker_id` names the replacement
+orchestrator container. The endpoint's latest-row age check alone can stay
+green briefly on the previous instance's heartbeat and is not proof that the
+replacement survived.
 
 **Data and work isolation:**
 
@@ -476,12 +493,15 @@ Current checked-in limits:
   model availability, not successful GPU separation or runtime egress policy.
 - RunPod repoint tests mock the API, so live template/endpoint API behavior
   requires a separate authorized validation.
-- `deploy/vps/tests/test_staging_stack.sh` (staging transaction, compose
-  publication/limits, Caddy admin routing) runs in the `library` job beside
+- `deploy/vps/tests/test_staging_stack.sh` (staging transaction and rollback
+  fault injection, replacement-heartbeat gate, compose publication/limits,
+  reserved-character PostgreSQL authentication, Caddy admin routing) runs in
+  the `library` job beside
   the release-transaction suite. Its stubbed parts run anywhere; its
   Docker-gated parts (compose config JSON, `caddy validate`, live
-  admin-routing probes over stub upstreams) execute only where a Docker
-  daemon answers, which includes the CI runners.
+  admin-routing probes over stub upstreams and a disposable PostgreSQL
+  authentication check) execute only where a Docker daemon answers, which
+  includes the CI runners.
 - The worker-image workflow lacks a concurrency group and uses version-tagged
   Actions, unlike the SHA-pinned application image/deploy workflows.
 - See [INVARIANTS.md](INVARIANTS.md) for explicitly unguarded contracts.
