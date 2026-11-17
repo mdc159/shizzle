@@ -54,8 +54,10 @@ update, the new template is preserved pending reconciliation.
 commit) onto the staging stack that lives beside production on the same VPS;
 see §3b. Only the image and the player bundle come from the chosen ref; the
 root-executed deploy assets come from the default branch, and staging deploys
-run under the `staging` GitHub environment. It never touches the production
-project or the public site.
+run under the `staging` GitHub environment, whose deployment-branch rule
+(default branch only) is a required operator setup step because a dispatch
+runs the dispatched ref's copy of the workflow file (§3b). It never touches
+the production project or the public site.
 
 ## 2. Secrets inventory
 
@@ -76,7 +78,10 @@ under `/opt/shizzle/prod` per invariant E3. That includes
 the tailnet-only admin listeners and the api compares on `/api/admin/*`): it
 lives in `/opt/shizzle/prod/.env` and `/opt/shizzle/staging/.env`, never in a
 workflow, and it is fail-closed — with it unset, every admin route answers
-404 on every listener. The orchestrator defaults to
+404 on every listener. Both Caddyfiles run `persist_config off` so the
+substituted secret is never written to the autosaved config under `/config`;
+if a production `autosave.json` predates that setting, remove it once (see
+the VPS runbook's admin-listener section). The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
 its service-liveness heartbeat keeps /api/health green, and new jobs fail
@@ -194,9 +199,16 @@ gets onto staging before merge. Job split and what it means for trust:
   `deploy-staging.sh`, `compose.staging.yml` or `Caddyfile.staging` reaches
   staging only after it is merged.
 - `deploy` uses the GitHub environment **`staging`**, which holds the
-  `VPS_STAGING_HOST/SSH_KEY/SSH_HOST_KEY` secrets. Configure a required
-  reviewer on that environment if staging deploys should pause for approval;
-  by default they do not. The workflow is not callable from `ci.yml`, and its
+  `VPS_STAGING_HOST/SSH_KEY/SSH_HOST_KEY` secrets. REQUIRED (not optional):
+  that environment's deployment-branch rule must allow the **default branch
+  only** — a manual dispatch executes the *dispatched ref's copy* of the
+  workflow file, so without the rule a feature branch could rewrite the
+  deploy job and still read the environment's secrets. The workflow's own
+  dispatch-ref guard (it fails unless `github.ref` is the default branch)
+  is a convenience that points the operator at the right usage; the
+  environment rule is the control. Exact commands are in the VPS runbook's
+  staging checklist. A required reviewer on the environment is the optional
+  stronger setting. The workflow is not callable from `ci.yml`, and its
   script always refuses `/opt/shizzle/prod` (and anything under it) and the
   `shizzle` project, overridable by nothing.
 
@@ -212,6 +224,13 @@ rootless daemon) so a compromised deploy cannot read `/opt/shizzle/prod/.env`
 or touch production volumes; that is future work, and until it exists a
 malicious chosen ref running as the staging image can reach the host's
 Docker socket-adjacent surface like any container on that box.
+
+**What the workflow itself can never guarantee:** a `workflow_dispatch` run
+executes the dispatched ref's copy of the workflow file, so any check living
+in `deploy-staging.yml` (including the dispatch-ref guard) is editable by
+the very ref being deployed. That is why the `staging` environment's
+deployment-branch rule is a required setup step rather than a suggestion:
+it is the only component the dispatched ref cannot rewrite.
 
 The first run against a fresh directory (`.env` plus `incoming/` assets)
 bootstraps the database — prior `compose.staging.yml`/`Caddyfile`/`player`
@@ -492,7 +511,8 @@ Set up these external dependencies before the first automated deployment:
 7. Bring up staging when wanted: create the staging S3 bucket + CloudFront
    distribution and key group (file-scoped signed URLs, E5), prepare
    `/opt/shizzle/staging` from `deploy/vps/.env.staging.example`, create the
-   `staging` GitHub environment and add the three `VPS_STAGING_*`
+   `staging` GitHub environment, **set its deployment-branch rule to the
+   default branch only** (required — see §3b), add the three `VPS_STAGING_*`
    environment secrets there, run the two `tailscale serve` commands in §3c,
    then dispatch `deploy-staging`. The full ordered checklist lives in
    [deploy/vps/README.md](../deploy/vps/README.md#staging-stack).

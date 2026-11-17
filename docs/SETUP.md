@@ -123,7 +123,9 @@ separation, and no worker nodes (`SHIZZLE_NODE_TOKENS` stays empty, so URL
 jobs cannot complete there until a node agent is repointed). Deploys are the
 manual `deploy-staging` workflow: only the image and the player bundle come
 from the chosen ref — the root-executed deploy assets come from the default
-branch, and the deploy runs under the `staging` GitHub environment.
+branch, and the deploy runs under the `staging` GitHub environment, whose
+deployment-branch rule must allow the default branch only (required; see
+AUTOMATION §3b).
 Bring-up order and undo steps:
 [VPS setup — staging](../deploy/vps/README.md#staging-stack)
 and [Automation §3b–3c](AUTOMATION.md).

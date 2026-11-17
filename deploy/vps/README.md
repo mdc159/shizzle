@@ -143,6 +143,19 @@ listener published only on `127.0.0.1:18081`, which injects
 is `https://shizzle.tailfedd3b.ts.net:8444` — tailnet only, real TLS.
 Undo with `tailscale serve --https=8444 off`.
 
+One-time cleanup after the release that carries `persist_config off`: the
+production `caddy_config` volume may still hold `/config/caddy/autosave.json`
+written by an older Caddyfile — it can contain the substituted admin secret
+in plain text (E3). Check and remove it (safe: both stacks always start Caddy
+with an explicit `--config`):
+
+```sh
+docker exec shizzle-caddy sh -c 'ls -l /config/caddy/autosave.json 2>/dev/null || echo none'
+docker exec shizzle-caddy rm -f /config/caddy/autosave.json
+# staging's volume is new, but the same check applies if it predates the setting:
+docker exec shizzle-staging-caddy sh -c 'ls -l /config/caddy/autosave.json 2>/dev/null || echo none'
+```
+
 Note for integration review: cookies are host-scoped, not port-scoped, so a
 `Secure` cookie set on 8443 is also sent to 8444 on the same tailnet host.
 Both listeners are tailnet-only and the player authenticates primarily with
@@ -175,7 +188,9 @@ and the deploy job ships the player artifact plus `deploy-staging.sh`,
 `compose.staging.yml` and `Caddyfile.staging` taken from the **default
 branch** (a change to those deploy assets reaches staging only after it is
 merged). The deploy job runs under the `staging` GitHub environment, which
-holds the SSH secrets and can carry a required reviewer. The transaction on
+holds the SSH secrets and whose **deployment-branch rule must allow the
+default branch only** (required setup — see the checklist below; a required
+reviewer is the optional stronger setting). The transaction on
 the box is pull, validate, migrate, start, health check on
 `127.0.0.1:18080`; the first run bootstraps a fresh directory. Rollback stops
 the failed services while their config is still active, then restores the
@@ -232,11 +247,10 @@ because it is scoped to the distribution ARN):
    automatically), Restrict Viewer Access = Yes with the trusted key group
    from step 3. Cache configuration: create (or choose) a cache policy that
    includes the headers `Origin`, `Access-Control-Request-Method` and
-   `Access-Control-Request-Headers` in the cache key (a CORS-safe choice;
-   `CachingDisabled` also works for a small staging library); do NOT attach a
-   response-headers policy that overrides CORS — the bucket's own CORS
-   answers. Note the distribution **domain** (`dXXXX.cloudfront.net`) and
-   its **ARN** (`arn:aws:cloudfront::<account-id>:distribution/<id>`).
+   `Access-Control-Request-Headers` in the cache key (CORS-safe); do NOT
+   attach a response-headers policy that overrides CORS — the bucket's own
+   CORS answers. Note the distribution **domain** (`dXXXX.cloudfront.net`)
+   and its **ARN** (`arn:aws:cloudfront::<account-id>:distribution/<id>`).
 5. Apply the OAC bucket policy on the staging bucket (S3 still denies
    CloudFront without it — signed viewer requests would get origin 403s).
    Substitute your bucket name and distribution ARN:
@@ -270,8 +284,38 @@ because it is scoped to the distribution ARN):
      }
    ]
    ```
-7. Ensure the RunPod endpoint worker's IAM policy covers the staging bucket
-   (read `sources/*`, write `tracks/*`) if staging will separate uploads.
+7. If staging will separate uploads, give the RunPod endpoint worker's IAM
+   principal exactly the S3 access the worker code performs on the staging
+   bucket (derived from `stemsplit/s3_ops.py` and
+   `stemsplit/lossless_handler.py`): it reads the job source
+   (`head_object` for the size probe, then `download_file`/GetObject); writes
+   the attempt package under
+   `tracks/<track>/1/separation/attempts/<sha256>/` — conditional receipts
+   and handoff (`put_object` with `IfNoneMatch`/`IfMatch`), stems via
+   multipart `upload_file` (Create/UploadPart/Complete are all authorized by
+   `s3:PutObject`, abort needs its own action), and it re-reads its own
+   receipt/handoff and `head_object`s uploaded stems to verify ETags:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "ReadJobSources",
+         "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:HeadObject"],
+         "Resource": "arn:aws:s3:::shizzle-staging-media/sources/*"
+       },
+       {
+         "Sid": "WriteSeparationAttempts",
+         "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:HeadObject", "s3:PutObject", "s3:AbortMultipartUpload"],
+         "Resource": "arn:aws:s3:::shizzle-staging-media/tracks/*/1/separation/attempts/*"
+       }
+     ]
+   }
+   ```
+   (The worker never deletes; handoff.json lands last under `IfNoneMatch`,
+   invariant A1.)
 8. Give the staging `.env` an IAM key (a new staging-only user is cleanest)
    allowed on the staging bucket only (`s3:*` on
    `arn:aws:s3:::shizzle-staging-media/*` plus `s3:ListBucket`).
@@ -309,12 +353,30 @@ cd /opt/shizzle/prod && docker compose -p shizzle -f compose.prod.yml \
 In GitHub (repository settings → Environments — NOT the production
 environment):
 
-9. Create an environment named `staging` (optionally add a required reviewer
-   if staging deploys should pause for approval — see AUTOMATION.md §3b) and
-   add environment secrets `VPS_STAGING_HOST` (`72.60.173.171`),
-   `VPS_STAGING_SSH_KEY` (root key material — the same trust level as the
-   production deploy key, not a lesser one), `VPS_STAGING_SSH_HOST_KEY`
-   (same pinned host key: `ssh-keyscan -t ed25519 72.60.173.171`).
+9. Create an environment named `staging` and add environment secrets
+   `VPS_STAGING_HOST` (`72.60.173.171`), `VPS_STAGING_SSH_KEY` (root key
+   material — the same trust level as the production deploy key, not a lesser
+   one), `VPS_STAGING_SSH_HOST_KEY` (same pinned host key:
+   `ssh-keyscan -t ed25519 72.60.173.171`).
+10. REQUIRED (the workflow cannot substitute for this): set the `staging`
+   environment's deployment-branch rule to allow the **default branch only**.
+   A manual dispatch runs the *dispatched ref's copy* of the workflow file,
+   so a feature branch could otherwise rewrite the deploy job and still read
+   the environment's secrets; the branch rule is the one control such a run
+   cannot edit. The workflow's dispatch-ref guard (it fails unless dispatched
+   from the default branch) is a convenience that points at correct usage —
+   the rule is the control:
+   ```sh
+   gh api -X PUT repos/mdc159/shizzle/environments/staging/deployment-branch-policy \
+     -F protected_branches=false -F custom_branch_policies=true
+   gh api -X POST repos/mdc159/shizzle/environments/staging/deployment-branch-policies \
+     -f name=master
+   # read it back (expect protected_branches=false, custom_branch_policies=true,
+   # and one policy branch: master):
+   gh api repos/mdc159/shizzle/environments/staging/deployment-branch-policy
+   ```
+   A required reviewer on the environment is the optional stronger setting —
+   every staging deploy then pauses for a human.
 
 Then dispatch the `deploy-staging` workflow with `master` (or any branch);
 it bootstraps postgres, migrates, starts, health-checks, and staging is
