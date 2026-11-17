@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,6 +62,82 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
 _DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
 _DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
 _LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+
+# Advisory-lock key for the RunPod capacity gate (Postgres only): every
+# capacity-gated reservation takes this xact lock, so two orchestrator
+# instances can never both observe the same count and both dispatch into the
+# last slot. The lock dies with the transaction.
+_RUNPOD_CAPACITY_ADVISORY_KEY = 727501
+
+
+def _runpod_work_is_live(job: Job) -> bool:
+    """Whether a confirmed ``runpod_job_id`` still names live provider work.
+
+    A worker the orchestrator marked failed (B12: treated as absent, the
+    retry dispatches fresh) is a closed execution — counting it would make a
+    retry count itself forever. Node executor ids are never RunPod work.
+    """
+    if not job.runpod_job_id or job.runpod_job_id.startswith("node:"):
+        return False
+    return job.worker_phase != "failed"
+
+
+async def _count_runpod_work(session: AsyncSession) -> int:
+    """Jobs currently holding a RunPod reservation or confirmed RunPod job.
+
+    Semantics (G3):
+    - a confirmed RunPod job counts while its worker is not marked failed;
+      a failed worker is a closed execution whose retry dispatches fresh
+      (B12) and must not count itself;
+    - an unresolved reservation counts unless it is provably node-bound —
+      proof is a separation assignment carrying the reservation's
+      idempotency key (assign_separation creates it just before reserving).
+      A retained ``executor = node:<id>`` from an earlier URL download is
+      NOT proof: the download assignment lives under a different key.
+    """
+    res = await session.execute(select(Job).where(Job.status == JobStage.dispatched))
+    jobs = list(res.scalars().all())
+    count = 0
+    for job in jobs:
+        if job.runpod_job_id:
+            if _runpod_work_is_live(job):
+                count += 1
+            continue
+        if job.worker_phase == "failed":
+            continue  # closed execution; the retry reserves under a fresh key
+        events_res = await session.execute(
+            select(JobEvent)
+            .where(
+                JobEvent.job_id == job.id,
+                JobEvent.event.in_(
+                    (
+                        _DISPATCH_STARTED_EVENT,
+                        _DISPATCH_CONFIRMED_EVENT,
+                        _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                    )
+                ),
+            )
+            .order_by(JobEvent.id)
+        )
+        pending = pending_runpod_dispatch(list(events_res.scalars()))
+        if pending is None:
+            continue
+        pending_detail = pending.detail if isinstance(pending.detail, dict) else {}
+        pending_key = pending_detail.get("idempotency_key")
+        if isinstance(pending_key, str):
+            bound = await session.execute(
+                select(NodeAssignment.id)
+                .where(
+                    NodeAssignment.job_id == job.id,
+                    NodeAssignment.kind == NodeAssignmentKind.separate,
+                    NodeAssignment.idempotency_key == pending_key,
+                )
+                .limit(1)
+            )
+            if bound.first() is not None:
+                continue  # node-bound reservation, not RunPod capacity
+        count += 1
+    return count
 
 logger = logging.getLogger(__name__)
 
@@ -302,43 +378,12 @@ class JobRepository:
             return {row[0]: int(row[1]) for row in res.all()}
 
     async def count_runpod_dispatches(self) -> int:
-        """Jobs currently holding a RunPod reservation or confirmed RunPod job.
-
-        Counted at ``dispatched``: a confirmed RunPod job (``runpod_job_id``
-        set and not a ``node:`` executor id), or a job whose dispatch
-        reservation is still unresolved and is not bound to a node
-        (``jobs.executor`` is ``node:<id>`` the moment a node assignment is
-        created). Work already dispatched is never cancelled to make room —
-        this count only gates FRESH dispatches.
-        """
+        """Jobs currently holding a RunPod reservation or confirmed RunPod job
+        (see ``_count_runpod_work`` for the exact semantics). Work already
+        dispatched is never cancelled to make room — this count only gates
+        FRESH dispatches."""
         async with self._sf() as session:
-            res = await session.execute(select(Job).where(Job.status == JobStage.dispatched))
-            jobs = list(res.scalars().all())
-            count = 0
-            for job in jobs:
-                if job.runpod_job_id:
-                    if not job.runpod_job_id.startswith("node:"):
-                        count += 1
-                    continue
-                if job.executor and job.executor.startswith("node:"):
-                    continue
-                events_res = await session.execute(
-                    select(JobEvent)
-                    .where(
-                        JobEvent.job_id == job.id,
-                        JobEvent.event.in_(
-                            (
-                                _DISPATCH_STARTED_EVENT,
-                                _DISPATCH_CONFIRMED_EVENT,
-                                _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
-                            )
-                        ),
-                    )
-                    .order_by(JobEvent.id)
-                )
-                if pending_runpod_dispatch(list(events_res.scalars())) is not None:
-                    count += 1
-            return count
+            return await _count_runpod_work(session)
 
     async def list_events(self, job_id: uuid.UUID) -> list[JobEvent]:
         async with self._sf() as session:
@@ -456,13 +501,26 @@ class JobRepository:
             )
 
     async def reserve_dispatch(
-        self, job_id: uuid.UUID, *, worker_id: str, idempotency_key: str
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: str,
+        idempotency_key: str,
+        max_concurrent: int | None = None,
     ) -> bool:
         """Durably reserve one RunPod submission while the caller owns the lease.
 
         The reservation commits before the external API call. A reclaimed lease
         therefore sees the outstanding reservation and must reconcile it instead
         of submitting another paid worker.
+
+        With ``max_concurrent`` set (the admin RunPod cap, G3) the capacity
+        check is ATOMIC with the reservation: on Postgres every gated
+        reservation first takes the capacity advisory xact lock, so two
+        orchestrator instances racing for the last slot serialize — one
+        reserves, the other sees the committed count and returns False
+        (the caller parks). Node reservations pass no cap: they never consume
+        RunPod capacity.
         """
         now = utcnow()
         async with self._sf() as session, session.begin():
@@ -477,6 +535,17 @@ class JobRepository:
                 or lease_expires_at <= now
             ):
                 raise InvalidTransition(job_id, job.status, JobStage.dispatched)
+            if max_concurrent is not None:
+                bind = session.bind
+                if bind is not None and bind.dialect.name == "postgresql":
+                    await session.execute(
+                        text(
+                            "SELECT pg_advisory_xact_lock(:key)"
+                        ),
+                        {"key": _RUNPOD_CAPACITY_ADVISORY_KEY},
+                    )
+                if await _count_runpod_work(session) >= max_concurrent:
+                    return False
             dispatch_events = (
                 await session.execute(
                     select(JobEvent)

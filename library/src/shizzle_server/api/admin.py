@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -218,7 +219,7 @@ class AdminAssignmentInfo(BaseModel):
             idempotencyKey=a.idempotency_key,
             phase=a.phase,
             heartbeatAt=a.heartbeat_at,
-            detail=dict(a.detail or {}),
+            detail=_redact_value(dict(a.detail or {})),
             createdAt=a.created_at,
             updatedAt=a.updated_at,
         )
@@ -388,6 +389,43 @@ def _event_detail(event: JobEvent) -> dict[str, Any]:
     return event.detail if isinstance(event.detail, dict) else {}
 
 
+# E2/E3 defense in depth for the admin surface: nested job/assignment details
+# and diagnostic strings can echo values the pipeline stored — e.g. a
+# URL-download completion event carries detail.source.source_ref, and node
+# failure text can quote the submitted URL. Nothing credential-shaped or
+# URL-shaped leaves an admin route, whatever the database happens to hold.
+_REDACTED = "[redacted]"
+_REDACT_KEY_FRAGMENTS = (
+    "source_ref",
+    "authorization",
+    "cookie",
+    "password",
+    "passcode",
+    "token",
+    "secret",
+    "url",
+)
+_URL_SCRUB_RE = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def _redact_value(value: Any) -> Any:
+    """Recursively redact credential-shaped keys and scrub URLs from strings."""
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, child in value.items():
+            lowered = str(key).lower()
+            if any(fragment in lowered for fragment in _REDACT_KEY_FRAGMENTS):
+                redacted[key] = _REDACTED
+            else:
+                redacted[key] = _redact_value(child)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_value(child) for child in value]
+    if isinstance(value, str):
+        return _URL_SCRUB_RE.sub(_REDACTED, value)
+    return value
+
+
 def _stage_entry_age(job: Job, events: list[JobEvent]) -> float | None:
     """Seconds since the job entered its current stage (approximate, DB-only)."""
     for event in reversed(events):
@@ -421,7 +459,7 @@ def _last_meaningful_event_age(events: list[JobEvent]) -> float | None:
     return None
 
 
-def _selected_package_prefix(job: Job, events: list[JobEvent]) -> str | None:
+def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str]) -> str | None:
     """The attempt prefix the dispatched->verifying transition selected.
 
     Falls back to the current attempt's prefix (what a fresh dispatch would
@@ -440,18 +478,28 @@ def _selected_package_prefix(job: Job, events: list[JobEvent]) -> str | None:
             if isinstance(prefix, str) and prefix.startswith(f"{base}/attempts/"):
                 return prefix
             break
-    if _reached_stage(job, "dispatched"):
+    if "dispatched" in stages:
         return cloud.attempt_prefix(track_id, f"{job.id.hex}:{job.attempt}")
     return None
 
 
-def _reached_stage(job: Job, stage: str) -> bool:
-    """Rough pipeline order check (both are linear, failure aside)."""
-    order = ["pending", "downloading", "dispatched", "splitting", "verifying", "publishing", "ready"]
-    try:
-        return order.index(job.status.value) >= order.index(stage)
-    except ValueError:
-        return False
+def _stages_reached(job: Job, events: list[JobEvent]) -> set[str]:
+    """Every pipeline stage this job verifiably reached, from durable history.
+
+    Derived from ``stage_completed`` transitions and the ``failed`` event's
+    originating stage — never from the job's current status alone, because a
+    FAILED job must not erase the stages it already passed (a job that died
+    in verifying still transferred its source and dispatched its attempt).
+    """
+    reached = {"pending"}
+    for event in events:
+        detail = _event_detail(event)
+        if event.event == "stage_completed" and isinstance(detail.get("to"), str):
+            reached.add(detail["to"])
+        elif event.event == "failed" and isinstance(detail.get("stage"), str):
+            reached.add(detail["stage"])
+    reached.add(job.status.value)
+    return reached
 
 
 # --- discrepancy evidence (database-only; always runs) --------------------------
@@ -477,9 +525,11 @@ class _Evidence:
             EvidenceItem(
                 stage=stage,
                 name=name,
-                expected=expected,
-                observed=observed,
-                proof=proof,
+                # Diagnostic strings can quote stored URLs (node error text,
+                # S3 error messages): scrubbed like every other admin string.
+                expected=_redact_value(expected),
+                observed=_redact_value(observed),
+                proof=_redact_value(proof),
                 checkedAt=utcnow(),
                 status=status,
             )
@@ -495,9 +545,11 @@ def _build_db_evidence(
     busy_pointers: dict[str, str],  # assignment id (hex) -> node id
     track: Track | None,
     settings: Settings,
+    stages: set[str] | None = None,
 ) -> _Evidence:
     ev = _Evidence()
     now = utcnow()
+    stages = stages if stages is not None else _stages_reached(job, events)
 
     # 1. Ingest: the created event is the start of the trace.
     created = next((e for e in events if e.event == "created"), None)
@@ -521,7 +573,7 @@ def _build_db_evidence(
             confirmed = detail
             break
     current_key = f"{job.id.hex}:{job.attempt}"
-    if _reached_stage(job, "dispatched"):
+    if "dispatched" in stages:
         if confirmed is not None:
             observed = (
                 f"confirmed runpod_job_id={confirmed.get('runpod_job_id')} "
@@ -666,31 +718,74 @@ def _build_db_evidence(
                     flag="node_busy_pointer_stale",
                 )
 
-    # 6. A wait longer than its routing window.
+    # 6. An OUTSTANDING wait longer than its routing window. The alarm
+    # describes a wait that is still holding the job back, not an old event:
+    # anything after the wait that resolved it (an assignment, the RunPod
+    # fallback, a stage transition, a retry's fresh outage window, or the
+    # job's terminal completion) retires it, and a wait from an earlier
+    # attempt never applies to the current one.
     for kind, window in (
         ("download", settings.node_download_wait_seconds),
         ("separate", settings.node_separate_wait_seconds),
     ):
         wait = None
-        for event in reversed(events):
-            detail = _event_detail(event)
-            if event.event == "node_wait" and detail.get("kind") == kind:
-                wait = event
+        wait_index = None
+        for index in range(len(events) - 1, -1, -1):
+            detail = _event_detail(events[index])
+            if events[index].event == "node_wait" and detail.get("kind") == kind:
+                wait = events[index]
+                wait_index = index
                 break
         if wait is None:
             continue
-        waited = _age_seconds(wait.created_at) or 0.0
-        if waited > window:
-            stage = "downloading" if kind == "download" else "dispatched"
-            ev.add(
-                stage,
-                f"{kind}_wait_window",
-                expected=f"the {kind} wait window is {window:.0f}s",
-                observed=f"waiting for {waited:.0f}s (attempt {_event_detail(wait).get('attempt')})",
-                proof="job_events (node_wait)",
-                status="mismatch",
-                flag="wait_over_window",
+        wait_detail = _event_detail(wait)
+        assert wait_index is not None  # set together with wait
+        resolving_after = any(
+            event.event
+            in (
+                "node_assigned",
+                "fallback_runpod",
+                "runpod_dispatch_started",
+                "runpod_dispatch_recovered",
+                "stage_completed",
+                "worker_completed",
+                "track_published",
+                "failed",
+                "retry_scheduled",
+                "node_expired",
+                "node_failed",
             )
+            for event in events[wait_index + 1 :]
+        )
+        same_attempt = wait_detail.get("attempt") in (None, job.attempt)
+        outstanding = (
+            job.status in RUNNABLE_STAGES and not resolving_after and same_attempt
+        )
+        waited = _age_seconds(wait.created_at) or 0.0
+        if outstanding:
+            stage = "downloading" if kind == "download" else "dispatched"
+            if waited > window:
+                ev.add(
+                    stage,
+                    f"{kind}_wait_window",
+                    expected=f"the {kind} wait window is {window:.0f}s",
+                    observed=(
+                        f"still waiting after {waited:.0f}s "
+                        f"(attempt {wait_detail.get('attempt')})"
+                    ),
+                    proof="job_events (node_wait, unresolved)",
+                    status="mismatch",
+                    flag="wait_over_window",
+                )
+            else:
+                ev.add(
+                    stage,
+                    f"{kind}_wait_window",
+                    expected=f"the {kind} wait window is {window:.0f}s",
+                    observed=f"waiting for {waited:.0f}s (within window)",
+                    proof="job_events (node_wait, unresolved)",
+                    status="ok",
+                )
 
     # 7. No meaningful event for the stage's wall-clock age.
     if job.status in RUNNABLE_STAGES:
@@ -858,9 +953,11 @@ async def _add_s3_evidence(
     events: list[JobEvent],
     track: Track | None,
     settings: Settings,
+    stages: set[str] | None = None,
 ) -> None:
+    stages = stages if stages is not None else _stages_reached(job, events)
     track_id = track_id_for_job(job.id)
-    prefix = _selected_package_prefix(job, events)
+    prefix = _selected_package_prefix(job, events, stages)
 
     async def head(key: str) -> _HeadOutcome:
         return await asyncio.to_thread(_head_blocking, settings, key)
@@ -919,14 +1016,11 @@ async def _add_s3_evidence(
             proof=f"S3 HEAD {key}", status=status,
         )
 
-    # Source: expected once the job passed downloading (upload) or completed
-    # the download (URL); retained through ready (research §1).
-    source_applies = _reached_stage(job, "dispatched") or job.status.value in (
-        "verifying",
-        "publishing",
-        "ready",
-        "failed",
-    )
+    # Source: expected once the job reached dispatched — the source transfer
+    # happens during downloading (upload jobs upload to S3; URL jobs are
+    # proven by source.json). A job that FAILED during downloading may never
+    # have transferred its source, so it stays not_yet rather than missing.
+    source_applies = "dispatched" in stages
     outcome = await head(cloud.source_key(track_id))
     note(
         "downloading",
@@ -962,7 +1056,7 @@ async def _add_s3_evidence(
             outcome=outcome,
             missing_is_not_yet=job.status.value == "dispatched",
         )
-        package_applies = _reached_stage(job, "verifying")
+        package_applies = "verifying" in stages
         handoff_key = f"{prefix}/handoff.json"
         outcome = await head(handoff_key)
         note(
@@ -1014,6 +1108,7 @@ async def _add_s3_evidence(
         for name, key, rel in generation_objects:
             outcome = await head(key)
             rec = recorded.get(rel) or {}
+            recorded_sha = rec.get("sha256")
             note(
                 stage,
                 name,
@@ -1022,6 +1117,13 @@ async def _add_s3_evidence(
                 applies=True,
                 outcome=outcome,
                 expected_size=rec.get("size_bytes") if isinstance(rec.get("size_bytes"), int) else None,
+                expected_sha256=(
+                    recorded_sha
+                    if isinstance(recorded_sha, str)
+                    and len(recorded_sha) == 64
+                    and all(c in "0123456789abcdef" for c in recorded_sha)
+                    else None
+                ),
             )
     else:
         ev.add(
@@ -1093,11 +1195,16 @@ async def admin_job_detail(
         raise HTTPException(404, "Job not found")
     events, assignments, busy_pointers, track = await _job_db_state(request, job)
     settings = _settings(request)
-    evidence = _build_db_evidence(job, events, assignments, busy_pointers, track, settings)
+    # Durable transition/failure history decides which stages a (possibly
+    # failed) job actually reached — never the terminal status alone.
+    stages = _stages_reached(job, events)
+    evidence = _build_db_evidence(
+        job, events, assignments, busy_pointers, track, settings, stages
+    )
     if verify == "s3":
-        await _add_s3_evidence(evidence, job, events, track, settings)
+        await _add_s3_evidence(evidence, job, events, track, settings, stages)
 
-    prefix = _selected_package_prefix(job, events)
+    prefix = _selected_package_prefix(job, events, stages)
     return AdminJobDetailResponse(
         job=AdminJobColumns.from_job(job),
         derivedTrackId=str(track_id_for_job(job.id)),
@@ -1108,7 +1215,8 @@ async def admin_job_detail(
         ),
         events=[
             AdminEventInfo(
-                id=event.id, event=event.event, detail=_event_detail(event) or None,
+                id=event.id, event=event.event,
+                detail=_redact_value(_event_detail(event)) or None,
                 createdAt=event.created_at,
             )
             for event in events
@@ -1123,7 +1231,7 @@ async def admin_job_detail(
                 s3Prefix=track.s3_prefix,
                 generation=track.generation,
                 manifestKey=track.manifest_key,
-                integrity=track.integrity,
+                integrity=_redact_value(track.integrity),
                 deletedAt=track.deleted_at,
                 createdAt=track.created_at,
             )

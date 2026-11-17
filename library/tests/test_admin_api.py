@@ -28,6 +28,7 @@ from shizzle_server.db.models import (
     utcnow,
 )
 from shizzle_server.db.repository import NodeRepository, track_id_for_job
+from shizzle_server.errors import ErrorCode
 from shizzle_server.main import create_app
 from shizzle_server.settings import Settings
 
@@ -647,3 +648,503 @@ async def test_verify_s3_yields_unknown_on_s3_errors(admin_client, session_facto
     assert evidence["source"]["observed"] == "S3 check failed: SimulatedError: bucket unreachable"
     assert evidence["handoff"]["status"] == "not_yet"
     _s3_client.cache_clear()
+
+
+# --- redaction of populated history (G2/E2) --------------------------------------
+
+
+async def test_populated_history_and_reports_are_redacted(
+    admin_client, session_factory, node_repo
+):
+    """Real pipelines store source_ref-bearing event details (the URL-download
+    completion event), node failure text quoting URLs, and integrity blobs.
+    None of it may leave an admin route, whatever the database holds."""
+    c, app = admin_client
+    job = await _make_job(
+        app, source_type=SourceType.url, source_ref=CRED_URL, title="History"
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    # Exactly what download_via_node stores on the dispatched transition.
+    await app.state.job_repo.advance(
+        job.id,
+        worker_id="w",
+        from_stage=JobStage.downloading,
+        to_stage=JobStage.dispatched,
+        detail={
+            "source": {
+                "node_id": "mac-mini",
+                "source_ref": "youtube-dQw4w9WgXcQ?token=supersecret-token",
+                "url": CRED_URL,
+            }
+        },
+    )
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True})
+    assignment = await node_repo.create_assignment(
+        job.id, worker_id="w", node_id="mac-mini",
+        kind=NodeAssignmentKind.download, payload={"url": CRED_URL},
+    )
+    assert assignment is not None
+    assert await node_repo.fail(
+        assignment.id,
+        node_id="mac-mini",
+        detail={"code": "DOWNLOAD_FAILED",
+                "detail": f"yt-dlp refused {CRED_URL} (token expired)"},
+    )
+
+    response = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    assert response.status_code == 200
+    text = response.json()
+    body = response.text
+    for fragment in (CRED_FRAGMENT, "supersecret-token", "http://", "https://"):
+        assert fragment not in body, fragment
+    stage = next(
+        e for e in text["events"]
+        if e["event"] == "stage_completed" and e["detail"].get("to") == "dispatched"
+    )
+    assert stage["detail"]["source"] == {
+        "node_id": "mac-mini",
+        "source_ref": "[redacted]",
+        "url": "[redacted]",
+    }
+    reported = text["assignments"][0]["detail"]
+    assert reported["code"] == "DOWNLOAD_FAILED"
+    assert CRED_FRAGMENT not in reported["detail"]
+    assert "[redacted]" in reported["detail"]
+
+
+async def test_track_integrity_is_redacted(admin_client, session_factory):
+    c, app = admin_client
+    job, track_id = await _published_job(app, session_factory)
+    async with session_factory() as session, session.begin():
+        from shizzle_server.db.models import Track
+
+        row = await session.get(Track, track_id)
+        row.integrity = {"publisher": {"objects": []}, "signed_url": CRED_URL}
+    response = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    assert CRED_FRAGMENT not in response.text
+    assert response.json()["track"]["integrity"]["signed_url"] == "[redacted]"
+
+
+# --- failed-job stage/attempt inference (durable transition history) --------------
+
+
+async def _failed_at(app, *, at: JobStage, verifying_detail_for=None):
+    """A job driven to ``at`` through real transitions, then failed there.
+
+    ``verifying_detail_for(job)`` supplies the dispatched->verifying detail
+    (the selected package prefix depends on the job's own id). For
+    ``dispatched`` the attempt is confirmed first, so the failure carries a
+    durable dispatch identity exactly like production.
+    """
+    job = await _make_job(app, title=f"Fail at {at.value}")
+    verifying_detail = verifying_detail_for(job) if verifying_detail_for else None
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+        (JobStage.dispatched, JobStage.verifying),
+        (JobStage.verifying, JobStage.publishing),
+    ):
+        if from_stage == JobStage.dispatched:
+            # Leaving dispatched means the attempt was durably dispatched.
+            key = f"{job.id.hex}:{job.attempt}"
+            assert await app.state.job_repo.reserve_dispatch(
+                job.id, worker_id="w", idempotency_key=key
+            )
+            await app.state.job_repo.confirm_dispatch(
+                job.id, idempotency_key=key, runpod_job_id="rp-1"
+            )
+        await app.state.job_repo.advance(
+            job.id,
+            worker_id="w",
+            from_stage=from_stage,
+            to_stage=to_stage,
+            detail=verifying_detail if to_stage == JobStage.verifying else None,
+        )
+        if to_stage == at:
+            break
+    if at == JobStage.dispatched:
+        key = f"{job.id.hex}:{job.attempt}"
+        assert await app.state.job_repo.reserve_dispatch(
+            job.id, worker_id="w", idempotency_key=key
+        )
+        await app.state.job_repo.confirm_dispatch(
+            job.id, idempotency_key=key, runpod_job_id="rp-1"
+        )
+    await app.state.job_repo.fail_job(
+        job.id, error_code=ErrorCode.PUBLISH_FAILED, error_detail="late failure", worker_id="w"
+    )
+    return job
+
+
+async def test_failed_during_dispatched_keeps_its_stages_and_attempt_key(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job = await _failed_at(app, at=JobStage.dispatched)
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    body = detail.json()
+    # The failed status did not erase the dispatched stage.
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    assert f"{job.id.hex}:0" in identity["observed"]
+    assert body["dispatchAttempt"]["idempotencyKey"] == f"{job.id.hex}:0"
+    assert body["dispatchAttempt"]["attemptPrefix"]
+    assert body["dispatchAttempt"]["runpodJobId"] == "rp-1"
+
+    # The source transfer already happened: the S3 source check APPLIES.
+    from shizzle_server.api import admin as admin_module
+
+    def _present(settings, key):
+        return admin_module._HeadOutcome({"ContentLength": 5}, None)
+
+    monkeypatch.setattr(admin_module, "_head_blocking", _present)
+    verified = await c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS)
+    evidence = {i["name"]: i for i in verified.json()["evidence"]}
+    assert evidence["source"]["status"] == "ok"  # applies, not not_yet
+    assert evidence["handoff"]["status"] == "not_yet"  # verifying never reached
+
+
+async def test_failed_during_verifying_and_publishing_use_the_selected_prefix(
+    admin_client,
+):
+    import hashlib
+
+    c, app = admin_client
+    def selected_prefix(job):
+        return (
+            f"tracks/{track_id_for_job(job.id)}/1/separation/attempts/"
+            f"{hashlib.sha256(f'{job.id.hex}:0'.encode()).hexdigest()}"
+        )
+
+    for at in (JobStage.verifying, JobStage.publishing):
+        job = await _failed_at(
+            app, at=at,
+            verifying_detail_for=lambda j: {"package_prefix": selected_prefix(j)},
+        )
+        detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+        body = detail.json()
+        # The dispatched->verifying transition's prefix is the identity, and
+        # the failed status kept the dispatch evidence reachable.
+        assert body["dispatchAttempt"]["attemptPrefix"] == selected_prefix(job)
+        assert body["dispatchAttempt"]["idempotencyKey"] == f"{job.id.hex}:0"
+        identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+        assert identity["status"] == "ok"
+
+
+async def test_failed_before_source_transfer_stays_not_yet(admin_client):
+    """A job that died during downloading never transferred its source: the
+    storage checks report not_yet, not missing."""
+    c, app = admin_client
+    job = await _make_job(app, title="Early fail")
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.job_repo.fail_job(
+        job.id, error_code=ErrorCode.S3_UPLOAD_FAILED, error_detail="boom", worker_id="w"
+    )
+    detail = await c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS)
+    body = detail.json()
+    evidence = {i["name"]: i for i in body["evidence"]}
+    assert evidence["source"]["status"] == "not_yet"
+    assert evidence["dispatch_identity"]["status"] == "not_yet"
+    assert body["dispatchAttempt"]["attemptPrefix"] is None
+
+
+# --- generation checksums are compared (synthetic HEADs) --------------------------
+
+
+async def test_verify_s3_generation_checksums_flag_equal_size_corruption(
+    admin_client, session_factory, monkeypatch
+):
+    """Equal-sized objects whose stored checksum contradicts the publisher's
+    recorded sha256 are mismatches, not ok."""
+    import base64
+    import hashlib
+
+    c, app = admin_client
+    job, track_id = await _published_job(app, session_factory)
+    prefix = f"tracks/{track_id}/1"
+    good = base64.b64encode(hashlib.sha256(b"good").digest()).decode()
+    bad = base64.b64encode(hashlib.sha256(b"evil").digest()).decode()
+    from shizzle_server.api import admin as admin_module
+
+    heads = {
+        f"{prefix}/manifest.json": {"ContentLength": 10, "ChecksumSHA256": bad},
+        f"{prefix}/video.mp4": {"ContentLength": 20, "ChecksumSHA256": bad},
+        f"{prefix}/stems/vocals.m4a": {"ContentLength": 30, "ChecksumSHA256": bad},
+        f"{prefix}/stems/drums.m4a": {"ContentLength": 30, "ChecksumSHA256": good},
+    }
+    # Record the matching sha256 values in the integrity report (b"good").
+    digest = hashlib.sha256(b"good").hexdigest()
+    async with session_factory() as session, session.begin():
+        from shizzle_server.db.models import Track
+
+        row = await session.get(Track, track_id)
+        row.integrity = {"publisher": {"objects": [
+            {"file": "manifest.json", "size_bytes": 10, "sha256": digest},
+            {"file": "video.mp4", "size_bytes": 20, "sha256": digest},
+            {"file": "stems/vocals.m4a", "size_bytes": 30, "sha256": digest},
+            {"file": "stems/drums.m4a", "size_bytes": 30, "sha256": digest},
+        ]}}
+
+    def _synthetic(settings, key):
+        head = heads.get(key)
+        return admin_module._HeadOutcome(dict(head) if head else None, None)
+
+    monkeypatch.setattr(admin_module, "_head_blocking", _synthetic)
+    response = await c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS)
+    evidence = {i["name"]: i for i in response.json()["evidence"]}
+    assert evidence["manifest"]["status"] == "mismatch"
+    assert "sha256" in evidence["manifest"]["observed"]
+    assert evidence["video"]["status"] == "mismatch"
+    assert evidence["browser_stem_vocals"]["status"] == "mismatch"
+    assert evidence["browser_stem_drums"]["status"] == "ok"
+    assert "sha256 matches" in evidence["browser_stem_drums"]["observed"]
+
+
+# --- wait alarms describe outstanding waits only -----------------------------------
+
+
+async def _backdate(session_factory, model, row_id, *, age_seconds):
+    from shizzle_server.db.models import utcnow
+
+    async with session_factory() as session, session.begin():
+        row = await session.get(model, row_id)
+        row.created_at = utcnow() - timedelta(seconds=age_seconds)
+
+
+async def test_outstanding_wait_over_window_is_flagged(
+    admin_client, session_factory, node_repo
+):
+    c, app = admin_client
+    settings: Settings = app.state.settings
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True})
+    job = await _make_job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    await app.state.job_repo.append_event(
+        job.id, "node_wait", {"kind": "download", "attempt": 0}
+    )
+    wait_event = next(
+        e for e in await app.state.job_repo.list_events(job.id) if e.event == "node_wait"
+    )
+    await _backdate(
+        session_factory, type(wait_event), wait_event.id,
+        age_seconds=settings.node_download_wait_seconds + 3600,
+    )
+    listing = await c.get("/api/admin/jobs", headers=HEADERS)
+    flags = listing.json()["jobs"][0]["flags"]
+    assert "wait_over_window" in flags
+
+
+async def test_resolved_waits_are_not_flagged(admin_client, session_factory, node_repo):
+    """Old node_wait rows that were resolved — by an assignment and stage
+    transition (job now ready), or by an assignment while still waiting —
+    describe history, not an outstanding wait."""
+    c, app = admin_client
+    settings: Settings = app.state.settings
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True})
+
+    # A finished job whose download once waited far beyond the window.
+    done = await _published_job(app, session_factory)
+    await app.state.job_repo.append_event(
+        done[0].id, "node_wait", {"kind": "download", "attempt": 0}
+    )
+    await app.state.job_repo.append_event(
+        done[0].id, "node_assigned", {"kind": "download", "node_id": "mac-mini"}
+    )
+    events = await app.state.job_repo.list_events(done[0].id)
+    wait_event = next(e for e in events if e.event == "node_wait")
+    await _backdate(
+        session_factory, type(wait_event), wait_event.id,
+        age_seconds=settings.node_download_wait_seconds + 86400,
+    )
+
+    # An in-flight job whose wait was resolved by an assignment (re-parked).
+    waiting = await _make_job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    await app.state.job_repo.append_event(
+        waiting.id, "node_wait", {"kind": "download", "attempt": 0}
+    )
+    await app.state.job_repo.append_event(
+        waiting.id, "node_assigned", {"kind": "download", "node_id": "mac-mini"}
+    )
+    events = await app.state.job_repo.list_events(waiting.id)
+    wait_event = next(e for e in events if e.event == "node_wait")
+    await _backdate(
+        session_factory, type(wait_event), wait_event.id,
+        age_seconds=settings.node_download_wait_seconds + 86400,
+    )
+    listing = await c.get("/api/admin/jobs", headers=HEADERS)
+    flags_by_id = {row["jobId"]: row["flags"] for row in listing.json()["jobs"]}
+    assert "wait_over_window" not in flags_by_id[waiting.id.hex]
+    assert "wait_over_window" not in flags_by_id[done[0].id.hex]
+
+
+# --- direct positive/negative coverage for every discrepancy check -----------------
+
+
+async def _flags_for_job(c, job):
+    listing = await c.get("/api/admin/jobs", headers=HEADERS)
+    return next(r["flags"] for r in listing.json()["jobs"] if r["jobId"] == job.id.hex)
+
+
+async def test_busy_pointer_naming_closed_work_is_flagged_and_open_work_is_not(
+    admin_client, session_factory, node_repo
+):
+    c, app = admin_client
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True})
+    # Open assignment held by the node: healthy, no flag.
+    healthy = await _make_job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == healthy.id
+    live = await node_repo.create_assignment(
+        healthy.id, worker_id="w", node_id="mac-mini",
+        kind=NodeAssignmentKind.download, payload={},
+    )
+    assert live is not None
+    assert "node_busy_pointer_stale" not in await _flags_for_job(c, healthy)
+    # Free the node so the leak scenario can take it.
+    assert await node_repo.complete(
+        live.id, node_id="mac-mini", detail={"sha256": "a" * 64}
+    )
+
+    # Closed assignment still named by the busy pointer: flag.
+    leaked = await _make_job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c", title="Leak"
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == leaked.id
+    dead = await node_repo.create_assignment(
+        leaked.id, worker_id="w", node_id="mac-mini",
+        kind=NodeAssignmentKind.download, payload={},
+    )
+    assert dead is not None
+    assert await node_repo.fail(
+        dead.id, node_id="mac-mini", detail={"code": "DOWNLOAD_FAILED", "detail": "x"}
+    )  # terminal report frees the node...
+    async with session_factory() as session, session.begin():
+        from shizzle_server.db.models import Node
+
+        node = await session.get(Node, "mac-mini")
+        node.busy_assignment_id = dead.id  # ...simulate the leaked pointer
+    assert "node_busy_pointer_stale" in await _flags_for_job(c, leaked)
+
+
+async def test_unresolved_reservation_flagged_only_past_the_b10_window(
+    admin_client, session_factory
+):
+    c, app = admin_client
+    settings: Settings = app.state.settings
+    window = (
+        max(settings.runpod_queue_timeout_seconds, settings.runpod_cold_start_seconds)
+        + settings.runpod_worker_stall_seconds
+    )
+    job = await _make_job(app, title="Reserved")
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="w", idempotency_key=f"{job.id.hex}:0"
+    )
+    # Fresh reservation: within the reconciliation window, no flag.
+    assert "unresolved_dispatch_reservation" not in await _flags_for_job(c, job)
+    reservation = next(
+        e
+        for e in await app.state.job_repo.list_events(job.id)
+        if e.event == "runpod_dispatch_started"
+    )
+    await _backdate(
+        session_factory, type(reservation), reservation.id, age_seconds=window + 600
+    )
+    assert "unresolved_dispatch_reservation" in await _flags_for_job(c, job)
+
+
+async def test_stage_stall_flagged_only_when_the_stage_is_silent(
+    admin_client, session_factory
+):
+    c, app = admin_client
+    settings: Settings = app.state.settings
+    silent = await _make_job(app, title="Silent")
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == silent.id
+    await app.state.job_repo.advance(
+        silent.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.job_repo.advance(
+        silent.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    entry = [
+        e
+        for e in await app.state.job_repo.list_events(silent.id)
+        if e.event == "stage_completed" and e.detail.get("to") == "dispatched"
+    ][-1]
+    # The dispatched stage (RunPod executor) goes quiet past
+    # max(queue, cold) + stall + slack with no meaningful event after entry.
+    bound = (
+        max(settings.runpod_queue_timeout_seconds, settings.runpod_cold_start_seconds)
+        + settings.runpod_worker_stall_seconds
+        + 600
+    )
+    await _backdate(session_factory, type(entry), entry.id, age_seconds=bound + 3600)
+    assert "stage_stalled" in await _flags_for_job(c, silent)
+
+    # A busy stage (recent events) is not stalled.
+    busy = await _make_job(app, title="Busy")
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == busy.id
+    await app.state.job_repo.advance(
+        busy.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    assert "stage_stalled" not in await _flags_for_job(c, busy)
+
+
+async def test_healthy_pipeline_rows_carry_no_flags(admin_client, session_factory):
+    """The negative column: a fully published job and a freshly claimed job
+    produce zero discrepancy flags."""
+    c, app = admin_client
+    done, _track = await _published_job(app, session_factory)
+    fresh = await _make_job(app, title="Fresh")
+    await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    listing = await c.get("/api/admin/jobs", headers=HEADERS)
+    flags_by_id = {row["jobId"]: row["flags"] for row in listing.json()["jobs"]}
+    assert flags_by_id[done.id.hex] == []
+    assert flags_by_id[fresh.id.hex] == []
+
+
+async def test_open_assignment_on_runnable_job_is_not_terminal_leak(admin_client, node_repo):
+    """Negative for open_assignment_on_terminal_job: an open assignment on a
+    LIVE job is normal, and neither ack-overdue nor stalled while fresh."""
+    c, app = admin_client
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True})
+    job = await _make_job(
+        app, source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    assignment = await node_repo.create_assignment(
+        job.id, worker_id="w", node_id="mac-mini",
+        kind=NodeAssignmentKind.download, payload={},
+    )
+    assert assignment is not None
+    flags = await _flags_for_job(c, job)
+    assert "open_assignment_on_terminal_job" not in flags
+    assert "assignment_ack_overdue" not in flags
+    assert "assignment_stalled" not in flags
+    assert "assignment_over_cap" not in flags

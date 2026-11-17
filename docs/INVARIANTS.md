@@ -715,9 +715,14 @@ local development and tests only (documented in `docs/SETUP.md`).
 submitted URL), node assignment payloads (which carry it, E6), node tokens,
 S3 credentials, signed URLs or the admin secret itself. The job-detail
 response includes every other job column; assignments are returned without
-their `payload`.
+their `payload`. Because real history can echo credential-bearing values in
+unexpected places — the URL-download completion event stores
+`detail.source.source_ref`, node failure text quotes URLs, integrity blobs
+may embed signed URLs — every nested detail and diagnostic string an admin
+route returns is recursively redacted: credential-shaped keys are replaced
+and URL-shaped strings scrubbed (defense in depth on top of E2/E3).
 - Where: `library/src/shizzle_server/api/admin.py`
-- Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`
+- Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`, `library/tests/test_admin_api.py::test_populated_history_and_reports_are_redacted`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
 - Violation smell: adding `source_ref` or the assignment `payload` to an admin
   schema, or echoing request URLs into evidence text.
 
@@ -728,12 +733,21 @@ holding a RunPod reservation or confirmed RunPod job in `dispatched`, a FRESH
 dispatch MUST park instead of submitting: no attempt is consumed and exactly
 one deduplicated `runpod_wait` event is appended per wait outage (the B6/B9
 pattern). Work already dispatched is never cancelled, expired or otherwise
-disturbed to make room; the count only gates fresh dispatches.
-- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`count_runpod_dispatches`)
-- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`
-- Violation smell: counting node-held work, spending an attempt or appending a
-  `runpod_wait` per poll, or cancelling/polling-failing a dispatched job when
-  the limit is reached.
+disturbed to make room; the count only gates fresh dispatches. The count
+counts LIVE work only — a worker the orchestrator marked failed is a closed
+execution whose retry dispatches fresh (B12) and must not count itself, and a
+retained `executor = node:<id>` from an earlier URL download is not proof
+that a separation reservation is node-bound (only a separation assignment
+carrying the reservation's idempotency key is). The check is ATOMIC with the
+reservation: on Postgres every capacity-gated `reserve_dispatch` takes the
+capacity advisory xact lock before counting, so two orchestrator instances
+racing for the last slot serialize and exactly one reserves.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`reserve_dispatch`, `_count_runpod_work`)
+- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`
+- Violation smell: counting node-held work or closed executions, spending an
+  attempt or appending a `runpod_wait` per poll, cancelling/polling-failing a
+dispatched job when the limit is reached, or checking capacity outside the
+reservation's lock.
 
 ### G4 — download_only never assigns separation to a node
 

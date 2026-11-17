@@ -606,7 +606,10 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             return None
     # Fresh RunPod dispatch: honour the admin concurrency limit. At or over
     # the cap, park without spending an attempt (one deduped runpod_wait per
-    # wait). Work already dispatched is never cancelled or disturbed.
+    # wait). Work already dispatched is never cancelled or disturbed. The
+    # cheap pre-check parks the common case; reserve_dispatch re-checks
+    # ATOMICALLY under the capacity advisory lock so two orchestrator
+    # instances cannot both take the last slot.
     limit = await effective_runpod_max_concurrent(ctx)
     if limit is not None and await ctx.jobs.count_runpod_dispatches() >= limit:
         await _note_runpod_wait(ctx, events)
@@ -616,8 +619,12 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         job.id,
         worker_id=ctx.worker_id,
         idempotency_key=dispatch_key,
+        max_concurrent=limit,
     )
     if not reserved:
+        # An outstanding reservation exists, or the atomic capacity gate
+        # refused this instance: park either way (no attempt, deduped wait).
+        await _note_runpod_wait(ctx, events)
         ctx.park_seconds = ctx.settings.runpod_poll_seconds
         return None
     try:

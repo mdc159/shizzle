@@ -133,3 +133,63 @@ async def test_runtime_settings_table_is_written_and_read_back(release_env, pg_e
         }
     assert rows["node_routing"] == '"download_only"' or rows["node_routing"] == "download_only"
     assert rows["runpod_max_concurrent"] in (2, "2")
+
+
+async def test_concurrent_reservations_one_instance_takes_the_final_slot(
+    pg_engine, data_dir
+):
+    """G3 atomicity on real Postgres: with a cap of 1 and no work dispatched,
+    two orchestrator instances reserving different jobs concurrently must not
+    both win the last slot. The capacity advisory xact lock serializes the
+    check-and-reserve, so exactly one reservation commits."""
+    from shizzle_server.db import create_engine, create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository
+
+    async def make_repo():
+        engine = create_engine(PG_URL)
+        sf = create_session_factory(engine)
+        return JobRepository(sf), engine
+
+    repo_a, engine_a = await make_repo()
+    repo_b, engine_b = await make_repo()
+    try:
+        jobs = []
+        for worker in ("w1", "w2"):
+            job = await repo_a.create_job(
+                source_type=SourceType.upload, source_ref="source.mp4", title=worker
+            )
+            claimed = await repo_a.claim_next(worker_id=worker, lease_seconds=600)
+            assert claimed is not None and claimed.id == job.id
+            await repo_a.advance(
+                job.id,
+                worker_id=worker,
+                from_stage=JobStage.pending,
+                to_stage=JobStage.downloading,
+            )
+            await repo_a.advance(
+                job.id,
+                worker_id=worker,
+                from_stage=JobStage.downloading,
+                to_stage=JobStage.dispatched,
+            )
+            jobs.append(job)
+
+        results = await asyncio.gather(
+            repo_a.reserve_dispatch(
+                jobs[0].id, worker_id="w1",
+                idempotency_key=f"{jobs[0].id.hex}:0", max_concurrent=1,
+            ),
+            repo_b.reserve_dispatch(
+                jobs[1].id, worker_id="w2",
+                idempotency_key=f"{jobs[1].id.hex}:0", max_concurrent=1,
+            ),
+        )
+        assert sorted(results) == [False, True]
+        assert await repo_a.count_runpod_dispatches() == 1
+        # The loser parked (no reservation of its own) — it may retry later.
+        loser_events = await repo_a.list_events(jobs[results.index(False)].id)
+        assert not any(e.event == "runpod_dispatch_started" for e in loser_events)
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()

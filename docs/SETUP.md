@@ -75,7 +75,7 @@ The template is not a live deployment snapshot and contains no usable secrets.
 | `MAX_UPLOAD_BYTES`, `MAX_DURATION_SECONDS` | Upload copy and successful-duration-probe limits |
 | `SHIZZLE_ADMIN_PROXY_SECRET` | Shared secret the Tailscale-only reverse proxy adds as `X-Shizzle-Admin` to open `/api/admin` (and the `/admin` page). Empty (default) = every admin route 404s: fail closed. Never configure it on the public listener. |
 | `SHIZZLE_ADMIN_OPEN` | `1` skips the admin header check — local development and tests only. Never set it in production. |
-| `SHIZZLE_RUNPOD_MAX_CONCURRENT` | Environment default for the admin-settable cap on jobs at RunPod at once (null = no limit, 0 = pause dispatch). The admin page's runtime override wins when set. |
+| `RUNPOD_MAX_CONCURRENT` | Environment default for the admin-settable cap on jobs at RunPod at once (unset = no limit, `0` = pause dispatch). The admin page's runtime override wins when a row is stored. |
 
 Use the bucket's actual AWS region. This repository defaults to `us-east-1`;
 that is independent of a developer's general AWS-region preference. CloudFront

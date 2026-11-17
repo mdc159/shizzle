@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     runpod_cold_start_seconds: float = 1800.0
     # Cap on jobs holding a RunPod reservation or confirmed RunPod job at
     # once (admin page runtime override; null = no limit, 0 = pause dispatch).
+    # Env name: RUNPOD_MAX_CONCURRENT (field has no SHIZZLE_ prefix, like the
+    # other runpod_* knobs).
     runpod_max_concurrent: int | None = None
 
     processing_profile_version: int = 1

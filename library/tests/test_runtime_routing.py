@@ -78,10 +78,27 @@ def _ctx(settings: Settings, runtime: RuntimeSettingsRepository | None) -> Simpl
 
 
 async def test_missing_keys_fall_back_to_environment(settings, runtime_repo):
+    """A missing runtime row falls back to the environment value — including
+    non-null defaults (2) and the pause value (0), which previously vanished."""
     settings.shizzle_node_routing = "only"
-    settings.runpod_max_concurrent = None
+    settings.runpod_max_concurrent = 2
     ctx = _ctx(settings, runtime_repo)
     assert await effective_node_routing(ctx) == "only"
+    assert await effective_runpod_max_concurrent(ctx) == 2
+
+    settings.runpod_max_concurrent = 0  # environment-level pause must hold
+    assert await effective_runpod_max_concurrent(ctx) == 0
+
+    settings.runpod_max_concurrent = None
+    assert await effective_runpod_max_concurrent(ctx) is None
+
+
+async def test_stored_null_cap_means_unlimited_not_env(settings, runtime_repo):
+    """An explicitly stored JSON null is an override (no limit), distinct
+    from a missing row (environment fallback)."""
+    settings.runpod_max_concurrent = 2
+    await runtime_repo.set_value(RUNPOD_MAX_CONCURRENT_KEY, None)
+    ctx = _ctx(settings, runtime_repo)
     assert await effective_runpod_max_concurrent(ctx) is None
 
 
@@ -404,3 +421,101 @@ async def _wait_event_count(job_repo, job_id, name: str, *, exactly: int, timeou
             await asyncio.sleep(0.02)
 
     return await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+# --- count_runpod_dispatches semantics (G3) --------------------------------------
+
+
+async def test_count_excludes_failed_worker_executions(job_repo, session_factory):
+    """B12: a worker the orchestrator marked failed is treated as absent; its
+    retry dispatches fresh under a new key. Counting the dead execution would
+    make the retry count itself forever and park forever under any cap."""
+    from datetime import timedelta
+
+    from shizzle_server.db.models import Job, JobStage, utcnow
+
+    job = await job_repo.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.dispatched
+        row.runpod_job_id = "rp-dead"
+        row.executor = "runpod"
+        row.worker_phase = "failed"
+        row.worker_heartbeat_at = utcnow() - timedelta(hours=1)
+    assert await job_repo.count_runpod_dispatches() == 0
+
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.worker_phase = "working"  # a live execution counts again
+    assert await job_repo.count_runpod_dispatches() == 1
+
+
+async def test_count_includes_unconfirmed_reservations_ignoring_download_executor(
+    job_repo, node_repo, session_factory
+):
+    """A retained executor=node:<id> from an earlier URL download is NOT proof
+    that a later separation reservation is node-bound. Only a separation
+    assignment carrying the reservation's idempotency key is."""
+    from shizzle_server.db.models import Job, JobStage, NodeAssignmentKind
+
+    await node_repo.heartbeat("mac-mini", capabilities={"download": True, "separate": True})
+    job = await job_repo.create_job(
+        source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c"
+    )
+    key = f"{job.id.hex}:0"
+
+    # URL download completed; executor stays node:mac-mini. The separation
+    # reservation under this job's key is RunPod-bound (no assignment).
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.dispatched
+        row.executor = "node:mac-mini"
+    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed.id == job.id
+    assert await job_repo.reserve_dispatch(job.id, worker_id="w", idempotency_key=key)
+    assert await job_repo.count_runpod_dispatches() == 1
+
+    # The same reservation when a SEPARATION assignment carries its key is
+    # node-bound capacity, not RunPod.
+    assignment = await node_repo.create_assignment(
+        job.id, worker_id="w", node_id="mac-mini",
+        kind=NodeAssignmentKind.separate, payload={}, idempotency_key=key,
+    )
+    assert assignment is not None
+    assert await job_repo.count_runpod_dispatches() == 0
+
+
+async def test_reserve_dispatch_enforces_the_cap_in_one_transaction(job_repo, upload_job):
+    """The capacity gate lives inside reserve_dispatch: even without the
+    caller's cheap pre-check, an at-cap reservation is refused atomically."""
+    claimed = await job_repo.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed.id == upload_job.id
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await job_repo.advance(
+        upload_job.id, worker_id="w", from_stage=JobStage.downloading, to_stage=JobStage.dispatched
+    )
+    key = f"{upload_job.id.hex}:0"
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id, worker_id="w", idempotency_key=key, max_concurrent=0
+    )  # cap 0 refuses even the first reservation
+    assert await job_repo.reserve_dispatch(
+        upload_job.id, worker_id="w", idempotency_key=key
+    )  # without a cap the reservation lands
+    assert not await job_repo.reserve_dispatch(
+        upload_job.id, worker_id="w", idempotency_key=key, max_concurrent=1
+    )  # the outstanding reservation blocks, independent of the cap
+
+
+def test_runpod_max_concurrent_env_binding(monkeypatch):
+    """The documented environment knob actually binds (RUNPOD_MAX_CONCURRENT,
+    no SHIZZLE_ prefix — like the other runpod_* knobs)."""
+    from shizzle_server.settings import Settings
+
+    monkeypatch.delenv("RUNPOD_MAX_CONCURRENT", raising=False)
+    assert Settings().runpod_max_concurrent is None
+    monkeypatch.setenv("RUNPOD_MAX_CONCURRENT", "3")
+    assert Settings().runpod_max_concurrent == 3
+    monkeypatch.setenv("RUNPOD_MAX_CONCURRENT", "0")
+    assert Settings().runpod_max_concurrent == 0

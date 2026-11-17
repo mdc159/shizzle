@@ -313,7 +313,7 @@ value falls back to the environment value.
 | Setting | Default | Meaning |
 |---|---|---|
 | `SHIZZLE_NODE_ROUTING` | `prefer` | `prefer` (nodes first, RunPod fallback), `only` (never RunPod), `off` (today's behavior), `download_only` (max performance: nodes download exactly as `prefer`, but separation always dispatches to RunPod at once — no node wait, invariant G4) |
-| `SHIZZLE_RUNPOD_MAX_CONCURRENT` | none | Cap on jobs holding a RunPod reservation or confirmed RunPod job; at/over the cap a fresh dispatch parks without spending an attempt (one `runpod_wait` event per outage) and dispatched work is never disturbed (G3). Runtime-settable from the admin page; `0` pauses RunPod dispatch. |
+| `RUNPOD_MAX_CONCURRENT` | none | Environment default for the cap on jobs holding a RunPod reservation or confirmed RunPod job; at/over the cap a fresh dispatch parks without spending an attempt (one `runpod_wait` event per outage) and dispatched work is never disturbed (G3). Runtime-settable from the admin page (a stored row overrides this); `0` pauses RunPod dispatch. |
 | `NODE_ONLINE_SECONDS` | 45 | heartbeat age that still counts as online |
 | `NODE_STALL_SECONDS` | 300 | assignment heartbeat age that fails the attempt (mirrors `RUNPOD_WORKER_STALL_SECONDS`) |
 | `NODE_SEPARATE_WAIT_SECONDS` | 120 | how long to hold a separation for a node before RunPod |

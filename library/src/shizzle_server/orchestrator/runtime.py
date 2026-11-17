@@ -60,15 +60,16 @@ async def effective_node_routing(ctx: StageContext) -> str:
 async def effective_runpod_max_concurrent(ctx: StageContext) -> int | None:
     """RunPod concurrency cap for this pass: DB override when valid, else env.
 
-    None means no limit; 0 pauses fresh RunPod dispatch. An invalid stored
-    value falls back to the environment default.
+    An ABSENT row falls back to the environment default (including a
+    non-null env default such as 2, or 0 for "pause"); an explicitly stored
+    JSON null means "no limit"; an invalid stored value falls back to env.
     """
     if ctx.runtime is not None:
-        valid, limit = parse_runpod_limit(
-            await _stored(ctx.runtime, RUNPOD_MAX_CONCURRENT_KEY)
-        )
-        if valid:
-            return limit
+        row = await ctx.runtime.get(RUNPOD_MAX_CONCURRENT_KEY)
+        if row is not None:  # stored override present (may be null: no limit)
+            valid, limit = parse_runpod_limit(row.value)
+            if valid:
+                return limit
     return ctx.settings.runpod_max_concurrent
 
 
