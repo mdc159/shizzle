@@ -1799,7 +1799,8 @@ def _provider_rejected_reservation(
         code = detail.get("error_code")
         error_detail = detail.get("error_detail")
         if (
-            not job.runpod_job_id
+            "provider_accepted" not in detail
+            and not job.runpod_job_id
             and isinstance(code, str)
             and isinstance(error_detail, str)
             and detail.get("idempotency_key") in (None, pending_key)

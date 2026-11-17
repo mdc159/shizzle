@@ -758,6 +758,39 @@ async def test_legacy_exact_terminal_rejection_retries_without_structured_field(
     assert retry.detail["reservation_resolution"] == "provider_rejected"
 
 
+async def test_structured_provider_accepted_true_never_uses_legacy_text_fallback(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job, key, _pending = await _fail_with_pending(
+        app,
+        code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        detail="RunPod returned HTTP 409",
+        provider_accepted=True,
+    )
+    checked = []
+
+    async def empty_attempt(_ctx, *, idempotency_key):
+        checked.append(idempotency_key)
+        return cloud.DispatchAttemptInspection(
+            receipt_present=False, runpod_job_id=None, handoff_present=False
+        )
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", empty_attempt)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409, response.text
+    assert "unresolved" in response.json()["detail"]
+    assert "available after" in response.json()["detail"]
+    assert "Dismiss is available" in response.json()["detail"]
+    assert checked == [key]
+    events = await app.state.job_repo.list_events(job.id)
+    failure = next(event for event in events if event.event == "failed")
+    assert failure.detail["provider_accepted"] is True
+    assert failure.detail["idempotency_key"] == key
+    assert not any(event.event == "admin_retry_started" for event in events)
+    assert (await app.state.job_repo.get_job(job.id)).status == JobStage.failed
+
+
 async def test_unconfirmed_reservation_inside_window_reports_retryable_time(
     admin_client,
 ):
