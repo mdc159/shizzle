@@ -244,13 +244,14 @@ bootstraps the database — prior `compose.staging.yml`/`Caddyfile`/`player`
 can be absent on that first run only, and a failed first deploy stops the
 started services and returns the directory to its fresh state.
 
-**Rollback:** staging rollback is deliberately simpler — on any failure the
-script first stops the failed services while the failed release's own config
-is still active, then restores the prior `.env`/compose/Caddyfile/player. It
-restarts the previous image only after an existing release was activated;
-pre-activation rollback leaves the untouched running services alone, and a
-failed first deploy returns a fresh directory to its fresh state. Stop,
-restore and restart failures are surfaced, not swallowed. A failed restore
+**Rollback:** staging rollback is deliberately simpler. A failure before any
+active-file mutation leaves the current files and running bind mounts
+untouched. Once mutation begins, rollback restores the prior
+`.env`/compose/Caddyfile/player and recreates the previous image so Caddy
+rebinds the restored player; a fully activated failed release is first
+stopped while its own config is still active, and a failed first deploy
+returns a fresh directory to its fresh state. Stop, restore and restart
+failures are surfaced, not swallowed. A failed restore
 or restart retains `.staging-rollback.tar.gz`, and either that archive or its
 `.tmp` counterpart blocks the next run so no interrupted recovery is
 overwritten. The database is never downgraded. An old image may therefore

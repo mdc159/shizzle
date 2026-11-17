@@ -393,6 +393,11 @@ if [ "${MV_FAIL:-}" = restore-env ]; then
     *".staging-restore."*"/.env .env") exit 71 ;;
   esac
 fi
+if [ "${MV_FAIL:-}" = activate-caddy ]; then
+  case "$*" in
+    *".staging-stage."*"/Caddyfile Caddyfile") exit 72 ;;
+  esac
+fi
 exec "$REAL_MV" "$@"
 STUB
 chmod +x "$BIN/mktemp" "$BIN/mv"
@@ -760,6 +765,35 @@ fi
 if grep -q 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"; then
   echo "pre-activation rollback unnecessarily recreated the running release" >&2; exit 1
 fi
+if grep -q 'rolling back' "$TMP/config.err"; then
+  echo "untouched preflight failure replaced the active files from a snapshot" >&2; exit 1
+fi
+test ! -e "$STG/.staging-rollback.tar.gz"
+
+# Partial active-file mutation is different from untouched preflight: restore
+# every prior file and recreate the old services so Caddy rebinds the restored
+# player directory, even though ACTIVATED never became 1.
+new_fixture partial-activation-failure
+MV_FAIL=activate-caddy
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
+set +e
+run_deploy 2> "$TMP/partial-activation.err"
+partial_activation_status=$?
+set -e
+MV_FAIL=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$partial_activation_status" -eq 72 || {
+  echo "partial activation failure returned $partial_activation_status, not 72" >&2; exit 1;
+}
+grep -Fq 'rolling back' "$TMP/partial-activation.err"
+grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
+grep -Fx old-compose "$STG/compose.staging.yml"
+grep -Fx old-caddy "$STG/Caddyfile"
+grep -Fx old-player "$STG/player/index.html"
+grep -Fq 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"
+if grep -q 'stop api orchestrator caddy' "$DOCKER_LOG"; then
+  echo "partial file activation stopped services before the failed release was active" >&2; exit 1
+fi
 test ! -e "$STG/.staging-rollback.tar.gz"
 
 # Migration failure: services stopped FIRST (with the failed release still
@@ -1044,7 +1078,7 @@ sed -e 's/^shizzle\.systems, www\.shizzle\.systems {/:18082 {/' \
 NET=shizzle-staging-caddytest
 docker network create "$NET"
 cleanup() {
-  docker rm -f db-url-target stub-api stub-cdn caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
+  docker rm -f staging-config-player-bind db-url-target stub-api stub-cdn caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap 'cleanup; rm -rf -- "$TMP"' EXIT
@@ -1128,5 +1162,38 @@ for c in caddy-prod-behavior caddy-staging-behavior; do
   docker exec "$c" sh -c 'test ! -e /config/caddy/autosave.json' \
     || { echo "autosave.json written in $c despite persist_config off" >&2; exit 1; }
 done
+
+# Verifier regression: an untouched preflight failure must leave the existing
+# player's bind mount attached. Recreating or renaming that directory makes
+# /srv/index.html disappear in the already-running container even when the
+# host copy still says old-player. The same container ID must survive and
+# read the original content after the config failure, with no restart call.
+new_fixture bind-config-failure
+docker run -d --name staging-config-player-bind \
+  -v "$STG/player:/srv:ro" caddy:2 sh -c 'while :; do sleep 300; done' >/dev/null
+bind_id_before=$(docker inspect --format '{{.Id}}' staging-config-player-bind)
+[ "$(docker exec staging-config-player-bind cat /srv/index.html)" = old-player ]
+DOCKER_FAIL=config
+set +e
+run_deploy 2> "$TMP/bind-config.err"
+bind_config_status=$?
+set -e
+DOCKER_FAIL=
+test "$bind_config_status" -eq 30 || {
+  echo "bind-mounted config failure returned $bind_config_status, not 30" >&2; exit 1;
+}
+bind_id_after=$(docker inspect --format '{{.Id}}' staging-config-player-bind)
+[ "$bind_id_after" = "$bind_id_before" ] || {
+  echo "untouched config failure replaced the running player container" >&2; exit 1;
+}
+[ "$(docker exec staging-config-player-bind cat /srv/index.html)" = old-player ] || {
+  echo "running container lost the original player bind mount after config failure" >&2; exit 1;
+}
+if grep -q 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"; then
+  echo "bind-mounted config failure requested an unnecessary restart" >&2; exit 1
+fi
+test ! -e "$STG/.staging-rollback.tar.gz"
+docker rm -f staging-config-player-bind >/dev/null
+printf 'untouched config failure preserved the running player bind mount\n'
 
 printf 'docker-gated staging and admin-routing checks passed\n'

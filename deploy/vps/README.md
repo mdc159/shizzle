@@ -197,10 +197,11 @@ reviewer is the optional stronger setting). The transaction on
 the box is pull, validate, migrate, start, then require both a healthy
 `127.0.0.1:18080/api/health` response and a service heartbeat attributable
 to the replacement orchestrator container; the first run bootstraps a fresh
-directory. Rollback stops the failed services while their config is still
-active, restores the prior files, and restarts the previous image only if
-the failed release was activated (or returns a fresh directory to its fresh
-state). A failed restore or restart is nonzero and retains
+directory. Failures before any active-file mutation leave the current files
+and running bind mounts untouched. Once mutation begins, rollback restores
+the prior files and recreates the previous image so Caddy rebinds the restored
+player; fully activated failures are stopped first, and a failed first deploy
+returns the directory to its fresh state. A failed restore or restart is nonzero and retains
 `.staging-rollback.tar.gz`; any stale rollback archive or temporary archive
 blocks the next deploy until an operator recovers or explicitly removes it.
 The database is never downgraded, so an old image may meet a newer schema on

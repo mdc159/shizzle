@@ -183,6 +183,10 @@ validate_player_archive() {
 
 PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
 ACTIVATED=0
+# Separate file mutation from service activation. Rollback must not replace a
+# running Caddy bind mount's player directory when preflight failed before
+# any active file changed; partial activation, however, must be restored.
+ACTIVE_FILES_MUTATED=0
 if [ -z "$PREV_IMAGE" ]; then
   # Fresh directory: a first deploy. Prior release files must not exist; a
   # half-activated tree without a recorded image identity is refused rather
@@ -221,11 +225,11 @@ done
 STAGE_DIR=$(mktemp -d "$STAGING_DIR/.staging-stage.XXXXXX")
 trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
 
-# Stop the failed services and restore the prior state. Order matters: the
-# stop must run while the FAILED release's config (.env with its image
-# identity) is still in place — restoring the previous .env first (e.g. one
-# without an image on a first deploy) would make Compose interpolation fail
-# before anything could be stopped. A stop failure is surfaced, not swallowed.
+# Restore the prior state after active-file mutation. For a fully activated
+# failed release, stop first while its config (.env with its image identity)
+# is still in place — restoring the previous .env first (e.g. one without an
+# image on a first deploy) would make Compose interpolation fail before
+# anything could be stopped. A stop failure is surfaced, not swallowed.
 restore_previous() {
   echo "Staging deploy failed; rolling back" >&2
   local stop_status=0 restart_status=0 restore_dir f moved_old_player=0
@@ -307,9 +311,10 @@ restore_previous() {
       echo "Rollback could not remove the failed first release; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
       return 1
     fi
-  elif [ "$ACTIVATED" -eq 1 ]; then
-    # Before activation the old services were never stopped or replaced;
-    # recreating them would be an unnecessary second outage.
+  elif [ "$ACTIVE_FILES_MUTATED" -eq 1 ]; then
+    # A partial activation also requires recreation: restoring player by
+    # rename detaches a running Caddy bind mount from its original directory.
+    # Truly untouched preflight failures never call restore_previous.
     compose up -d --force-recreate --no-deps api orchestrator caddy >&2 || restart_status=$?
     if [ "$restart_status" -ne 0 ]; then
       echo "Rollback restored files but could not restart the previous release (status $restart_status); keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
@@ -331,7 +336,16 @@ on_error() {
   status=$?
   trap - ERR
   if [ -f "$ROLLBACK_ARCHIVE" ]; then
-    restore_previous || status=$?
+    if [ "$ACTIVE_FILES_MUTATED" -eq 0 ]; then
+      # Pull/extraction/config preflight did not touch the active release.
+      # Leave its files and bind-mounted directories exactly where they are.
+      if ! rm -f -- "$ROLLBACK_ARCHIVE"; then
+        echo "Preflight failed and the unneeded rollback archive could not be removed: $ROLLBACK_ARCHIVE" >&2
+        status=1
+      fi
+    else
+      restore_previous || status=$?
+    fi
   fi
   exit "$status"
 }
@@ -368,6 +382,9 @@ mv "$STAGE_DIR/dist" "$STAGE_DIR/player"
 SHIZZLE_API_IMAGE=$IMAGE_REF "$DOCKER_BIN" compose \
   --env-file "$STAGE_DIR/.env" -p "$STAGING_PROJECT" -f "$STAGE_DIR/compose.staging.yml" config -q
 
+# From this point onward a failure must restore the prior active files, even
+# if ACTIVATED is still 0 because one of the following mutations failed.
+ACTIVE_FILES_MUTATED=1
 mv -f "$STAGE_DIR/.env" .env
 mv -f "$STAGE_DIR/compose.staging.yml" compose.staging.yml
 mv -f "$STAGE_DIR/Caddyfile" Caddyfile
