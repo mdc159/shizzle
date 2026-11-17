@@ -7,8 +7,10 @@ name: deploy-staging
 #
 # Trust split (see docs/AUTOMATION.md 3b for the honest boundary statement):
 #   - The ONLY things that flow from the chosen ref are the digest-pinned API
-#     image (built by the reused api-image.yml) and the built player bundle.
-#     The player build runs in its own job that holds no VPS credentials.
+#     image (built by api-image.yml pinned to a reviewed default-branch commit)
+#     and the built player bundle. The player build runs in its own job that
+#     holds no VPS credentials. The privileged reusable workflow never comes
+#     from the dispatched ref or the feature ref being built.
 #   - deploy-staging.sh, compose.staging.yml and Caddyfile.staging are shipped
 #     from the repository's DEFAULT BRANCH, so a feature branch cannot make
 #     root execute its own deploy assets. A change to those files reaches
@@ -64,7 +66,10 @@ jobs:
   build-image:
     name: Reuse the digest-pinned API image build
     needs: resolve
-    uses: ./.github/workflows/api-image.yml
+    # A local reusable workflow resolves at the dispatched ref, before the
+    # staging environment can protect the later deploy job. Pin the privileged
+    # builder to the reviewed default-branch commit b6cf712 instead.
+    uses: mdc159/shizzle/.github/workflows/api-image.yml@b6cf7129606bb0b903daa709ddf7a7dd3b409d46
     with:
       target_sha: ${{ needs.resolve.outputs.target_sha }}
     permissions:

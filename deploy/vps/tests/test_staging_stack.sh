@@ -25,6 +25,39 @@ ENV_STAGING_EXAMPLE="$ROOT/deploy/vps/.env.staging.example"
 
 count() { grep -c "$@" || true; }
 
+# Parse route/block boundaries rather than relying on nearby context lines.
+# Every admin-header injection must be inside an /api/* or /ws/* handle; in
+# particular /cdn/* must never receive the secret, even after extra lines or
+# nested reverse_proxy blocks are added.
+assert_admin_header_routes() {
+  awk '
+    FNR == 1 { depth = 0; route = ""; route_depth = -1 }
+    /^[[:space:]]*handle(_path)?[[:space:]]+/ {
+      route = $2
+      route_depth = depth
+    }
+    /header_up[[:space:]]+X-Shizzle-Admin([[:space:]]|$)/ {
+      if (route != "/api/*" && route != "/ws/*") {
+        printf "%s:%d: admin header injected outside /api/* and /ws/* (route %s)\n", FILENAME, FNR, route > "/dev/stderr"
+        bad = 1
+      }
+    }
+    {
+      depth += gsub(/{/, "{")
+      depth -= gsub(/}/, "}")
+      if (route != "" && depth <= route_depth) route = ""
+    }
+    END { exit bad ? 1 : 0 }
+  ' "$@"
+}
+
+assert_no_public_wildcard_ports() {
+  if grep -Eq '^[[:space:]]*-[[:space:]]*"(0\.0\.0\.0:|\[::\]:)?(80:80|443:443(/udp)?)"' "$1"; then
+    echo "production Caddy publishes a public port on every address" >&2
+    return 1
+  fi
+}
+
 WORKFLOW_STAGING="$ROOT/.github/workflows/deploy-staging.yml"
 
 # --- Part 1: structural contracts ---------------------------------------------
@@ -45,25 +78,23 @@ fi
 
 # Admin denial handles exist, answer 404, and precede the /api/* proxy handle
 # (handle blocks are mutually exclusive in file order).
+admin_api_exact_line=$(grep -n 'handle /api/admin {' "$CADDY_PROD" | cut -d: -f1)
 admin_api_line=$(grep -n 'handle /api/admin/\* {' "$CADDY_PROD" | cut -d: -f1)
 admin_page_line=$(grep -n 'handle /admin {' "$CADDY_PROD" | cut -d: -f1)
 admin_tree_line=$(grep -n 'handle /admin/\* {' "$CADDY_PROD" | cut -d: -f1)
 api_proxy_line=$(grep -n $'\thandle /api/\* {' "$CADDY_PROD" | head -1 | cut -d: -f1)
-for line in "$admin_api_line" "$admin_page_line" "$admin_tree_line"; do
+for line in "$admin_api_exact_line" "$admin_api_line" "$admin_page_line" "$admin_tree_line"; do
   [ -n "$line" ] || { echo "missing an admin denial handle in Caddyfile.prod" >&2; exit 1; }
   [ "$line" -lt "$api_proxy_line" ] || { echo "admin denial handle not before /api/* proxy" >&2; exit 1; }
 done
-[ "$(count -F 'respond 404' "$CADDY_PROD")" -ge 3 ]
+[ "$(count -F 'respond 404' "$CADDY_PROD")" -ge 4 ]
 
 # Tailnet-only admin listener exists. Injection is limited to the api and ws
 # upstreams (exactly two per file) so the secret never travels to CloudFront.
 grep -Fq ':18081 {' "$CADDY_PROD"
 [ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_PROD")" = 2 ]
 [ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$CADDY_STAGING")" = 2 ]
-if grep -B2 -F 'header_up X-Shizzle-Admin' "$CADDY_PROD" "$CADDY_STAGING" | grep -q '/cdn'; then
-  echo "admin secret must not be injected on a /cdn upstream" >&2
-  exit 1
-fi
+assert_admin_header_routes "$CADDY_PROD" "$CADDY_STAGING"
 
 # Production compose publishes the admin listener only on host loopback and
 # keeps the public ports; api and caddy see the admin secret.
@@ -72,9 +103,7 @@ grep -Fq '"127.0.0.1:18081:18081"' "$COMPOSE_PROD"
 # Serve owns tailnet:443 and a 0.0.0.0 bind fails after a reboot (2026-11-17).
 grep -Fq '"${SHIZZLE_PUBLIC_IP:-72.60.173.171}:80:80"' "$COMPOSE_PROD"
 grep -Fq '"${SHIZZLE_PUBLIC_IP:-72.60.173.171}:443:443"' "$COMPOSE_PROD"
-if grep -Eq '^[[:space:]]*-[[:space:]]*"(80:80|443:443(/udp)?)"' "$COMPOSE_PROD"; then
-  echo "production Caddy publishes a public port on every address" >&2; exit 1
-fi
+assert_no_public_wildcard_ports "$COMPOSE_PROD"
 [ "$(count -F 'SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}' "$COMPOSE_PROD")" -ge 2 ]
 
 # Staging compose: isolated project name, only 127.0.0.1:18080 published
@@ -108,6 +137,19 @@ if grep -q 'karaoke-pimpshizzle' "$ENV_STAGING_EXAMPLE"; then
   exit 1
 fi
 grep -Fq 'SHIZZLE_NODE_TOKENS=' "$ENV_STAGING_EXAMPLE"
+# Required staging credentials must start empty, not as publicly known valid
+# values. Compose's :? guards reject a copied, unedited template.
+if grep -Eq '^(SHIZZLE_PASSCODE|TOKEN_SIGNING_SECRET|POSTGRES_PASSWORD|DATABASE_URL)=.+' "$ENV_STAGING_EXAMPLE"; then
+  echo "staging env template contains a non-empty credential placeholder" >&2
+  exit 1
+fi
+grep -Fq 'SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:?' "$COMPOSE_STAGING"
+grep -Fq 'TOKEN_SIGNING_SECRET: ${TOKEN_SIGNING_SECRET:?' "$COMPOSE_STAGING"
+[ "$(count -F 'DATABASE_URL: ${DATABASE_URL:?' "$COMPOSE_STAGING")" = 2 ]
+if grep -E '^[[:space:]]+DATABASE_URL:.*POSTGRES_PASSWORD' "$COMPOSE_STAGING"; then
+  echo "staging DATABASE_URL must use explicit URL-encoded credentials, not raw POSTGRES_PASSWORD" >&2
+  exit 1
+fi
 if grep -Eq '^SHIZZLE_NODE_TOKENS=..*$' "$ENV_STAGING_EXAMPLE"; then
   echo "staging env template must keep SHIZZLE_NODE_TOKENS empty" >&2
   exit 1
@@ -121,6 +163,14 @@ fi
 [ "$(count -F 'ref: ${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING")" = 1 ]
 grep -Fq 'ref: ${{ needs.resolve.outputs.target_sha }}' "$WORKFLOW_STAGING"
 grep -Fq 'name: staging' "$WORKFLOW_STAGING"
+# The packages:write reusable workflow must come from a reviewed immutable
+# commit, not the dispatched ref (the staging environment protects only the
+# later deploy job).
+grep -Fq 'uses: mdc159/shizzle/.github/workflows/api-image.yml@b6cf7129606bb0b903daa709ddf7a7dd3b409d46' "$WORKFLOW_STAGING"
+if grep -Fq 'uses: ./.github/workflows/api-image.yml' "$WORKFLOW_STAGING"; then
+  echo "privileged API image workflow resolves from the untrusted dispatched ref" >&2
+  exit 1
+fi
 # N2: the deploy job guards its dispatch ref (convenience check) before it
 # checks out the default branch; the environment rule is the real control.
 grep -Fq 'DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING"
@@ -143,6 +193,8 @@ printf 'structural staging contracts passed\n'
 
 # --- Part 2: deploy-staging.sh transaction with stubbed docker/curl ----------
 
+REAL_MKTEMP=$(command -v mktemp)
+REAL_MV=$(command -v mv)
 TMP=$(mktemp -d)
 BIN="$TMP/bin"
 mkdir -p "$BIN"
@@ -152,6 +204,35 @@ trap 'rm -rf -- "$TMP"' EXIT
 PY_BIN=""
 for py_candidate in python3 python; do
   if "$py_candidate" -c 'import tarfile' >/dev/null 2>&1; then PY_BIN="$py_candidate"; break; fi
+done
+
+# Negative fixtures prove the structural security guards themselves reject
+# regressions that the old two-line context check and unqualified-port regex
+# missed. Keep the total admin-header count at two in the Caddy fixture: one
+# injection is moved from /api/* into a distant line inside /cdn/*.
+BAD_CADDY="$TMP/Caddyfile.bad-cdn-header"
+awk '
+  /header_up[[:space:]]+X-Shizzle-Admin/ && !removed { removed = 1; next }
+  { print }
+  /header_up Host d2488k8kjndpsy\.cloudfront\.net/ && !added {
+    print ""
+    print ""
+    print "\t\t\theader_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}"
+    added = 1
+  }
+' "$CADDY_PROD" > "$BAD_CADDY"
+[ "$(count -F 'header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}' "$BAD_CADDY")" = 2 ]
+if assert_admin_header_routes "$BAD_CADDY" 2>/dev/null; then
+  echo "block-aware admin-header guard accepted a /cdn injection" >&2
+  exit 1
+fi
+for binding in '0.0.0.0:80:80' '[::]:443:443' '0.0.0.0:443:443/udp'; do
+  BAD_PORTS="$TMP/compose.bad-ports"
+  printf '      - "%s"\n' "$binding" > "$BAD_PORTS"
+  if assert_no_public_wildcard_ports "$BAD_PORTS" 2>/dev/null; then
+    echo "wildcard-port guard accepted $binding" >&2
+    exit 1
+  fi
 done
 
 # --- N5 follow-up: the worker policy's ListBucket grant must be usable by
@@ -259,6 +340,7 @@ case " $* " in
     exit 0
     ;;
   *" up -d --force-recreate --no-deps api orchestrator caddy "*)
+    [ "${DOCKER_FAIL:-}" != restart ] || exit 38
     # The rollback restart must run only after the PREVIOUS release's
     # identity is active again.
     if [ -n "${DOCKER_EXPECT_RESTART_IMAGE:-}" ]; then
@@ -270,10 +352,50 @@ case " $* " in
     fi
     exit 0
     ;;
+  *" ps -q orchestrator "*)
+    printf '%s\n' "${DOCKER_ORCHESTRATOR_CONTAINER_ID:-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}"
+    exit 0
+    ;;
+  *" exec -T postgres "*)
+    # The query must be tied to THIS replacement container, not MAX(updated_at).
+    case "$*" in
+      *"worker_id LIKE 'cccccccccccc-%'"*) ;;
+      *) printf 'heartbeat query did not target the replacement container\n' >> "$DOCKER_LOG"; exit 39 ;;
+    esac
+    if [ "${DOCKER_HEARTBEAT_MODE:-new}" = old-only ]; then
+      printf 'f\n'
+    else
+      printf 't\n'
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 STUB
 chmod +x "$BIN/docker"
+
+# Fault injection for rollback operations that run with errexit suppressed by
+# bash's conditional-function semantics. Outside the selected failure each
+# wrapper delegates to the real host tool.
+cat > "$BIN/mktemp" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${MKTEMP_FAIL_PATTERN:-}" ] && [[ "$*" == *"$MKTEMP_FAIL_PATTERN"* ]]; then
+  exit 70
+fi
+exec "$REAL_MKTEMP" "$@"
+STUB
+cat > "$BIN/mv" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${MV_FAIL:-}" = restore-env ]; then
+  case "$*" in
+    *".staging-restore."*"/.env .env") exit 71 ;;
+  esac
+fi
+exec "$REAL_MV" "$@"
+STUB
+chmod +x "$BIN/mktemp" "$BIN/mv"
 
 cat > "$BIN/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -334,6 +456,9 @@ run_deploy() {
   SHIZZLE_STAGING_HEALTH_ATTEMPTS=2 \
   SHIZZLE_STAGING_HEALTH_SLEEP=0 \
   DOCKER_LOG="$DOCKER_LOG" DOCKER_FAIL="${DOCKER_FAIL:-}" CURL_MODE="${CURL_MODE:-ok}" \
+  REAL_MKTEMP="$REAL_MKTEMP" REAL_MV="$REAL_MV" \
+  MKTEMP_FAIL_PATTERN="${MKTEMP_FAIL_PATTERN:-}" MV_FAIL="${MV_FAIL:-}" \
+  DOCKER_HEARTBEAT_MODE="${DOCKER_HEARTBEAT_MODE:-new}" \
   DOCKER_EXPECT_STOP_IMAGE="${DOCKER_EXPECT_STOP_IMAGE:-}" \
   DOCKER_EXPECT_RESTART_IMAGE="${DOCKER_EXPECT_RESTART_IMAGE:-}" \
     bash "$DEPLOY" "$IMAGE" "$TARGET"
@@ -427,6 +552,26 @@ if run_deploy 2> "$TMP/stale.err"; then
   echo "deploy-staging accepted a stale release tree on a first deploy" >&2; exit 1
 fi
 grep -Fq 'Refusing first deployment with stale release file present: compose.staging.yml' "$TMP/stale.err"
+
+# A crashed deploy's rollback snapshot is the only reliable prior-release
+# copy. Refuse to overwrite it or to snapshot the partially activated tree.
+new_fixture stale-rollback
+printf 'only-prior-release-snapshot\n' > "$STG/.staging-rollback.tar.gz"
+if run_deploy 2> "$TMP/stale-rollback.err"; then
+  echo "deploy-staging overwrote a stale rollback archive" >&2; exit 1
+fi
+grep -Fq 'Refusing staging deploy while rollback artifact exists' "$TMP/stale-rollback.err"
+grep -Fx 'only-prior-release-snapshot' "$STG/.staging-rollback.tar.gz"
+grep -Fx old-compose "$STG/compose.staging.yml"
+[ ! -s "$STG/docker.log" ] || { echo "docker ran despite a stale rollback archive" >&2; exit 1; }
+
+# The incomplete temporary snapshot is also an unclosed transaction marker.
+new_fixture stale-rollback-tmp
+printf 'incomplete-snapshot\n' > "$STG/.staging-rollback.tar.gz.tmp"
+if run_deploy 2> "$TMP/stale-rollback-tmp.err"; then
+  echo "deploy-staging removed an incomplete prior rollback snapshot" >&2; exit 1
+fi
+grep -Fx 'incomplete-snapshot' "$STG/.staging-rollback.tar.gz.tmp"
 
 # --- N1: crafted player archives must be refused with the staging directory
 # left byte-identical. Archives are crafted with python3's tarfile so member
@@ -550,6 +695,8 @@ grep -Fq 'config -q' "$DOCKER_LOG"
 grep -Fq 'up -d --wait postgres' "$DOCKER_LOG"
 grep -Fq 'alembic upgrade head' "$DOCKER_LOG"
 grep -Fq 'up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy' "$DOCKER_LOG"
+grep -Fq 'ps -q orchestrator' "$DOCKER_LOG"
+grep -Fq "worker_id LIKE 'cccccccccccc-%'" "$DOCKER_LOG"
 # Every compose invocation must target the staging project, never production.
 if grep '^compose ' "$DOCKER_LOG" | grep -v ' -p shizzle-staging ' | grep -q .; then
   echo "deploy-staging issued a compose command outside the staging project" >&2; exit 1
@@ -610,6 +757,9 @@ grep -Fx old-player "$STG/player/index.html"
 if grep -q 'stop api orchestrator caddy' "$DOCKER_LOG"; then
   echo "config failure stopped services it never started" >&2; exit 1
 fi
+if grep -q 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG"; then
+  echo "pre-activation rollback unnecessarily recreated the running release" >&2; exit 1
+fi
 test ! -e "$STG/.staging-rollback.tar.gz"
 
 # Migration failure: services stopped FIRST (with the failed release still
@@ -643,6 +793,29 @@ restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy'
 }
 test ! -e "$STG/.staging-rollback.tar.gz"
 
+# A green API health response can be caused by the previous orchestrator's
+# still-recent heartbeat. If the replacement never writes its own row, the
+# deploy must fail and roll back instead of deleting the recovery snapshot.
+new_fixture old-heartbeat-only
+DOCKER_HEARTBEAT_MODE=old-only
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
+set +e
+run_deploy 2> "$TMP/old-heartbeat.err"
+old_heartbeat_status=$?
+set -e
+DOCKER_HEARTBEAT_MODE=new
+DOCKER_EXPECT_STOP_IMAGE=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$old_heartbeat_status" -eq 1 || {
+  echo "old-heartbeat-only deploy returned $old_heartbeat_status, not 1" >&2; exit 1;
+}
+grep -Fq 'has not written its service heartbeat' "$TMP/old-heartbeat.err"
+grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
+grep -Fx old-compose "$STG/compose.staging.yml"
+grep -Fx old-player "$STG/player/index.html"
+test ! -e "$STG/.staging-rollback.tar.gz"
+
 # Health-check failure on an existing release: same stop-before-restore
 # order with identity enforcement, prior image identity and files restored.
 new_fixture health-failure
@@ -669,6 +842,63 @@ restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy'
   echo "rollback order wrong on health failure" >&2; exit 1
 }
 test ! -e "$STG/.staging-rollback.tar.gz"
+
+# Restore-directory creation failure must not be converted into rollback
+# success: the failed release stays in place and the snapshot is retained.
+new_fixture rollback-mktemp-failure
+CURL_MODE=bad
+MKTEMP_FAIL_PATTERN=.staging-restore.
+set +e
+run_deploy 2> "$TMP/rollback-mktemp.err"
+rollback_mktemp_status=$?
+set -e
+CURL_MODE=ok
+MKTEMP_FAIL_PATTERN=
+test "$rollback_mktemp_status" -ne 0
+grep -Fq 'Rollback could not create a restore directory' "$TMP/rollback-mktemp.err"
+test -f "$STG/.staging-rollback.tar.gz"
+grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$STG/.env"
+grep -Fx new-player "$STG/player/index.html"
+
+# A failed restore mv likewise fails the deployment and preserves the only
+# prior-release archive. The old implementation continued and deleted it.
+new_fixture rollback-mv-failure
+CURL_MODE=bad
+MV_FAIL=restore-env
+set +e
+run_deploy 2> "$TMP/rollback-mv.err"
+rollback_mv_status=$?
+set -e
+CURL_MODE=ok
+MV_FAIL=
+test "$rollback_mv_status" -ne 0
+grep -Fq 'Rollback failed to restore .env' "$TMP/rollback-mv.err"
+test -f "$STG/.staging-rollback.tar.gz"
+grep -Fx "SHIZZLE_API_IMAGE=$IMAGE" "$STG/.env"
+
+# Restart failure is reported after files are restored, and retains the
+# snapshot so a later run cannot overwrite the unclosed recovery state.
+new_fixture rollback-restart-failure
+CURL_MODE=bad
+DOCKER_FAIL=restart
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
+set +e
+run_deploy 2> "$TMP/rollback-restart.err"
+rollback_restart_status=$?
+set -e
+CURL_MODE=ok
+DOCKER_FAIL=
+DOCKER_EXPECT_STOP_IMAGE=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$rollback_restart_status" -eq 38 || {
+  echo "rollback restart failure returned $rollback_restart_status, not 38" >&2; exit 1;
+}
+grep -Fq 'could not restart the previous release (status 38)' "$TMP/rollback-restart.err"
+grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
+grep -Fx old-compose "$STG/compose.staging.yml"
+grep -Fx old-player "$STG/player/index.html"
+test -f "$STG/.staging-rollback.tar.gz"
 
 # A failing stop during rollback is surfaced (exit status and message), with
 # the prior files still restored; the identity check ran first, so the stop
@@ -705,8 +935,16 @@ fi
 # 127.0.0.1:18080, with CPU/memory limits on every service.
 CFG=$(mktemp -d)
 cp "$COMPOSE_STAGING" "$CFG/"
+# Reserved characters remain raw for Postgres and percent-encoded in the
+# explicit application DSN. This is the p@ss:word/#% regression case.
+RAW_DB_PASSWORD='p@ss:word/#%'
+ENCODED_DB_PASSWORD='p%40ss%3Aword%2F%23%25'
+DATABASE_URL="postgresql+asyncpg://shizzle:$ENCODED_DB_PASSWORD@postgres:5432/shizzle"
 cat > "$CFG/.env" <<EOF
-POSTGRES_PASSWORD=test-password
+POSTGRES_PASSWORD=$RAW_DB_PASSWORD
+DATABASE_URL=$DATABASE_URL
+SHIZZLE_PASSCODE=test-passcode
+TOKEN_SIGNING_SECRET=test-token-signing-secret
 SHIZZLE_API_IMAGE=$IMAGE
 SHIZZLE_ADMIN_PROXY_SECRET=test-admin-secret
 EOF
@@ -716,6 +954,16 @@ EOF
   docker compose -p shizzle-staging --env-file ./.env -f compose.staging.yml config --format json \
     > "$CFG/staging-config.json"
 )
+# Every deliberately empty template credential has a Compose :? guard: a
+# copied example cannot deploy with public placeholder or disabled auth.
+for required_var in POSTGRES_PASSWORD DATABASE_URL SHIZZLE_PASSCODE TOKEN_SIGNING_SECRET; do
+  cp "$CFG/.env" "$CFG/bad.env"
+  sed -i "s|^$required_var=.*|$required_var=|" "$CFG/bad.env"
+  if (cd "$CFG" && docker compose -p shizzle-staging --env-file ./bad.env -f compose.staging.yml config -q) >/dev/null 2>&1; then
+    echo "staging compose accepted an empty $required_var" >&2
+    exit 1
+  fi
+done
 python3 - "$CFG/staging-config.json" <<'PY'
 import json, sys
 
@@ -729,11 +977,18 @@ for name, svc in cfg["services"].items():
         )
     limits = ((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}
     assert limits.get("cpus") and limits.get("memory"), f"{name} lacks resource limits"
+    env = svc.get("environment") or {}
     if name in ("api", "caddy"):
-        env = svc.get("environment") or {}
         assert env.get("SHIZZLE_ADMIN_PROXY_SECRET") == "test-admin-secret", name
+    if name in ("api", "orchestrator"):
+        assert env.get("DATABASE_URL") == (
+            "postgresql+asyncpg://shizzle:p%40ss%3Aword%2F%23%25@postgres:5432/shizzle"
+        ), (name, env.get("DATABASE_URL"))
+    if name == "postgres":
+        assert env.get("POSTGRES_PASSWORD") == "p@ss:word/#%", env.get("POSTGRES_PASSWORD")
 assert published == [("caddy", "127.0.0.1", "18080", "80")], published
-print("staging compose config: only 127.0.0.1:18080 published, limits on every service")
+print("staging compose config: only 127.0.0.1:18080 published, limits on every service; "
+      "reserved-character DB password stays raw for Postgres and encoded for applications")
 PY
 rm -rf "$CFG"
 
@@ -789,10 +1044,34 @@ sed -e 's/^shizzle\.systems, www\.shizzle\.systems {/:18082 {/' \
 NET=shizzle-staging-caddytest
 docker network create "$NET"
 cleanup() {
-  docker rm -f stub-api stub-cdn caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
+  docker rm -f db-url-target stub-api stub-cdn caddy-prod-behavior caddy-staging-behavior >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap 'cleanup; rm -rf -- "$TMP"' EXIT
+
+# Live credential regression: authenticate to a real PostgreSQL server with
+# the exact percent-encoded DSN under test (libpq and asyncpg apply the same
+# URI userinfo decoding). No raw-password URI and no PGPASSWORD fallback.
+docker run -d --name db-url-target --network "$NET" --network-alias postgres \
+  -e POSTGRES_USER=shizzle -e "POSTGRES_PASSWORD=$RAW_DB_PASSWORD" -e POSTGRES_DB=shizzle \
+  postgres:16-alpine >/dev/null
+db_ready=0
+for attempt in $(seq 1 30); do
+  if docker exec db-url-target pg_isready -U shizzle -d shizzle >/dev/null 2>&1; then
+    db_ready=1
+    break
+  fi
+  sleep 1
+done
+[ "$db_ready" -eq 1 ] || { echo "database URL test Postgres did not become ready" >&2; exit 1; }
+PSQL_DATABASE_URL=${DATABASE_URL/postgresql+asyncpg/postgresql}
+db_identity=$(docker run --rm --network "$NET" -e TEST_DATABASE_URL="$PSQL_DATABASE_URL" \
+  postgres:16-alpine sh -c 'psql "$TEST_DATABASE_URL" -Atqc "SELECT current_user, current_database();"')
+[ "$db_identity" = 'shizzle|shizzle' ] || {
+  echo "encoded DATABASE_URL authenticated as unexpected identity: $db_identity" >&2; exit 1;
+}
+docker rm -f db-url-target >/dev/null
+printf 'encoded DATABASE_URL authenticated to PostgreSQL with reserved-character raw password\n'
 
 docker run -d --name stub-api --network "$NET" --network-alias api \
   -v "$STUB_API":/etc/caddy/Caddyfile:ro caddy:2 >/dev/null
@@ -816,6 +1095,7 @@ done
 # Public site: admin paths 404 at the edge; the header never reaches any
 # upstream — not /api, not /ws, not the /cdn proxy — even when it carries the
 # exact secret. (208/209 from a stub would mean the header leaked through.)
+[ "$(code http://127.0.0.1:18082/api/admin)" = 404 ]
 [ "$(code http://127.0.0.1:18082/api/admin/x)" = 404 ]
 [ "$(code http://127.0.0.1:18082/admin)" = 404 ]
 [ "$(code http://127.0.0.1:18082/admin/sub/page)" = 404 ]

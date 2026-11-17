@@ -39,6 +39,9 @@ shizzle.systems, www.shizzle.systems {
 	# Admin API and admin page are not public. These handles precede the
 	# /api/* and static handles on purpose: handle blocks are mutually
 	# exclusive in file order.
+	handle /api/admin {
+		respond 404
+	}
 	handle /api/admin/* {
 		respond 404
 	}

@@ -209,6 +209,15 @@ fi
 validate_player_archive incoming/shizzle-player.tar.gz
 
 ROLLBACK_ARCHIVE=.staging-rollback.tar.gz
+# A prior crash or failed rollback leaves the only trustworthy snapshot of
+# the previous release. Never overwrite it (or an incomplete new snapshot)
+# and mistake the partially activated tree for a clean prior release.
+for stale_artifact in "$ROLLBACK_ARCHIVE" "$ROLLBACK_ARCHIVE.tmp"; do
+  if [ -e "$stale_artifact" ] || [ -L "$stale_artifact" ]; then
+    echo "Refusing staging deploy while rollback artifact exists: $stale_artifact; recover or explicitly remove it first" >&2
+    exit 1
+  fi
+done
 STAGE_DIR=$(mktemp -d "$STAGING_DIR/.staging-stage.XXXXXX")
 trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
 
@@ -219,11 +228,14 @@ trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
 # before anything could be stopped. A stop failure is surfaced, not swallowed.
 restore_previous() {
   echo "Staging deploy failed; rolling back" >&2
-  local stop_status=0 restore_dir f
+  local stop_status=0 restart_status=0 restore_dir f moved_old_player=0
   if [ "$ACTIVATED" -eq 1 ]; then
     compose stop api orchestrator caddy >&2 || stop_status=$?
   fi
-  restore_dir=$(mktemp -d "$STAGING_DIR/.staging-restore.XXXXXX") || return 0
+  restore_dir=$(mktemp -d "$STAGING_DIR/.staging-restore.XXXXXX") || {
+    echo "Rollback could not create a restore directory; keeping $ROLLBACK_ARCHIVE and leaving the failed release in place for manual recovery" >&2
+    return 1
+  }
   # The rollback archive is unpacked with the same refusal as the player
   # archive: if the snapshot fails validation, do not restore it — surface
   # the failure and leave manual recovery.
@@ -244,28 +256,70 @@ restore_previous() {
     rm -rf -- "$restore_dir"
     return 1
   fi
+  # This function runs in an || list from on_error, so bash suppresses
+  # errexit throughout it. Check every mutation explicitly: an ignored mv/rm
+  # must never delete the only rollback archive or report a false success.
   for f in .env compose.staging.yml Caddyfile; do
     if [ -e "$restore_dir/$f" ]; then
-      mv -f -- "$restore_dir/$f" "$f"
+      if ! mv -f -- "$restore_dir/$f" "$f"; then
+        echo "Rollback failed to restore $f; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+        rm -rf -- "$restore_dir"
+        return 1
+      fi
     fi
   done
   if [ -e "$restore_dir/player" ]; then
     if [ -e player ] || [ -L player ]; then
-      rm -rf -- player.failed
-      mv -- player player.failed
+      if ! rm -rf -- player.failed; then
+        echo "Rollback could not clear player.failed; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+        rm -rf -- "$restore_dir"
+        return 1
+      fi
+      if ! mv -- player player.failed; then
+        echo "Rollback could not set aside the failed player; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+        rm -rf -- "$restore_dir"
+        return 1
+      fi
+      moved_old_player=1
     fi
-    mv -- "$restore_dir/player" player
-    rm -rf -- player.failed
+    if ! mv -- "$restore_dir/player" player; then
+      echo "Rollback failed to restore player; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+      if [ "$moved_old_player" -eq 1 ]; then
+        mv -- player.failed player || echo "Rollback also could not move player.failed back; manual recovery required" >&2
+      fi
+      rm -rf -- "$restore_dir"
+      return 1
+    fi
+    if ! rm -rf -- player.failed; then
+      echo "Rollback restored player but could not remove player.failed; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+      rm -rf -- "$restore_dir"
+      return 1
+    fi
   fi
-  rm -rf -- "$restore_dir"
+  if ! rm -rf -- "$restore_dir"; then
+    echo "Rollback could not remove its restore directory; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+    return 1
+  fi
   if [ -z "$PREV_IMAGE" ]; then
     # Failed first deploy: return the directory to its fresh state so the
     # next run is a first deploy again (no image identity, no release files).
-    rm -rf -- compose.staging.yml Caddyfile player
-  else
-    compose up -d --force-recreate --no-deps api orchestrator caddy >&2 || true
+    if ! rm -rf -- compose.staging.yml Caddyfile player; then
+      echo "Rollback could not remove the failed first release; keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+      return 1
+    fi
+  elif [ "$ACTIVATED" -eq 1 ]; then
+    # Before activation the old services were never stopped or replaced;
+    # recreating them would be an unnecessary second outage.
+    compose up -d --force-recreate --no-deps api orchestrator caddy >&2 || restart_status=$?
+    if [ "$restart_status" -ne 0 ]; then
+      echo "Rollback restored files but could not restart the previous release (status $restart_status); keeping $ROLLBACK_ARCHIVE for manual recovery" >&2
+      return "$restart_status"
+    fi
   fi
-  rm -f -- "$ROLLBACK_ARCHIVE"
+  if ! rm -f -- "$ROLLBACK_ARCHIVE"; then
+    echo "Rollback completed but could not remove $ROLLBACK_ARCHIVE; refusing to hide the stale artifact" >&2
+    return 1
+  fi
   if [ "$stop_status" -ne 0 ]; then
     echo "Rollback could not stop the failed services (status $stop_status); they may still be running" >&2
     return "$stop_status"
@@ -328,6 +382,33 @@ compose up -d --wait postgres
 compose run --rm --no-deps api alembic upgrade head
 compose up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy
 
+# /api/health reports the age of the LATEST heartbeat, which can belong to
+# the orchestrator that was just replaced. Prove this replacement wrote its
+# own row too. Docker's hostname is the 12-character container-ID prefix and
+# Orchestrator constructs worker_id as hostname-pid-uuid, so the full
+# container ID gives a deployment-specific, unspoofable-by-old-row lookup.
+replacement_orchestrator_heartbeat() {
+  local container_id query heartbeat
+  if ! container_id=$(compose ps -q orchestrator); then
+    echo "Could not identify the replacement orchestrator container" >&2
+    return 1
+  fi
+  if [[ ! "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Replacement orchestrator returned an invalid container identity" >&2
+    return 1
+  fi
+  query="SELECT EXISTS (SELECT 1 FROM orchestrator_heartbeats WHERE worker_id LIKE '${container_id:0:12}-%');"
+  if ! heartbeat=$(compose exec -T postgres sh -c \
+    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "$1"' sh "$query"); then
+    echo "Could not query the replacement orchestrator heartbeat" >&2
+    return 1
+  fi
+  if [ "$heartbeat" != t ]; then
+    echo "Replacement orchestrator ${container_id:0:12} has not written its service heartbeat" >&2
+    return 1
+  fi
+}
+
 check_health() {
   local attempt body normalized
   for attempt in $(seq 1 "$HEALTH_ATTEMPTS"); do
@@ -335,7 +416,8 @@ check_health() {
       normalized=$(printf '%s' "$body" | tr -d ' \n\t')
       if printf '%s' "$normalized" | grep -q '"status":"ok"' \
         && printf '%s' "$normalized" | grep -q '"db":true' \
-        && printf '%s' "$normalized" | grep -q '"orchestratorAlive":true'; then
+        && printf '%s' "$normalized" | grep -q '"orchestratorAlive":true' \
+        && replacement_orchestrator_heartbeat; then
         return 0
       fi
     fi

@@ -61,12 +61,17 @@ services:
       - path: ./.env
         required: true
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      # Explicit DSN: URL-encode the username/password in this value; keep
+      # POSTGRES_PASSWORD raw for Postgres itself. Do not interpolate the raw
+      # password into a URI (@, :, /, # and % have reserved meanings).
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env with URL-encoded credentials}
       DATA_DIR: /app/data
       SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
+      SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:?set SHIZZLE_PASSCODE in .env}
+      TOKEN_SIGNING_SECRET: ${TOKEN_SIGNING_SECRET:?set TOKEN_SIGNING_SECRET in .env}
       CLOUDFRONT_PRIVATE_KEY_PATH: /run/secrets/cloudfront_private_key.pem
-      # Admin routes (api/admin/*) 404 unless a request carries this header
-      # with this exact value. Caddy injects it on the staging listener below.
+      # Caddy injects this proxy secret on the staging listener. The separate
+      # application change enforcing it on /api/admin/* is not in this revision.
       SHIZZLE_ADMIN_PROXY_SECRET: ${SHIZZLE_ADMIN_PROXY_SECRET:-}
     volumes:
       - appdata:/app/data
@@ -91,7 +96,7 @@ services:
       - path: ./.env
         required: true
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-shizzle}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shizzle}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env with URL-encoded credentials}
       DATA_DIR: /app/data
       # Staging separates for real on RunPod (same endpoint as production is
       # fine: the dispatch payload names THIS stack's S3 bucket). Nodes are
