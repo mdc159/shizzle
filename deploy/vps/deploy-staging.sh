@@ -2,37 +2,70 @@
 # Staging release transaction: pull the digest-pinned image, validate the
 # staging Compose config, run alembic upgrade head from the new image, start,
 # and health check on 127.0.0.1:18080. Same shape as deploy-release.sh, but
-# with a simpler rollback: staging holds nothing precious, so a failure
-# restores the prior files and either restarts the previous image or stops
-# the application services — the database is never downgraded.
+# with a simpler rollback: staging holds nothing precious, so a failure stops
+# the failed services while their config is still active, then restores the
+# prior files and either restarts the previous image or returns the directory
+# to its fresh state — the database is never downgraded.
 #
-# This script must be impossible to aim at production: it refuses to run when
-# its target directory is (or is inside) the production directory, or when
-# the Compose project name is `shizzle`.
+# First deployment (fresh directory: .env plus incoming/ assets, no prior
+# compose.staging.yml/Caddyfile/player) is handled explicitly: only the
+# files that exist are snapshotted, and a failed first deploy removes what it
+# activated so the next run is a fresh deploy again.
+#
+# This script must be impossible to aim at production: it ALWAYS refuses the
+# canonical /opt/shizzle/prod (and anything under it) and the project name
+# `shizzle`, whatever the environment says. SHIZZLE_STAGING_PROD_DIR can only
+# add one more forbidden path (used by the tests); it can never remove the
+# built-in one, and an unresolvable extra guard fails closed.
 set -Eeuo pipefail # -E: the ERR trap below fires for failures inside functions too
 
 IMAGE_REF=${1:?usage: deploy-staging.sh IMAGE_REF TARGET_SHA}
 TARGET_SHA=${2:?usage: deploy-staging.sh IMAGE_REF TARGET_SHA}
 STAGING_DIR=${SHIZZLE_STAGING_DIR:-/opt/shizzle/staging}
 STAGING_PROJECT=${SHIZZLE_STAGING_PROJECT:-shizzle-staging}
-PROD_DIR_GUARD=${SHIZZLE_STAGING_PROD_DIR:-/opt/shizzle/prod}
+EXTRA_GUARD_DIR=${SHIZZLE_STAGING_PROD_DIR:-}
 DOCKER_BIN=${SHIZZLE_DOCKER_BIN:-docker}
 CURL_BIN=${SHIZZLE_CURL_BIN:-curl}
 HEALTH_URL=${SHIZZLE_STAGING_HEALTH_URL:-http://127.0.0.1:18080/api/health}
 HEALTH_ATTEMPTS=${SHIZZLE_STAGING_HEALTH_ATTEMPTS:-12}
 HEALTH_SLEEP=${SHIZZLE_STAGING_HEALTH_SLEEP:-10}
 
-STAGING_DIR=$(readlink -f -- "$STAGING_DIR") || { echo "Cannot resolve staging directory" >&2; exit 2; }
+# Unconditional production guard, part 1: refuse the literal path before any
+# resolution, so nothing downstream (including a filesystem where /opt is
+# absent) can influence this refusal. No environment variable can remove or
+# replace it.
 case "$STAGING_DIR" in
-  ""|/) echo "Refusing unsafe staging directory: $STAGING_DIR" >&2; exit 2 ;;
-esac
-PROD_DIR_GUARD=$(readlink -f -- "$PROD_DIR_GUARD" 2>/dev/null) || PROD_DIR_GUARD=""
-case "$STAGING_DIR" in
-  "$PROD_DIR_GUARD"|"$PROD_DIR_GUARD"/*)
+  /opt/shizzle/prod|/opt/shizzle/prod/*)
     echo "Refusing to operate on the production directory: $STAGING_DIR" >&2
     exit 2
     ;;
 esac
+STAGING_DIR=$(readlink -f -- "$STAGING_DIR") || { echo "Cannot resolve staging directory; failing closed" >&2; exit 2; }
+case "$STAGING_DIR" in
+  ""|/) echo "Refusing unsafe staging directory: $STAGING_DIR" >&2; exit 2 ;;
+esac
+# Unconditional production guard, part 2: the canonical path (catches symlink
+# aliases and ../ spellings of the same production directory).
+case "$STAGING_DIR" in
+  /opt/shizzle/prod|/opt/shizzle/prod/*)
+    echo "Refusing to operate on the production directory: $STAGING_DIR" >&2
+    exit 2
+    ;;
+esac
+# Optional additional forbidden path (tests use it to guard their fixtures).
+# It can only add a refusal, and an unresolvable path fails closed.
+if [ -n "$EXTRA_GUARD_DIR" ]; then
+  EXTRA_GUARD_DIR=$(readlink -f -- "$EXTRA_GUARD_DIR") || {
+    echo "Cannot resolve the additional guard directory; failing closed" >&2
+    exit 2
+  }
+  case "$STAGING_DIR" in
+    "$EXTRA_GUARD_DIR"|"$EXTRA_GUARD_DIR"/*)
+      echo "Refusing to operate on the production directory: $STAGING_DIR" >&2
+      exit 2
+      ;;
+  esac
+fi
 case "$STAGING_PROJECT" in
   ""|shizzle) echo "Refusing production Compose project name: $STAGING_PROJECT" >&2; exit 2 ;;
 esac
@@ -51,7 +84,8 @@ command -v "$CURL_BIN" >/dev/null 2>&1 || {
 
 cd "$STAGING_DIR"
 umask 077
-for required_path in .env compose.staging.yml Caddyfile player incoming/compose.staging.yml incoming/Caddyfile.staging incoming/shizzle-player.tar.gz; do
+# Always required: the private environment and the incoming release assets.
+for required_path in .env incoming/compose.staging.yml incoming/Caddyfile.staging incoming/shizzle-player.tar.gz; do
   if [ ! -e "$required_path" ]; then
     echo "Cannot deploy: missing $required_path" >&2
     exit 1
@@ -63,23 +97,49 @@ compose() {
 }
 
 PREV_IMAGE=$(sed -n 's/^SHIZZLE_API_IMAGE=//p' .env | tail -n 1)
+ACTIVATED=0
+if [ -z "$PREV_IMAGE" ]; then
+  # Fresh directory: a first deploy. Prior release files must not exist; a
+  # half-activated tree without a recorded image identity is refused rather
+  # than guessed at.
+  for stale_path in compose.staging.yml Caddyfile player; do
+    if [ -e "$stale_path" ] || [ -L "$stale_path" ]; then
+      echo "Refusing first deployment with stale release file present: $stale_path (no SHIZZLE_API_IMAGE recorded in .env)" >&2
+      exit 1
+    fi
+  done
+  SNAPSHOT_PATHS=".env"
+else
+  for required_path in compose.staging.yml Caddyfile player; do
+    if [ ! -e "$required_path" ]; then
+      echo "Cannot deploy: missing $required_path" >&2
+      exit 1
+    fi
+  done
+  SNAPSHOT_PATHS=".env compose.staging.yml Caddyfile player"
+fi
+
 ROLLBACK_ARCHIVE=.staging-rollback.tar.gz
 STAGE_DIR=$(mktemp -d "$STAGING_DIR/.staging-stage.XXXXXX")
 trap 'rm -rf -- "$STAGE_DIR"; rm -f -- "$ROLLBACK_ARCHIVE.tmp"' EXIT
 
-# Restore the snapshot taken below and bring back the previous release. The
-# database is left as migrated: staging holds nothing precious, and an old
-# image against a newer schema is acceptable there (redeploy the newer ref).
+# Stop the failed services and restore the prior state. Order matters: the
+# stop must run while the FAILED release's config (.env with its image
+# identity) is still in place — restoring the previous .env first (e.g. one
+# without an image on a first deploy) would make Compose interpolation fail
+# before anything could be stopped. A stop failure is surfaced, not swallowed.
 restore_previous() {
-  echo "Staging deploy failed; restoring the prior staging files" >&2
+  echo "Staging deploy failed; rolling back" >&2
   if [ ! -f "$ROLLBACK_ARCHIVE" ]; then
     echo "No rollback snapshot to restore" >&2
     return 0
   fi
-  local restore_dir
+  local stop_status=0 restore_dir f
+  if [ "$ACTIVATED" -eq 1 ]; then
+    compose stop api orchestrator caddy >&2 || stop_status=$?
+  fi
   restore_dir=$(mktemp -d "$STAGING_DIR/.staging-restore.XXXXXX") || return 0
   tar -xzf "$ROLLBACK_ARCHIVE" -C "$restore_dir" 2>/dev/null || true
-  local f
   for f in .env compose.staging.yml Caddyfile; do
     if [ -e "$restore_dir/$f" ]; then
       mv -f -- "$restore_dir/$f" "$f"
@@ -94,24 +154,31 @@ restore_previous() {
     rm -rf -- player.failed
   fi
   rm -rf -- "$restore_dir"
-  if [ -n "$PREV_IMAGE" ]; then
-    compose up -d --force-recreate --no-deps api orchestrator caddy >&2 || true
+  if [ -z "$PREV_IMAGE" ]; then
+    # Failed first deploy: return the directory to its fresh state so the
+    # next run is a first deploy again (no image identity, no release files).
+    rm -rf -- compose.staging.yml Caddyfile player
   else
-    compose stop api orchestrator caddy >&2 || true
+    compose up -d --force-recreate --no-deps api orchestrator caddy >&2 || true
   fi
   rm -f -- "$ROLLBACK_ARCHIVE"
+  if [ "$stop_status" -ne 0 ]; then
+    echo "Rollback could not stop the failed services (status $stop_status); they may still be running" >&2
+    return "$stop_status"
+  fi
+  return 0
 }
 
 on_error() {
   status=$?
   trap - ERR
-  restore_previous
+  restore_previous || status=$?
   exit "$status"
 }
 trap on_error ERR
 
-# Snapshot the prior release (also proves there is a real one to restore).
-tar -czf "$ROLLBACK_ARCHIVE.tmp" -- .env compose.staging.yml Caddyfile player
+# Snapshot the prior state (only the release files that exist).
+tar -czf "$ROLLBACK_ARCHIVE.tmp" -- $SNAPSHOT_PATHS
 mv -f "$ROLLBACK_ARCHIVE.tmp" "$ROLLBACK_ARCHIVE"
 
 "$DOCKER_BIN" pull "$IMAGE_REF"
@@ -134,6 +201,7 @@ rm -rf -- player.next
 mv "$STAGE_DIR/player" player.next
 rm -rf -- player
 mv player.next player
+ACTIVATED=1
 
 # --wait blocks until postgres is healthy (first bootstrap included).
 compose up -d --wait postgres
