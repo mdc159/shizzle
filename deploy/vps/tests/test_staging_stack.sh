@@ -25,6 +25,8 @@ ENV_STAGING_EXAMPLE="$ROOT/deploy/vps/.env.staging.example"
 
 count() { grep -c "$@" || true; }
 
+WORKFLOW_STAGING="$ROOT/.github/workflows/deploy-staging.yml"
+
 # --- Part 1: structural contracts ---------------------------------------------
 
 # Public site still serves the same hostnames with the same TLS floor (also
@@ -105,6 +107,15 @@ if grep -Eq '^SHIZZLE_NODE_TOKENS=..*$' "$ENV_STAGING_EXAMPLE"; then
   echo "staging env template must keep SHIZZLE_NODE_TOKENS empty" >&2
   exit 1
 fi
+
+# Deploy-workflow trust split, as a regression assertion: the deploy job must
+# check out the repository's default branch EXPLICITLY — with workflow_dispatch
+# an omitted ref follows the ref the workflow was dispatched from (possibly a
+# feature branch), which would let that ref supply the root-executed deploy
+# assets again. The chosen ref is checked out only by the player build.
+[ "$(count -F 'ref: ${{ github.event.repository.default_branch }}' "$WORKFLOW_STAGING")" = 1 ]
+grep -Fq 'ref: ${{ needs.resolve.outputs.target_sha }}' "$WORKFLOW_STAGING"
+grep -Fq 'name: staging' "$WORKFLOW_STAGING"
 printf 'structural staging contracts passed\n'
 
 # --- Part 2: deploy-staging.sh transaction with stubbed docker/curl ----------
@@ -123,14 +134,43 @@ if [ "${1:-}" = pull ]; then
   exit 0
 fi
 if [ "${1:-}" != compose ]; then exit 0; fi
+active_image() {
+  # The deploy script runs docker from the staging directory, so the ./.env
+  # here is the ACTIVE release's environment.
+  sed -n 's/^SHIZZLE_API_IMAGE=//p' ./.env | tail -n 1
+}
 case " $* " in
   *" config -q "*) [ "${DOCKER_FAIL:-}" != config ] || exit 30; exit 0 ;;
   *" up -d --wait postgres "*) [ "${DOCKER_FAIL:-}" != up ] || exit 34; exit 0 ;;
   *" alembic upgrade head "*) [ "${DOCKER_FAIL:-}" != migration ] || exit 32; exit 0 ;;
   *" up -d --force-recreate --remove-orphans --no-deps api orchestrator caddy "*)
     [ "${DOCKER_FAIL:-}" != up ] || exit 34; exit 0 ;;
-  *" stop api orchestrator caddy "*) [ "${DOCKER_FAIL:-}" != stop ] || exit 35; exit 0 ;;
-  *" up -d --force-recreate --no-deps api orchestrator caddy "*) exit 0 ;;
+  *" stop api orchestrator caddy "*)
+    # A rollback stop must run while the FAILED release's image identity is
+    # still the active one (stop-before-restore, F4). A stop after restoring
+    # the prior .env fails here instead.
+    if [ -n "${DOCKER_EXPECT_STOP_IMAGE:-}" ]; then
+      active=$(active_image)
+      if [ "$active" != "$DOCKER_EXPECT_STOP_IMAGE" ]; then
+        printf 'stop ran with the wrong active image: %s\n' "$active" >> "$DOCKER_LOG"
+        exit 36
+      fi
+    fi
+    [ "${DOCKER_FAIL:-}" != stop ] || exit 35
+    exit 0
+    ;;
+  *" up -d --force-recreate --no-deps api orchestrator caddy "*)
+    # The rollback restart must run only after the PREVIOUS release's
+    # identity is active again.
+    if [ -n "${DOCKER_EXPECT_RESTART_IMAGE:-}" ]; then
+      active=$(active_image)
+      if [ "$active" != "$DOCKER_EXPECT_RESTART_IMAGE" ]; then
+        printf 'rollback restart ran with the wrong active image: %s\n' "$active" >> "$DOCKER_LOG"
+        exit 37
+      fi
+    fi
+    exit 0
+    ;;
 esac
 exit 0
 STUB
@@ -195,6 +235,8 @@ run_deploy() {
   SHIZZLE_STAGING_HEALTH_ATTEMPTS=2 \
   SHIZZLE_STAGING_HEALTH_SLEEP=0 \
   DOCKER_LOG="$DOCKER_LOG" DOCKER_FAIL="${DOCKER_FAIL:-}" CURL_MODE="${CURL_MODE:-ok}" \
+  DOCKER_EXPECT_STOP_IMAGE="${DOCKER_EXPECT_STOP_IMAGE:-}" \
+  DOCKER_EXPECT_RESTART_IMAGE="${DOCKER_EXPECT_RESTART_IMAGE:-}" \
     bash "$DEPLOY" "$IMAGE" "$TARGET"
 }
 
@@ -235,7 +277,7 @@ ln -s "$TMP/guard-loop-b" "$TMP/guard-loop-a" 2>/dev/null || true
 ln -s "$TMP/guard-loop-a" "$TMP/guard-loop-b" 2>/dev/null || true
 if [ -L "$TMP/guard-loop-a" ] && [ -L "$TMP/guard-loop-b" ]; then
   new_fixture refuse-unresolvable-guard
-  if PROD_GUARD="$TMP/guard-loop-a" SHIZZLE_STAGING_DIR="$STG" \
+  if SHIZZLE_STAGING_PROD_DIR="$TMP/guard-loop-a" SHIZZLE_STAGING_DIR="$STG" \
     PATH="$BIN:$PATH" SHIZZLE_DOCKER_BIN=docker SHIZZLE_CURL_BIN=curl \
     bash "$DEPLOY" "$IMAGE" "$TARGET" 2> "$TMP/refuse-loop.err"; then
     echo "deploy-staging accepted an unresolvable guard path" >&2; exit 1
@@ -321,12 +363,19 @@ test ! -e "$STG/.staging-rollback.tar.gz"
 # the directory returns to its fresh state (no image identity, no release files).
 new_fresh_fixture fresh-failure
 CURL_MODE=bad
-if run_deploy 2> "$TMP/fresh-fail.err"; then
-  echo "fresh deploy survived a failing health check" >&2; exit 1
-fi
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+set +e
+run_deploy 2> "$TMP/fresh-fail.err"
+fresh_status=$?
+set -e
 CURL_MODE=ok
+DOCKER_EXPECT_STOP_IMAGE=
+test "$fresh_status" -eq 1 || { echo "fresh deploy failed with unexpected status $fresh_status (expected 1)" >&2; exit 1; }
 grep -Fq 'stop api orchestrator caddy' "$DOCKER_LOG"
 grep -Fq 'rolling back' "$TMP/fresh-fail.err"
+if grep -q 'wrong active image' "$DOCKER_LOG"; then
+  echo "rollback stop ran against the wrong release identity" >&2; exit 1
+fi
 # .env back to no image identity; activated release files removed.
 if sed -n 's/^SHIZZLE_API_IMAGE=//p' "$STG/.env" | grep -q .; then
   echo "fresh-deploy rollback left an image identity behind" >&2; exit 1
@@ -355,16 +404,28 @@ fi
 test ! -e "$STG/.staging-rollback.tar.gz"
 
 # Migration failure: services stopped FIRST (with the failed release still
-# active), then prior files restored, then the previous image restarted.
+# active), then prior files restored, then the previous image restarted. The
+# stub enforces the active identity at both points, so reordering stop after
+# the restore (or restarting before it) fails the deploy with 36/37 instead
+# of the expected 32.
 new_fixture migration-failure
 DOCKER_FAIL=migration
-if run_deploy 2> "$TMP/migration.err"; then
-  echo "deploy-staging survived a migration failure" >&2; exit 1
-fi
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
+set +e
+run_deploy 2> "$TMP/migration.err"
+migration_status=$?
+set -e
 DOCKER_FAIL=
+DOCKER_EXPECT_STOP_IMAGE=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$migration_status" -eq 32 || { echo "migration-failure rollback produced status $migration_status, not 32 — was the stop reordered after the restore?" >&2; exit 1; }
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx old-caddy "$STG/Caddyfile"
 grep -Fx old-player "$STG/player/index.html"
+if grep -q 'wrong active image' "$DOCKER_LOG"; then
+  echo "rollback ran against the wrong release identity" >&2; exit 1
+fi
 stop_line=$(grep -n 'stop api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
 restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
 : "${stop_line:?stop not logged after migration failure}" "${restart_line:?restart not logged after migration failure}"
@@ -373,17 +434,26 @@ restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy'
 }
 test ! -e "$STG/.staging-rollback.tar.gz"
 
-# Health-check failure on an existing release: same stop-before-restore order,
-# prior image identity and files restored.
+# Health-check failure on an existing release: same stop-before-restore
+# order with identity enforcement, prior image identity and files restored.
 new_fixture health-failure
 CURL_MODE=bad
-if run_deploy 2> "$TMP/health.err"; then
-  echo "deploy-staging survived a failing health check" >&2; exit 1
-fi
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
+set +e
+run_deploy 2> "$TMP/health.err"
+health_status=$?
+set -e
 CURL_MODE=ok
+DOCKER_EXPECT_STOP_IMAGE=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$health_status" -eq 1 || { echo "health-failure rollback produced status $health_status, not 1 — was the stop reordered after the restore?" >&2; exit 1; }
 grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx old-player "$STG/player/index.html"
+if grep -q 'wrong active image' "$DOCKER_LOG"; then
+  echo "rollback ran against the wrong release identity" >&2; exit 1
+fi
 stop_line=$(grep -n 'stop api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
 restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy' "$DOCKER_LOG" | head -1 | cut -d: -f1)
 [ -n "$stop_line" ] && [ -n "$restart_line" ] && [ "$stop_line" -lt "$restart_line" ] || {
@@ -392,17 +462,22 @@ restart_line=$(grep -n 'up -d --force-recreate --no-deps api orchestrator caddy'
 test ! -e "$STG/.staging-rollback.tar.gz"
 
 # A failing stop during rollback is surfaced (exit status and message), with
-# the prior files still restored.
+# the prior files still restored; the identity check ran first, so the stop
+# attempt is still proven to target the failed release.
 new_fixture stop-failure
 CURL_MODE=bad
 DOCKER_FAIL=stop
+DOCKER_EXPECT_STOP_IMAGE="$IMAGE"
+DOCKER_EXPECT_RESTART_IMAGE=prev-image
 set +e
 run_deploy 2> "$TMP/stop.err"
 stop_status=$?
 set -e
 CURL_MODE=ok
 DOCKER_FAIL=
-test "$stop_status" -eq 35
+DOCKER_EXPECT_STOP_IMAGE=
+DOCKER_EXPECT_RESTART_IMAGE=
+test "$stop_status" -eq 35 || { echo "stop-failure case produced status $stop_status, not 35" >&2; exit 1; }
 grep -Fq 'could not stop the failed services' "$TMP/stop.err"
 grep -Fx old-compose "$STG/compose.staging.yml"
 grep -Fx 'SHIZZLE_API_IMAGE=prev-image' "$STG/.env"
