@@ -106,3 +106,141 @@ export interface NodeListResponse {
   onlineSeconds: number;
 }
 
+// --- Administrator surface (/admin; GET/PUT /api/admin/*) ---------------------
+
+export type AdminJobFlag =
+  | 'ready_without_track'
+  | 'open_assignment_on_terminal_job'
+  | 'node_busy_pointer_stale'
+  | 'unresolved_dispatch_reservation'
+  | 'assignment_ack_overdue'
+  | 'assignment_stalled'
+  | 'assignment_over_cap'
+  | 'expired_lease_on_runnable'
+  | 'wait_over_window'
+  | 'stage_stalled';
+
+export interface AdminJobRow {
+  jobId: string;
+  status: JobStatus['status'];
+  stage: string;
+  sourceType: string;
+  title?: string | null;
+  artist?: string;
+  attempt: number;
+  executor?: string | null;
+  runpodJobId?: string | null;
+  workerPhase?: string | null;
+  workerHeartbeatAt?: string | null;
+  errorCode?: string | null;
+  errorDetail?: string | null;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
+  nextRetryAt?: string | null;
+  trackId?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  flags: AdminJobFlag[];
+}
+
+export interface AdminJobsResponse {
+  jobs: AdminJobRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  counts: Record<string, number>;
+}
+
+export type EvidenceStatus = 'ok' | 'missing' | 'mismatch' | 'not_yet' | 'unknown';
+
+export interface EvidenceItem {
+  stage: string;
+  name: string;
+  expected: string;
+  observed: string;
+  proof: string;
+  checkedAt: string;
+  status: EvidenceStatus;
+}
+
+export interface AdminAssignment {
+  id: string;
+  nodeId: string;
+  kind: string;
+  status: string;
+  idempotencyKey?: string | null;
+  phase?: string | null;
+  heartbeatAt?: string | null;
+  detail?: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminEvent {
+  id: number;
+  event: string;
+  detail?: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface AdminJobDetail {
+  job: AdminJobRow & {
+    idempotencyKey: string;
+    leaseExpiresAt?: string | null;
+    profileVersion: number;
+    inputChecksum?: string | null;
+    outputChecksums?: Record<string, unknown> | null;
+    stageTimings?: Record<string, number> | null;
+  };
+  derivedTrackId: string;
+  dispatchAttempt: {
+    idempotencyKey: string;
+    attemptPrefix?: string | null;
+    runpodJobId?: string | null;
+  };
+  events: AdminEvent[];
+  assignments: AdminAssignment[];
+  track?: {
+    id: string;
+    title: string;
+    artist: string;
+    durationSeconds: number;
+    s3Prefix: string;
+    generation: number;
+    manifestKey: string;
+    deletedAt?: string | null;
+  } | null;
+  evidence: EvidenceItem[];
+}
+
+export interface AdminNode {
+  id: string;
+  displayName: string;
+  online: boolean;
+  enabled: boolean;
+  capabilities: Record<string, unknown>;
+  agentVersion?: string | null;
+  lastSeenAt?: string | null;
+  busyAssignmentId?: string | null;
+  currentAssignment?: {
+    id: string;
+    jobId: string;
+    kind: string;
+    status: string;
+    phase?: string | null;
+    heartbeatAt?: string | null;
+    createdAt: string;
+  } | null;
+}
+
+export interface AdminSettings {
+  nodeRouting: { value: string | null; source: 'database' | 'environment'; error?: string | null };
+  runpodMaxConcurrent: {
+    value: number | null;
+    source: 'database' | 'environment';
+    error?: string | null;
+  };
+  runpodConfigured: boolean;
+  jobsAtRunpod: number;
+}
+

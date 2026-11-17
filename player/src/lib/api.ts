@@ -9,7 +9,19 @@
  *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
-import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse, NodeInfo, NodeListResponse } from '@/types/karaoke';
+import type {
+  Track,
+  StemsManifest,
+  JobStatus,
+  JobEvent,
+  LibraryResponse,
+  NodeInfo,
+  NodeListResponse,
+  AdminJobsResponse,
+  AdminJobDetail,
+  AdminNode,
+  AdminSettings,
+} from '@/types/karaoke';
 import { authFetch, setToken } from '@/lib/auth';
 
 interface AuthResult {
@@ -184,4 +196,72 @@ export async function loadManifest(trackId: string, signal?: AbortSignal): Promi
   }
 
   return response.json();
+}
+
+// --- Administrator surface (/admin; docs/INVARIANTS.md G) ----------------------
+// The admin API is reachable only through the owner's Tailscale-only reverse
+// proxy, which adds the X-Shizzle-Admin secret header server-side. The browser
+// never holds that secret: from the public listener these calls 404 and the
+// admin page says so plainly. No passcode token is required either way.
+
+export class AdminUnavailableError extends Error {
+  constructor() {
+    super('The admin API is not reachable from this network (404). It is only served on the owner\'s Tailscale network.');
+    this.name = 'AdminUnavailableError';
+  }
+}
+
+async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  if (response.status === 404) throw new AdminUnavailableError();
+  if (!response.ok) throw new Error(`Admin request failed: ${response.statusText}`);
+  return response.json() as Promise<T>;
+}
+
+export async function getAdminJobs(
+  status?: JobStatus['status'],
+  signal?: AbortSignal
+): Promise<AdminJobsResponse> {
+  const query = status ? `?status=${status}` : '';
+  return adminFetch<AdminJobsResponse>(`/api/admin/jobs${query}`, { signal });
+}
+
+export async function getAdminJobDetail(
+  jobId: string,
+  verifyS3 = false,
+  signal?: AbortSignal
+): Promise<AdminJobDetail> {
+  const query = verifyS3 ? '?verify=s3' : '';
+  return adminFetch<AdminJobDetail>(`/api/admin/jobs/${encodeURIComponent(jobId)}${query}`, { signal });
+}
+
+export async function getAdminNodes(signal?: AbortSignal): Promise<{ nodes: AdminNode[] }> {
+  return adminFetch<{ nodes: AdminNode[] }>('/api/admin/nodes', { signal });
+}
+
+export async function setAdminNodeEnabled(nodeId: string, enabled: boolean): Promise<void> {
+  await adminFetch(`/api/admin/nodes/${encodeURIComponent(nodeId)}/${enabled ? 'enable' : 'disable'}`, {
+    method: 'POST',
+  });
+}
+
+export async function getAdminSettings(): Promise<AdminSettings> {
+  return adminFetch<AdminSettings>('/api/admin/settings');
+}
+
+export async function putAdminSettings(update: {
+  nodeRouting?: string | null;
+  runpodMaxConcurrent?: number | null;
+}): Promise<AdminSettings> {
+  return adminFetch<AdminSettings>('/api/admin/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+}
+
+export async function releaseAdminAssignment(assignmentId: string): Promise<void> {
+  await adminFetch(`/api/admin/assignments/${encodeURIComponent(assignmentId)}/release`, {
+    method: 'POST',
+  });
 }
