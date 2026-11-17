@@ -14,6 +14,8 @@ test.use({ expect: { timeout: 5000 }, timeout: 60_000 });
 
 const FAILED_ID = 'e2eadminfailedjob00000000000000001';
 const READY_ID = 'e2eadmintreadyjob000000000000000001';
+const SECOND_FAILED_ID = 'e2eadminfailedjob00000000000000002';
+const TRACK_ID = 'e2e-track-id-000000000000000000000001';
 const NOW = () => new Date().toISOString();
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
@@ -76,7 +78,7 @@ const nodesPayload = () => ({
       id: 'mac-mini',
       displayName: 'Mac mini',
       online: true,
-      enabled: true,
+      separationEnabled: true,
       capabilities: { download: true, separate: true, device: 'mps' },
       agentVersion: '0.4.0',
       lastSeenAt: minutesAgo(0.2),
@@ -95,7 +97,7 @@ const nodesPayload = () => ({
       id: 'dell-9530',
       displayName: 'Dell 9530',
       online: false,
-      enabled: false,
+      separationEnabled: false,
       capabilities: { separate: true, device: 'cuda' },
       agentVersion: '0.4.0',
       lastSeenAt: minutesAgo(240),
@@ -104,6 +106,17 @@ const nodesPayload = () => ({
     },
   ],
   onlineSeconds: 45,
+});
+
+const trackPayload = () => ({
+  id: TRACK_ID,
+  title: 'Published Song',
+  artist: 'Library Artist',
+  durationSeconds: 42,
+  generation: 1,
+  createdAt: minutesAgo(100),
+  deletedAt: null,
+  jobId: READY_ID,
 });
 
 const settingsPayload = () => ({
@@ -221,7 +234,7 @@ function routeAdminApi(page: Page, captured: Captured) {
     captured.statusQueries.push(status ?? '(none)');
     const jobs = status === 'ready' ? [readyJob()] : [failedJob(), readyJob()];
     return route.fulfill({
-      json: { jobs, total: jobs.length, limit: 50, offset: 0, counts: { failed: 1, ready: 1 } },
+      json: { jobs, total: jobs.length, limit: 50, offset: 0, counts: { failed: 1, ready: 1 }, dismissedCount: 0 },
     });
   });
 
@@ -237,6 +250,14 @@ function routeAdminApi(page: Page, captured: Captured) {
     route.fulfill({ json: nodesPayload() })
   );
 
+  void page.route('**/api/admin/tracks*', (route) =>
+    route.fulfill({ json: { tracks: [trackPayload()] } })
+  );
+
+  void page.route('**/api/admin/duplicates', (route) =>
+    route.fulfill({ json: { groups: [] } })
+  );
+
   void page.route('**/api/admin/settings', async (route: Route) => {
     if (route.request().method() === 'PUT') {
       captured.puts.push(route.request().postDataJSON() as Record<string, unknown>);
@@ -244,12 +265,12 @@ function routeAdminApi(page: Page, captured: Captured) {
     return route.fulfill({ json: settingsPayload() });
   });
 
-  void page.route('**/api/admin/nodes/*/disable', (route: Route) => {
+  void page.route('**/api/admin/nodes/*/separation/disable', (route: Route) => {
     captured.nodePosts.push(route.request().url());
-    return route.fulfill({ json: { ok: true, enabled: false } });
+    return route.fulfill({ json: { ok: true, separationEnabled: false } });
   });
-  void page.route('**/api/admin/nodes/*/enable', (route: Route) =>
-    route.fulfill({ json: { ok: true, enabled: true } })
+  void page.route('**/api/admin/nodes/*/separation/enable', (route: Route) =>
+    route.fulfill({ json: { ok: true, separationEnabled: true } })
   );
 }
 
@@ -277,7 +298,7 @@ test.describe('Admin page (/admin)', () => {
     await expect(failedCard.getByText('open assignment on terminal job')).toBeVisible();
 
     // Failed sorts before ready.
-    const cards = page.locator('section[aria-label="Jobs"] button');
+    const cards = page.locator('section[aria-label="Jobs"] button').filter({ hasText: /Broken Ballad|Golden Take/ });
     await expect(cards.first()).toContainText('Broken Ballad');
 
     // The status filter asks the API and the view follows.
@@ -340,9 +361,9 @@ test.describe('Admin page (/admin)', () => {
       .toBeTruthy();
 
     // Node use switch posts disable (click toggles the checkbox).
-    await page.getByLabel('Stop using Mac mini').click();
+    await page.getByLabel('Separate stems on this node: Mac mini').click();
     await expect.poll(() => captured.nodePosts.length).toBe(1);
-    expect(captured.nodePosts[0]).toContain('/api/admin/nodes/mac-mini/disable');
+    expect(captured.nodePosts[0]).toContain('/api/admin/nodes/mac-mini/separation/disable');
   });
 
   test('ignores a slower detail response after the selected job changes', async ({ page }) => {
@@ -431,15 +452,15 @@ test.describe('Admin page (/admin)', () => {
   test('surfaces node toggle failures and keeps confirmed node state', async ({ page }) => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);
-    await page.route('**/api/admin/nodes/mac-mini/disable', (route) =>
+    await page.route('**/api/admin/nodes/mac-mini/separation/disable', (route) =>
       route.fulfill({ status: 500, json: { detail: 'database is read-only' } })
     );
     await page.goto('/admin');
-    const checkbox = page.getByLabel('Stop using Mac mini');
+    const checkbox = page.getByLabel('Separate stems on this node: Mac mini');
     await expect(checkbox).toBeChecked();
     await checkbox.click();
     await expect(page.getByText('database is read-only')).toBeVisible();
-    await expect(page.getByLabel('Stop using Mac mini')).toBeChecked();
+    await expect(page.getByLabel('Separate stems on this node: Mac mini')).toBeChecked();
   });
 
   test('aborts a hung settings request at the refresh timeout', async ({ page }) => {
@@ -474,6 +495,208 @@ test.describe('Admin page (/admin)', () => {
     routeAdminApi(page, captured);
     await page.goto('/admin');
     await expect(page.getByLabel('Filter').locator('option[value="splitting"]')).toHaveCount(1);
+  });
+
+  test('retries and dismisses failed jobs from their rows', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    const actions: string[] = [];
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry`, (route) => {
+      actions.push('retry');
+      return route.fulfill({ json: { status: 'pending', resumeStage: 'pending', attempt: 3 } });
+    });
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/dismiss`, (route) => {
+      actions.push('dismiss');
+      return route.fulfill({ json: { ok: true, status: 'failed', dismissedAt: NOW() } });
+    });
+    await page.goto('/admin');
+    await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
+    await expect.poll(() => actions).toContain('retry');
+    await page.getByRole('button', { name: 'Dismiss', exact: true }).first().click();
+    await expect.poll(() => actions).toEqual(['retry', 'dismiss']);
+  });
+
+  test('shows action refusals next to the row and detail, including unknown ids', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    let status = 409;
+    let detail = 'The upload source no longer exists locally or in S3';
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry`, (route) =>
+      route.fulfill({ status, json: { detail } })
+    );
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/dismiss`, (route) =>
+      route.fulfill({ status: 409, json: { detail: 'The job is already dismissed' } })
+    );
+    await page.goto('/admin');
+    await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
+    await expect(page.getByText('The upload source no longer exists locally or in S3').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Dismiss', exact: true }).first().click();
+    await expect(page.getByText('The job is already dismissed').first()).toBeVisible();
+
+    await page.locator('button', { hasText: 'Broken Ballad' }).click();
+    const jobDetail = page.locator('section[aria-label="Job detail"]');
+    await jobDetail.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(jobDetail.getByText('The upload source no longer exists locally or in S3')).toBeVisible();
+    status = 404;
+    detail = 'Job not found';
+    await jobDetail.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(jobDetail.getByText('Job not found')).toBeVisible();
+    await expect(page.getByText('The admin API is not reachable from this network.')).toHaveCount(0);
+  });
+
+  test('shows dismissed jobs and restores them', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/jobs?*', (route) =>
+      route.fulfill({
+        json: {
+          jobs: [{ ...failedJob(), dismissedAt: minutesAgo(1) }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+          counts: {},
+          dismissedCount: 1,
+        },
+      })
+    );
+    let restored = false;
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/restore`, (route) => {
+      restored = true;
+      return route.fulfill({ json: { ok: true, status: 'failed', dismissedAt: null } });
+    });
+    await page.goto('/admin');
+    await page.getByLabel('Dismissed jobs').selectOption('only');
+    await page.getByRole('button', { name: 'Restore', exact: true }).first().click();
+    await expect.poll(() => restored).toBe(true);
+  });
+
+  test('confirms both bulk actions and shows per-job result summaries', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/jobs?*', (route) =>
+      route.fulfill({
+        json: {
+          jobs: [failedJob(), { ...failedJob(), jobId: SECOND_FAILED_ID, title: 'Second failure' }],
+          total: 2,
+          limit: 50,
+          offset: 0,
+          counts: { failed: 2 },
+          dismissedCount: 0,
+        },
+      })
+    );
+    await page.route('**/api/admin/jobs/bulk', async (route) => {
+      const body = route.request().postDataJSON() as { action: string; jobIds: string[] };
+      expect(body.jobIds).toHaveLength(2);
+      return route.fulfill({
+        json: [
+          { jobId: FAILED_ID, ok: true, resumeStage: body.action === 'retry' ? 'pending' : null },
+          { jobId: SECOND_FAILED_ID, ok: false, reason: 'source missing' },
+        ],
+      });
+    });
+    const confirmations: string[] = [];
+    page.on('dialog', async (dialog) => {
+      confirmations.push(dialog.message());
+      await dialog.accept();
+    });
+    await page.goto('/admin');
+    await page.getByRole('button', { name: 'Retry all failed (2)' }).click();
+    await expect(page.getByText('source missing').first()).toBeVisible();
+    await expect(page.getByText('ok (pending)').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Dismiss all failed (2)' }).click();
+    await expect.poll(() => confirmations).toEqual(['Retry 2 failed jobs?', 'Dismiss 2 failed jobs?']);
+  });
+
+  test('removes and restores library tracks and surfaces refusals', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    let deletedAt: string | null = null;
+    await page.route('**/api/admin/tracks?*', (route) =>
+      route.fulfill({ json: { tracks: [{ ...trackPayload(), deletedAt }] } })
+    );
+    await page.route(`**/api/admin/tracks/${TRACK_ID}/remove`, (route) => {
+      deletedAt = NOW();
+      return route.fulfill({ json: { ok: true, deletedAt } });
+    });
+    await page.route(`**/api/admin/tracks/${TRACK_ID}/restore`, (route) => {
+      deletedAt = null;
+      return route.fulfill({ json: { ok: true, deletedAt: null } });
+    });
+    await page.goto('/admin');
+    const library = page.locator('section[aria-label="Library"]');
+    await library.getByRole('button', { name: 'Remove from library' }).click();
+    await expect.poll(() => deletedAt).not.toBeNull();
+    await library.getByRole('button', { name: 'Restore', exact: true }).click();
+    await expect.poll(() => deletedAt).toBeNull();
+    await page.unroute(`**/api/admin/tracks/${TRACK_ID}/remove`);
+    await page.route(`**/api/admin/tracks/${TRACK_ID}/remove`, (route) =>
+      route.fulfill({ status: 409, json: { detail: 'Track is already removed' } })
+    );
+    await library.getByRole('button', { name: 'Remove from library' }).click();
+    await expect(library.getByText('Track is already removed')).toBeVisible();
+  });
+
+  test('keeps the newest ready duplicate and shows per-item cleanup results', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/duplicates', (route) =>
+      route.fulfill({
+        json: {
+          groups: [{
+            groupId: 'g1',
+            identity: 'checksum:abc',
+            jobs: [{ id: FAILED_ID, kind: 'job', status: 'failed', title: 'Duplicate', artist: 'A', createdAt: NOW(), trackId: null }],
+            tracks: [
+              { id: TRACK_ID, kind: 'track', status: 'ready', title: 'Good', artist: 'A', createdAt: NOW(), trackId: TRACK_ID },
+              { id: 'old-track', kind: 'track', status: 'ready', title: 'Old', artist: 'A', createdAt: minutesAgo(1), trackId: 'old-track' },
+            ],
+            keeperTrackId: TRACK_ID,
+          }],
+        },
+      })
+    );
+    await page.route('**/api/admin/duplicates/action', async (route) => {
+      const body = route.request().postDataJSON() as { action: string; keeperTrackId: string };
+      expect(body.action).toBe('keep');
+      expect(body.keeperTrackId).toBe(TRACK_ID);
+      return route.fulfill({ json: [
+        { itemId: FAILED_ID, kind: 'job', ok: true },
+        { itemId: 'old-track', kind: 'track', ok: true },
+      ] });
+    });
+    await page.goto('/admin');
+    const duplicates = page.locator('section[aria-label="Duplicates"]');
+    await duplicates.getByRole('button', { name: 'Keep the good one, clear the rest' }).click();
+    await expect(duplicates.getByText(`job ${FAILED_ID.slice(0, 8)}: ok`)).toBeVisible();
+    await expect(duplicates.getByText('track old-trac: ok')).toBeVisible();
+  });
+
+  test('offers dismiss failed for a duplicate group with no keeper', async ({ page }) => {
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/duplicates', (route) =>
+      route.fulfill({
+        json: {
+          groups: [{
+            groupId: 'g2',
+            identity: 'youtube:dQw4w9WgXcQ',
+            jobs: [{ id: FAILED_ID, kind: 'job', status: 'failed', title: 'Duplicate', artist: 'A', createdAt: NOW(), trackId: null }],
+            tracks: [],
+            keeperTrackId: null,
+          }],
+        },
+      })
+    );
+    await page.route('**/api/admin/duplicates/action', async (route) => {
+      const body = route.request().postDataJSON() as { action: string };
+      expect(body.action).toBe('dismiss_failed');
+      return route.fulfill({ json: [{ itemId: FAILED_ID, kind: 'job', ok: true }] });
+    });
+    await page.goto('/admin');
+    const duplicates = page.locator('section[aria-label="Duplicates"]');
+    await duplicates.getByRole('button', { name: 'Dismiss failed', exact: true }).click();
+    await expect(duplicates.getByText(`job ${FAILED_ID.slice(0, 8)}: ok`)).toBeVisible();
   });
 
   test('says so plainly when the admin API answers 404 off the Tailscale network', async ({

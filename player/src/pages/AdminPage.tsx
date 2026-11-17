@@ -13,17 +13,29 @@ import {
 } from 'lucide-react';
 import {
   AdminUnavailableError,
+  applyAdminDuplicateAction,
+  bulkAdminJobs,
+  dismissAdminJob,
+  getAdminDuplicates,
   getAdminJobDetail,
   getAdminJobs,
   getAdminNodes,
   getAdminSettings,
+  getAdminTracks,
   putAdminSettings,
   releaseAdminAssignment,
-  setAdminNodeEnabled,
+  restoreAdminJob,
+  retryAdminJob,
+  setAdminNodeSeparationEnabled,
+  setAdminTrackDeleted,
 } from '@/lib/api';
 import type {
+  AdminBulkResult,
+  AdminDuplicateActionResult,
+  AdminDuplicateGroup,
   AdminJobDetail,
   AdminJobRow,
+  AdminLibraryTrack,
   AdminNode,
   AdminSettings,
   EvidenceStatus,
@@ -145,8 +157,14 @@ export const AdminPage: React.FC = () => {
   const [jobsTotal, setJobsTotal] = useState(0);
   const [jobOffset, setJobOffset] = useState(0);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [dismissedCount, setDismissedCount] = useState(0);
   const [statusFilter, setStatusFilter] = useState<JobStatus['status'] | 'all'>('all');
+  const [dismissedView, setDismissedView] = useState<'hide' | 'only' | 'include'>('hide');
   const [nodes, setNodes] = useState<AdminNode[]>([]);
+  const [tracks, setTracks] = useState<AdminLibraryTrack[]>([]);
+  const [trackView, setTrackView] = useState<'only' | 'include'>('include');
+  const [duplicates, setDuplicates] = useState<AdminDuplicateGroup[]>([]);
+  const [duplicateResults, setDuplicateResults] = useState<Record<string, AdminDuplicateActionResult[]>>({});
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +177,10 @@ export const AdminPage: React.FC = () => {
   const [routingSaving, setRoutingSaving] = useState(false);
   const [routingMessage, setRoutingMessage] = useState<string | null>(null);
   const [limitDraft, setLimitDraft] = useState<string>('');
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResults, setBulkResults] = useState<AdminBulkResult[]>([]);
   const pollAbort = useRef<AbortController | null>(null);
   const detailAbort = useRef<AbortController | null>(null);
   const detailRequest = useRef(0);
@@ -175,14 +197,22 @@ export const AdminPage: React.FC = () => {
     setBusy(true);
     try {
       const query = statusFilter === 'all' ? undefined : statusFilter;
-      const [jobsResult, nodesResult, settingsResult] = await Promise.allSettled([
-        getAdminJobs(query, controller.signal, JOB_PAGE_SIZE, jobOffset),
+      const [jobsResult, nodesResult, settingsResult, tracksResult, duplicatesResult] = await Promise.allSettled([
+        getAdminJobs(
+          query,
+          controller.signal,
+          JOB_PAGE_SIZE,
+          jobOffset,
+          dismissedView === 'hide' ? undefined : dismissedView
+        ),
         getAdminNodes(controller.signal),
         getAdminSettings(controller.signal),
+        getAdminTracks(trackView, controller.signal),
+        getAdminDuplicates(controller.signal),
       ]);
       if (pollAbort.current !== controller) return;
       const failures: string[] = [];
-      for (const result of [jobsResult, nodesResult, settingsResult]) {
+      for (const result of [jobsResult, nodesResult, settingsResult, tracksResult, duplicatesResult]) {
         if (result.status === 'rejected') {
           if (result.reason instanceof AdminUnavailableError) {
             setUnavailable(true);
@@ -200,8 +230,11 @@ export const AdminPage: React.FC = () => {
         setJobs(jobsResult.value.jobs);
         setJobsTotal(jobsResult.value.total);
         setCounts(jobsResult.value.counts);
+        setDismissedCount(jobsResult.value.dismissedCount);
       }
       if (nodesResult.status === 'fulfilled') setNodes(nodesResult.value.nodes);
+      if (tracksResult.status === 'fulfilled') setTracks(tracksResult.value.tracks);
+      if (duplicatesResult.status === 'fulfilled') setDuplicates(duplicatesResult.value.groups);
       if (settingsResult.status === 'fulfilled') {
         setSettings(settingsResult.value);
         if (!limitDirty.current) {
@@ -216,7 +249,7 @@ export const AdminPage: React.FC = () => {
         setBusy(false);
       }
     }
-  }, [statusFilter, jobOffset]);
+  }, [statusFilter, jobOffset, dismissedView, trackView]);
 
   useEffect(() => {
     void refresh();
@@ -280,6 +313,84 @@ export const AdminPage: React.FC = () => {
   const storedRouting = settings?.nodeRouting.value;
   const effectiveRouting = typeof storedRouting === 'string' ? storedRouting : null;
   const sortedJobs = useMemo(() => sortFailedFirst(jobs), [jobs]);
+  const listedFailed = sortedJobs.filter((job) => job.status === 'failed' && !job.dismissedAt);
+
+  const runJobAction = async (action: 'retry' | 'dismiss' | 'restore', jobId: string) => {
+    setActionBusy(jobId);
+    setActionErrors((current) => {
+      const next = { ...current };
+      delete next[jobId];
+      return next;
+    });
+    try {
+      const call = action === 'retry' ? retryAdminJob : action === 'dismiss' ? dismissAdminJob : restoreAdminJob;
+      await call(jobId);
+      await refresh();
+      if (selectedJobId === jobId) await loadDetail(jobId, verifyS3);
+    } catch (err) {
+      setActionErrors((current) => ({
+        ...current,
+        [jobId]: err instanceof Error ? err.message : 'Action failed',
+      }));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const runBulk = async (action: 'retry' | 'dismiss') => {
+    const count = listedFailed.length;
+    if (count === 0 || !window.confirm(`${action === 'retry' ? 'Retry' : 'Dismiss'} ${count} failed jobs?`)) return;
+    setBulkBusy(true);
+    setBulkResults([]);
+    try {
+      setBulkResults(await bulkAdminJobs(action, listedFailed.map((job) => job.jobId)));
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Bulk action failed');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const runTrackAction = async (track: AdminLibraryTrack) => {
+    const key = `track:${track.id}`;
+    setActionBusy(key);
+    setActionErrors((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    try {
+      await setAdminTrackDeleted(track.id, !track.deletedAt);
+      await refresh();
+    } catch (err) {
+      setActionErrors((current) => ({
+        ...current,
+        [key]: err instanceof Error ? err.message : 'Library action failed',
+      }));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  const runDuplicateAction = async (group: AdminDuplicateGroup) => {
+    const action = group.keeperTrackId ? 'keep' : 'dismiss_failed';
+    setActionBusy(`duplicates:${group.groupId}`);
+    try {
+      const results = await applyAdminDuplicateAction({
+        action,
+        jobIds: group.jobs.map((job) => job.id),
+        trackIds: group.tracks.map((track) => track.id),
+        keeperTrackId: group.keeperTrackId,
+      });
+      setDuplicateResults((current) => ({ ...current, [group.groupId]: results }));
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Duplicate action failed');
+    } finally {
+      setActionBusy(null);
+    }
+  };
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-black text-white antialiased">
@@ -335,6 +446,7 @@ export const AdminPage: React.FC = () => {
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Jobs{' '}
+                  {dismissedCount > 0 && `${dismissedCount} dismissed · `}
                   {Object.entries(counts)
                     .map(([status, n]) => `${n} ${status}`)
                     .join(' · ')}
@@ -356,71 +468,58 @@ export const AdminPage: React.FC = () => {
                     ))}
                   </select>
                 </label>
+                <label className="flex items-center gap-2 text-xs text-zinc-500">
+                  View
+                  <select
+                    value={dismissedView}
+                    onChange={(event) => {
+                      setJobOffset(0);
+                      setDismissedView(event.target.value as 'hide' | 'only' | 'include');
+                    }}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200"
+                    aria-label="Dismissed jobs"
+                  >
+                    <option value="hide">active</option>
+                    <option value="only">dismissed</option>
+                    <option value="include">include dismissed</option>
+                  </select>
+                </label>
               </div>
+              {listedFailed.length > 0 && (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" disabled={bulkBusy} onClick={() => void runBulk('retry')}>
+                    Retry all failed ({listedFailed.length})
+                  </Button>
+                  <Button size="sm" variant="outline" disabled={bulkBusy} onClick={() => void runBulk('dismiss')}>
+                    Dismiss all failed ({listedFailed.length})
+                  </Button>
+                </div>
+              )}
+              {bulkResults.length > 0 && (
+                <ul aria-label="Bulk action results" className="mb-3 space-y-1 text-xs">
+                  {bulkResults.map((result, index) => (
+                    <li key={`${result.jobId}-${index}`} className={result.ok ? 'text-green-400' : 'text-red-400'}>
+                      {result.jobId.slice(0, 8)}: {result.ok ? `ok${result.resumeStage ? ` (${result.resumeStage})` : ''}` : result.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {sortedJobs.length === 0 ? (
                 <p className="text-sm text-zinc-600">No jobs match this filter.</p>
               ) : (
                 <div className="grid gap-2 lg:grid-cols-2">
                   {sortedJobs.map((job) => (
-                    <button
+                    <JobCard
                       key={job.jobId}
-                      type="button"
-                      onClick={() => {
+                      job={job}
+                      error={actionErrors[job.jobId]}
+                      busy={actionBusy === job.jobId}
+                      onSelect={() => {
                         setVerifyS3(false);
                         void loadDetail(job.jobId, false);
                       }}
-                      className={cn(
-                        'w-full rounded-lg border p-3 text-left transition-colors hover:bg-zinc-800',
-                        job.status === 'failed'
-                          ? 'border-red-900/70 bg-zinc-950'
-                          : 'border-zinc-800 bg-zinc-950/50'
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate font-medium text-zinc-200">{jobTitle(job)}</span>
-                        <span
-                          className={cn(
-                            'shrink-0 text-xs font-medium',
-                            job.status === 'failed'
-                              ? 'text-red-400'
-                              : job.status === 'ready'
-                                ? 'text-green-400'
-                                : 'text-zinc-400'
-                          )}
-                        >
-                          {job.status}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-zinc-500">
-                        <span>attempt {job.attempt}</span>
-                        {executorLabel(job.executor) && <span>{executorLabel(job.executor)}</span>}
-                        <span>{job.workerPhase || job.stage}</span>
-                        <span>updated {age(job.updatedAt)}</span>
-                      </div>
-                      {job.errorCode && (
-                        <p className="mt-2 text-xs">
-                          <span className="rounded bg-red-950/70 px-1.5 py-0.5 font-mono text-red-300">
-                            {job.errorCode}
-                          </span>
-                          {job.errorDetail && (
-                            <span className="ml-2 text-zinc-400">{job.errorDetail}</span>
-                          )}
-                        </p>
-                      )}
-                      {job.flags.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {job.flags.map((flag) => (
-                            <span
-                              key={flag}
-                              title={flag}
-                              className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300"
-                            >
-                              {FLAG_LABELS[flag] ?? flag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </button>
+                      onAction={runJobAction}
+                    />
                   ))}
                 </div>
               )}
@@ -459,14 +558,192 @@ export const AdminPage: React.FC = () => {
                 verifyS3={verifyS3}
                 onToggleVerify={() => setVerifyS3((value) => !value)}
                 onReleased={() => selectedJobId && void loadDetail(selectedJobId, verifyS3)}
+                actionError={actionErrors[selectedJobId]}
+                actionBusy={actionBusy === selectedJobId}
+                onAction={runJobAction}
               />
             )}
+            <LibrarySection
+              tracks={tracks}
+              view={trackView}
+              onView={setTrackView}
+              actionBusy={actionBusy}
+              errors={actionErrors}
+              onAction={runTrackAction}
+            />
+            <DuplicatesSection
+              groups={duplicates}
+              results={duplicateResults}
+              actionBusy={actionBusy}
+              onAction={runDuplicateAction}
+            />
           </>
         )}
       </main>
     </div>
   );
 };
+
+// --- job and library actions -----------------------------------------------------
+
+type ActionJob = Pick<AdminJobRow, 'jobId' | 'status' | 'dismissedAt'>;
+
+const JobActionButtons: React.FC<{
+  job: ActionJob;
+  busy: boolean;
+  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+}> = ({ job, busy, onAction }) => {
+  if (job.dismissedAt) {
+    return <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('restore', job.jobId)}>Restore</Button>;
+  }
+  if (job.status !== 'failed') return null;
+  return (
+    <span className="flex gap-2">
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('retry', job.jobId)}>Retry</Button>
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction('dismiss', job.jobId)}>Dismiss</Button>
+    </span>
+  );
+};
+
+const JobCard: React.FC<{
+  job: AdminJobRow;
+  error?: string;
+  busy: boolean;
+  onSelect: () => void;
+  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+}> = ({ job, error, busy, onSelect, onAction }) => (
+  <div className={cn(
+    'w-full rounded-lg border p-3 text-left transition-colors',
+    job.status === 'failed' ? 'border-red-900/70 bg-zinc-950' : 'border-zinc-800 bg-zinc-950/50'
+  )}>
+    <button type="button" onClick={onSelect} className="block w-full text-left hover:bg-zinc-800">
+      <span className="flex items-center justify-between gap-2">
+        <span className="truncate font-medium text-zinc-200">{jobTitle(job)}</span>
+        <span className={cn(
+          'shrink-0 text-xs font-medium',
+          job.status === 'failed' ? 'text-red-400' : job.status === 'ready' ? 'text-green-400' : 'text-zinc-400'
+        )}>
+          {job.status}{job.dismissedAt ? ' · dismissed' : ''}
+        </span>
+      </span>
+      <span className="mt-1 flex flex-wrap gap-x-3 text-xs text-zinc-500">
+        <span>attempt {job.attempt}</span>
+        {executorLabel(job.executor) && <span>{executorLabel(job.executor)}</span>}
+        <span>{job.workerPhase || job.stage}</span>
+        <span>updated {age(job.updatedAt)}</span>
+      </span>
+      {job.errorCode && (
+        <span className="mt-2 block text-xs">
+          <span className="rounded bg-red-950/70 px-1.5 py-0.5 font-mono text-red-300">{job.errorCode}</span>
+          {job.errorDetail && <span className="ml-2 text-zinc-400">{job.errorDetail}</span>}
+        </span>
+      )}
+      {job.flags.length > 0 && (
+        <span className="mt-2 flex flex-wrap gap-1">
+          {job.flags.map((flag) => (
+            <span key={flag} title={flag} className="rounded-full border border-amber-800/70 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-300">
+              {FLAG_LABELS[flag] ?? flag}
+            </span>
+          ))}
+        </span>
+      )}
+    </button>
+    <span className="mt-2 flex items-center justify-between gap-2">
+      <JobActionButtons job={job} busy={busy} onAction={onAction} />
+      {error && <span className="text-xs text-red-400">{error}</span>}
+    </span>
+  </div>
+);
+
+const LibrarySection: React.FC<{
+  tracks: AdminLibraryTrack[];
+  view: 'only' | 'include';
+  onView: (view: 'only' | 'include') => void;
+  actionBusy: string | null;
+  errors: Record<string, string>;
+  onAction: (track: AdminLibraryTrack) => void;
+}> = ({ tracks, view, onView, actionBusy, errors, onAction }) => (
+  <section aria-label="Library" className="border-t border-zinc-800 pt-4">
+    <div className="mb-3 flex items-center justify-between gap-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Library</h2>
+      <label className="flex items-center gap-2 text-xs text-zinc-500">
+                    Deleted tracks
+        <select
+          value={view}
+          onChange={(event) => onView(event.target.value as 'only' | 'include')}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-200"
+        >
+          <option value="include">include</option>
+          <option value="only">only</option>
+        </select>
+      </label>
+    </div>
+    {tracks.length === 0 ? <p className="text-sm text-zinc-600">No tracks match this view.</p> : (
+      <div className="grid gap-2 lg:grid-cols-2">
+        {tracks.map((track) => (
+          <div key={track.id} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-sm">
+            <p className="font-medium text-zinc-200">{track.title}</p>
+            <p className="mt-1 text-xs text-zinc-500">
+              {track.artist} · {track.durationSeconds}s · generation {track.generation}
+              {track.deletedAt ? ' · removed' : ''}
+            </p>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <Button size="sm" variant="outline" disabled={actionBusy === `track:${track.id}`} onClick={() => onAction(track)}>
+                {track.deletedAt ? 'Restore' : 'Remove from library'}
+              </Button>
+              {errors[`track:${track.id}`] && <span className="text-xs text-red-400">{errors[`track:${track.id}`]}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    )}
+  </section>
+);
+
+const DuplicatesSection: React.FC<{
+  groups: AdminDuplicateGroup[];
+  results: Record<string, AdminDuplicateActionResult[]>;
+  actionBusy: string | null;
+  onAction: (group: AdminDuplicateGroup) => void;
+}> = ({ groups, results, actionBusy, onAction }) => (
+  <section aria-label="Duplicates" className="border-t border-zinc-800 pt-4">
+    <h2 className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">Duplicates</h2>
+    {groups.length === 0 ? <p className="text-sm text-zinc-600">No duplicate jobs or tracks.</p> : (
+      <div className="space-y-3">
+        {groups.map((group) => (
+          <div key={group.groupId} className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-sm">
+            <p className="text-xs text-zinc-500">{group.identity}</p>
+            <p className="mt-1 text-zinc-300">
+              {group.jobs.length} jobs · {group.tracks.length} tracks
+              {group.keeperTrackId ? ` · keeper ${group.keeperTrackId.slice(0, 8)}` : ' · no ready keeper'}
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              {[...group.jobs, ...group.tracks].map((member) => `${member.title ?? member.id.slice(0, 8)} (${member.status})`).join(' · ')}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-2"
+              disabled={actionBusy === `duplicates:${group.groupId}`}
+              onClick={() => onAction(group)}
+            >
+              {group.keeperTrackId ? 'Keep the good one, clear the rest' : 'Dismiss failed'}
+            </Button>
+            {results[group.groupId] && (
+              <ul className="mt-2 space-y-1 text-xs">
+                {results[group.groupId].map((result, index) => (
+                  <li key={`${result.itemId}-${index}`} className={result.ok ? 'text-green-400' : 'text-red-400'}>
+                    {result.kind} {result.itemId.slice(0, 8)}: {result.ok ? 'ok' : result.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    )}
+  </section>
+);
 
 // --- routing + RunPod limit -----------------------------------------------------
 
@@ -597,7 +874,7 @@ const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({
     setPendingNode(node.id);
     setError(null);
     try {
-      await setAdminNodeEnabled(node.id, enabled);
+      await setAdminNodeSeparationEnabled(node.id, enabled);
       onChanged();
     } catch (err) {
       // No optimistic write: the checkbox remains at the confirmed state.
@@ -636,13 +913,13 @@ const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({
                     )}
                   </span>
                   <label className="flex items-center gap-2 text-xs text-zinc-400">
-                    {node.enabled ? 'in use' : 'not used'}
+                    Separate stems on this node
                     <input
                       type="checkbox"
-                      checked={node.enabled}
+                      checked={node.separationEnabled}
                       disabled={pendingNode === node.id}
                       onChange={(event) => void toggle(node, event.target.checked)}
-                      aria-label={node.enabled ? `Stop using ${node.displayName}` : `Use ${node.displayName}`}
+                      aria-label={`Separate stems on this node: ${node.displayName}`}
                     />
                   </label>
                 </div>
@@ -651,13 +928,16 @@ const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({
                   {node.currentAssignment
                     ? `${node.currentAssignment.kind} ${node.currentAssignment.status} (${node.currentAssignment.phase ?? '—'}), heartbeat ${age(node.currentAssignment.heartbeatAt)}`
                     : 'idle'}
-                  {!node.enabled && <span className="text-red-400"> · disabled</span>}
+                  {!node.separationEnabled && <span className="text-red-400"> · separation unchecked</span>}
                 </div>
               </div>
             );
           })}
         </div>
       )}
+      <p className="mt-2 text-xs text-zinc-500">
+        Unchecked nodes still download; they just hand separation to another node or RunPod.
+      </p>
     </section>
   );
 };
@@ -674,7 +954,10 @@ const JobDetailSection: React.FC<{
   verifyS3: boolean;
   onToggleVerify: () => void;
   onReleased: () => void;
-}> = ({ jobId, detail, error, verifyS3, onToggleVerify, onReleased }) => {
+  actionError?: string;
+  actionBusy: boolean;
+  onAction: (action: 'retry' | 'dismiss' | 'restore', jobId: string) => void;
+}> = ({ jobId, detail, error, verifyS3, onToggleVerify, onReleased, actionError, actionBusy, onAction }) => {
   const [releaseBusy, setReleaseBusy] = useState<string | null>(null);
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const terminal = detail ? TERMINAL_JOB_STATUSES.has(detail.job.status) : false;
@@ -690,10 +973,14 @@ const JobDetailSection: React.FC<{
           </span>
         )}
       </h2>
-      <Button size="sm" variant={verifyS3 ? 'default' : 'outline'} onClick={onToggleVerify}>
-        {verifyS3 ? 'Checking storage…' : 'Check storage'}
-      </Button>
+      <span className="flex flex-wrap gap-2">
+        {detail && <JobActionButtons job={detail.job} busy={actionBusy} onAction={onAction} />}
+        <Button size="sm" variant={verifyS3 ? 'default' : 'outline'} onClick={onToggleVerify}>
+          {verifyS3 ? 'Checking storage…' : 'Check storage'}
+        </Button>
+      </span>
     </div>
+    {actionError && <p className="mb-2 text-sm text-red-400">{actionError}</p>}
     {error ? (
       <p className="text-sm text-red-400">{error}</p>
     ) : !detail ? (

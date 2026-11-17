@@ -137,6 +137,7 @@ export interface AdminJobRow {
   leaseOwner?: string | null;
   leaseExpiresAt?: string | null;
   nextRetryAt?: string | null;
+  dismissedAt?: string | null;
   trackId?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -149,6 +150,7 @@ export interface AdminJobsResponse {
   limit: number;
   offset: number;
   counts: Record<string, number>;
+  dismissedCount: number;
 }
 
 export type EvidenceStatus = 'ok' | 'missing' | 'mismatch' | 'not_yet' | 'unknown';
@@ -198,6 +200,7 @@ export interface AdminJobColumns {
   leaseOwner?: string | null;
   leaseExpiresAt?: string | null;
   nextRetryAt?: string | null;
+  dismissedAt?: string | null;
   profileVersion: number;
   inputChecksum?: string | null;
   outputChecksums?: Record<string, unknown> | null;
@@ -236,12 +239,72 @@ export interface AdminJobDetail {
   evidence: EvidenceItem[];
 }
 
-/** Admin wire shape: `enabled` is the inverse of public NodeInfo.disabled. */
+export interface AdminRetryResponse {
+  status: string;
+  resumeStage: string;
+  attempt: number;
+}
+
+export interface AdminJobActionResponse {
+  ok: boolean;
+  status: string;
+  dismissedAt?: string | null;
+}
+
+export interface AdminBulkResult {
+  jobId: string;
+  ok: boolean;
+  reason?: string | null;
+  resumeStage?: string | null;
+}
+
+export interface AdminLibraryTrack {
+  id: string;
+  title: string;
+  artist: string;
+  durationSeconds: number;
+  generation: number;
+  createdAt: string;
+  deletedAt?: string | null;
+  jobId?: string | null;
+}
+
+export interface AdminTrackActionResponse {
+  ok: boolean;
+  deletedAt?: string | null;
+}
+
+export interface AdminDuplicateMember {
+  id: string;
+  kind: 'job' | 'track';
+  status: string;
+  title?: string | null;
+  artist: string;
+  createdAt: string;
+  trackId?: string | null;
+}
+
+export interface AdminDuplicateGroup {
+  groupId: string;
+  identity: string;
+  jobs: AdminDuplicateMember[];
+  tracks: AdminDuplicateMember[];
+  keeperTrackId?: string | null;
+}
+
+export interface AdminDuplicateActionResult {
+  itemId: string;
+  kind: 'job' | 'track';
+  ok: boolean;
+  reason?: string | null;
+}
+
+/** Separation-only switch; unrelated to legacy NodeInfo.disabled/downloads. */
 export interface AdminNode {
   id: string;
   displayName: string;
   online: boolean;
-  enabled: boolean;
+  separationEnabled: boolean;
   capabilities: Record<string, unknown>;
   agentVersion?: string | null;
   lastSeenAt?: string | null;

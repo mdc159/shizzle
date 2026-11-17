@@ -19,6 +19,13 @@ import type {
   NodeListResponse,
   AdminJobsResponse,
   AdminJobDetail,
+  AdminJobActionResponse,
+  AdminBulkResult,
+  AdminLibraryTrack,
+  AdminRetryResponse,
+  AdminTrackActionResponse,
+  AdminDuplicateGroup,
+  AdminDuplicateActionResult,
   AdminNode,
   AdminSettings,
 } from '@/types/karaoke';
@@ -235,10 +242,12 @@ export async function getAdminJobs(
   status?: JobStatus['status'],
   signal?: AbortSignal,
   limit = 50,
-  offset = 0
+  offset = 0,
+  dismissed?: 'only' | 'include'
 ): Promise<AdminJobsResponse> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (status) params.set('status', status);
+  if (dismissed) params.set('dismissed', dismissed);
   return adminFetch<AdminJobsResponse>(`/api/admin/jobs?${params}`, { signal });
 }
 
@@ -255,10 +264,11 @@ export async function getAdminNodes(signal?: AbortSignal): Promise<{ nodes: Admi
   return adminFetch<{ nodes: AdminNode[] }>('/api/admin/nodes', { signal });
 }
 
-export async function setAdminNodeEnabled(nodeId: string, enabled: boolean): Promise<void> {
-  await adminFetch(`/api/admin/nodes/${encodeURIComponent(nodeId)}/${enabled ? 'enable' : 'disable'}`, {
-    method: 'POST',
-  });
+export async function setAdminNodeSeparationEnabled(nodeId: string, enabled: boolean): Promise<void> {
+  await adminFetch(
+    `/api/admin/nodes/${encodeURIComponent(nodeId)}/separation/${enabled ? 'enable' : 'disable'}`,
+    { method: 'POST' }
+  );
 }
 
 export async function getAdminSettings(signal?: AbortSignal): Promise<AdminSettings> {
@@ -280,4 +290,67 @@ export async function releaseAdminAssignment(assignmentId: string): Promise<void
   await adminFetch(`/api/admin/assignments/${encodeURIComponent(assignmentId)}/release`, {
     method: 'POST',
   });
+}
+
+// --- Failed-job and library actions ---------------------------------------------
+
+async function adminJobAction(jobId: string, action: 'retry' | 'dismiss' | 'restore') {
+  return adminFetch<AdminRetryResponse | AdminJobActionResponse>(
+    `/api/admin/jobs/${encodeURIComponent(jobId)}/${action}`,
+    { method: 'POST' }
+  );
+}
+
+export const retryAdminJob = (jobId: string) =>
+  adminJobAction(jobId, 'retry') as Promise<AdminRetryResponse>;
+export const dismissAdminJob = (jobId: string) =>
+  adminJobAction(jobId, 'dismiss') as Promise<AdminJobActionResponse>;
+export const restoreAdminJob = (jobId: string) =>
+  adminJobAction(jobId, 'restore') as Promise<AdminJobActionResponse>;
+
+export async function bulkAdminJobs(
+  action: 'retry' | 'dismiss',
+  jobIds: string[]
+): Promise<AdminBulkResult[]> {
+  return adminFetch<AdminBulkResult[]>('/api/admin/jobs/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, jobIds }),
+  });
+}
+
+export async function getAdminTracks(
+  deleted: 'only' | 'include' = 'include',
+  signal?: AbortSignal
+): Promise<{ tracks: AdminLibraryTrack[] }> {
+  return adminFetch<{ tracks: AdminLibraryTrack[] }>(`/api/admin/tracks?deleted=${deleted}`, { signal });
+}
+
+export async function getAdminDuplicates(
+  signal?: AbortSignal
+): Promise<{ groups: AdminDuplicateGroup[] }> {
+  return adminFetch<{ groups: AdminDuplicateGroup[] }>('/api/admin/duplicates', { signal });
+}
+
+export async function applyAdminDuplicateAction(update: {
+  action: 'keep' | 'dismiss_failed';
+  jobIds: string[];
+  trackIds: string[];
+  keeperTrackId?: string | null;
+}): Promise<AdminDuplicateActionResult[]> {
+  return adminFetch<AdminDuplicateActionResult[]>('/api/admin/duplicates/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+}
+
+export async function setAdminTrackDeleted(
+  trackId: string,
+  deleted: boolean
+): Promise<AdminTrackActionResponse> {
+  return adminFetch<AdminTrackActionResponse>(
+    `/api/admin/tracks/${encodeURIComponent(trackId)}/${deleted ? 'remove' : 'restore'}`,
+    { method: 'POST' }
+  );
 }
