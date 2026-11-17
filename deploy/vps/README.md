@@ -102,6 +102,10 @@ a list to reconcile against current `Settings`; configure the passcode, token
 signing secret, public origin, Postgres values, S3 bucket/credentials, and
 CloudFront domain/key-pair identity. Both application containers require the
 same `SHIZZLE_API_IMAGE`. Use a retained, published tag-plus-digest reference.
+On any host other than the current VPS, set `SHIZZLE_PUBLIC_IP` in `.env` to
+that host's public IPv4 address: Caddy publishes 80 and 443 on that address
+only, the default is the current VPS (`72.60.173.171`), and `config -q` does
+not catch an address the host does not have; `up -d` then fails to bind.
 Production's Postgres and appdata are persistent named volumes.
 
 The current Compose file requires the external volume
