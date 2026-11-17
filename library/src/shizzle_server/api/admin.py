@@ -787,7 +787,7 @@ def _build_db_evidence(
     for event in reversed(events[authority_start:]):
         detail = _event_detail(event)
         key = detail.get("idempotency_key")
-        if not isinstance(key, str) or key not in authority_keys:
+        if not isinstance(key, str) or (retry_index is not None and key not in authority_keys):
             continue
         if recovered is None and event.event == "runpod_dispatch_recovered":
             recovered = detail
