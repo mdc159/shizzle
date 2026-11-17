@@ -776,11 +776,13 @@ expire or reassign an assignment themselves.
 
 **Invariant:** Every string in every `/api/admin/*` response MUST pass through
 `AdminResponseRedactionMiddleware` and the single recursive `_redact_value`
-policy, including nested values, newly added fields and framework-generated
-error responses. Serializers may redact earlier for defense in depth, but no
-admin response may depend on per-field redaction for safety.
+policy, including nested values, dictionary keys, newly added fields and
+framework-generated error responses. URL matching is case-insensitive, and
+keys that sanitize to the same placeholder are disambiguated without leaking
+or dropping entries. Serializers may redact earlier for defense in depth, but
+no admin response may depend on per-field redaction for safety.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/main.py`
-- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`
+- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`, `library/tests/test_admin_api.py::test_redaction_covers_url_keys_mixed_case_schemes_and_collisions`
 - Violation smell: returning a new admin field without response-boundary
   coverage, bypassing the middleware, or maintaining a second divergent
   redaction policy.

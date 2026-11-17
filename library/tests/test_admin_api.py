@@ -1542,3 +1542,118 @@ async def test_recovered_identity_must_match_the_selected_package_prefix(
     assert identity["status"] == "mismatch"
     assert "selected package prefix" in identity["observed"]
     assert "belongs to another key" in identity["observed"]
+
+
+async def test_redaction_covers_url_keys_mixed_case_schemes_and_collisions(
+    admin_client,
+):
+    """URL-bearing keys are response text too; collisions must not drop data."""
+    c, app = admin_client
+    job = await _make_job(app, source_type=SourceType.url, source_ref=CRED_URL)
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    event_key = "event HTTPS://example.test/?token=event-key-secret"
+    await app.state.job_repo.append_event(
+        job.id,
+        "diagnostic",
+        {event_key: "value HTTP://example.test/?token=event-value-secret"},
+    )
+    await app.state.node_repo.heartbeat(
+        "mac-mini",
+        capabilities={
+            "HTTPS://example.test/?token=capability-one-secret": "first",
+            "[redacted]": "pre-existing collision",
+            "HTTP://example.test/?token=capability-two-secret": "second",
+        },
+    )
+    assignment = await app.state.node_repo.create_assignment(
+        job.id,
+        worker_id="w",
+        node_id="mac-mini",
+        kind=NodeAssignmentKind.download,
+        payload={"url": CRED_URL},
+    )
+    assert assignment is not None
+    assert await app.state.node_repo.progress(
+        assignment.id,
+        node_id="mac-mini",
+        phase="fetching HTTPS://example.test/?token=phase-secret",
+    )
+
+    detail = await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)
+    nodes = await c.get("/api/admin/nodes", headers=HEADERS)
+    for response in (detail, nodes):
+        assert response.status_code == 200
+        assert "http://" not in response.text.lower()
+        for secret in (
+            "event-key-secret",
+            "event-value-secret",
+            "capability-one-secret",
+            "capability-two-secret",
+            "phase-secret",
+        ):
+            assert secret not in response.text
+
+    event = next(e for e in detail.json()["events"] if e["event"] == "diagnostic")
+    assert event["detail"] == {"event [redacted]": "[redacted]"}
+    current = nodes.json()["nodes"][0]["currentAssignment"]
+    assert current["phase"] == "fetching [redacted]"
+    capabilities = nodes.json()["nodes"][0]["capabilities"]
+    assert len(capabilities) == 3  # both sanitized collisions were retained
+    assert list(capabilities.values()).count("[redacted]") == 2
+    assert "pre-existing collision" in capabilities.values()
+    assert all("token" not in key.lower() for key in capabilities)
+
+
+async def test_outstanding_retry_reservation_supersedes_closed_confirmation(
+    admin_client,
+):
+    """Attempt 0 is closed; reserved attempt 1 is already the current identity."""
+    from shizzle_server.orchestrator import cloud
+
+    c, app = admin_client
+    job = await _make_job(app, title="Reserved retry")
+    claimed = await app.state.job_repo.claim_next(worker_id="w0", lease_seconds=600)
+    assert claimed.id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await app.state.job_repo.advance(
+            job.id, worker_id="w0", from_stage=from_stage, to_stage=to_stage
+        )
+    key0 = f"{job.id.hex}:0"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="w0", idempotency_key=key0
+    )
+    await app.state.job_repo.confirm_dispatch(
+        job.id, idempotency_key=key0, runpod_job_id="rp-dead"
+    )
+    await app.state.job_repo.record_worker_progress(
+        job.id, phase="failed", worker_id="w0"
+    )
+    await app.state.job_repo.schedule_retry(
+        job.id,
+        worker_id="w0",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="attempt 0 failed",
+        retry_in_seconds=0,
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w1", lease_seconds=600)
+    assert claimed.id == job.id and claimed.attempt == 1
+    key1 = f"{job.id.hex}:1"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id="w1", idempotency_key=key1
+    )
+
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key1
+    assert body["dispatchAttempt"]["attemptPrefix"] == cloud.attempt_prefix(
+        track_id_for_job(job.id), key1
+    )
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    assert identity["observed"] == f"reservation key={key1} unconfirmed"

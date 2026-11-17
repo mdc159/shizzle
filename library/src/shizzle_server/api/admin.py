@@ -408,7 +408,7 @@ _REDACT_KEY_FRAGMENTS = (
     "secret",
     "url",
 )
-_URL_SCRUB_RE = re.compile(r"https?://[^\s\"'<>]+")
+_URL_SCRUB_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def _redact_value(value: Any) -> Any:
@@ -416,11 +416,20 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, child in value.items():
-            lowered = str(key).lower()
+            original_key = str(key)
+            lowered = original_key.lower()
+            base_key = _URL_SCRUB_RE.sub(_REDACTED, original_key)
+            # Two credential-bearing keys can scrub to the same placeholder.
+            # Keep both entries without reintroducing their sensitive text.
+            redacted_key = base_key
+            suffix = 2
+            while redacted_key in redacted:
+                redacted_key = f"{base_key} ({suffix})"
+                suffix += 1
             if any(fragment in lowered for fragment in _REDACT_KEY_FRAGMENTS):
-                redacted[key] = _REDACTED
+                redacted[redacted_key] = _REDACTED
             else:
-                redacted[key] = _redact_value(child)
+                redacted[redacted_key] = _redact_value(child)
         return redacted
     if isinstance(value, list):
         return [_redact_value(child) for child in value]
@@ -552,13 +561,22 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
         ):
             transition_index = index
     history = events[:transition_index] if transition_index is not None else events
+    pending = pending_runpod_dispatch(history)
+    # An outstanding reservation opens the current execution's authority
+    # window. Confirmations/recoveries from before it belong to closed attempts
+    # and must not override the reservation; a same-attempt recovery after it
+    # remains authoritative because pending_runpod_dispatch retains that row.
+    if pending is not None:
+        pending_index = next(
+            index for index, event in enumerate(history) if event is pending
+        )
+        history = history[pending_index:]
 
     for event_name in ("runpod_dispatch_recovered", "runpod_dispatched"):
         for event in reversed(history):
             key = _event_detail(event).get("idempotency_key")
             if event.event == event_name and isinstance(key, str):
                 return key
-    pending = pending_runpod_dispatch(history)
     if pending is not None:
         key = _event_detail(pending).get("idempotency_key")
         if isinstance(key, str):
@@ -652,9 +670,14 @@ def _build_db_evidence(
     # separate fact: later-stage retries increment it without redispatching,
     # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
+    authority_start = 0
+    if pending is not None:
+        authority_start = next(
+            index for index, event in enumerate(events) if event is pending
+        )
     recovered = None
     confirmed = None
-    for event in reversed(events):
+    for event in reversed(events[authority_start:]):
         detail = _event_detail(event)
         key = detail.get("idempotency_key")
         if not isinstance(key, str):
