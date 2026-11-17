@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import subprocess
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
@@ -111,6 +113,49 @@ async def _fail(app, job, stage, code=ErrorCode.RUNPOD_DISPATCH_FAILED):
         error_detail="action test failure",
     )
     return claimed
+
+
+def _write_real_lossless_package(root, job, checksum):
+    roles = ("vocals", "drums", "bass", "guitar", "piano", "shizzle")
+    root.mkdir(parents=True, exist_ok=True)
+    stems = []
+    for role in roles:
+        path = root / "stems" / f"{role}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
+                "-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        stems.append({
+            "role": role,
+            "file": f"stems/{role}.wav",
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    handoff = {
+        "interface": "lossless-stem-v1",
+        "source": {
+            "object_key": cloud.source_key(track_id_for_job(job.id)),
+            "sha256": checksum,
+        },
+        "separation": {
+            "model": "htdemucs_6s",
+            "model_version": "test",
+            "worker_image": "worker:test",
+            "sample_rate_hz": 44100,
+            "channels": 2,
+            "sample_format": "f32le",
+            "start_sample": 0,
+            "sample_count": 4410,
+        },
+        "stems": stems,
+    }
+    (root / "handoff.json").write_text(json.dumps(handoff))
 
 
 def _source(app, job):
@@ -256,20 +301,7 @@ async def test_retry_refuses_missing_upload_source_but_uses_s3_fallback(
         return None
 
     monkeypatch.setattr(cloud, "download_package", download_package)
-    monkeypatch.setattr(
-        cloud,
-        "load_and_verify_package",
-        lambda _path: SimpleNamespace(
-            handoff={
-                "source": {
-                    "sha256": checksum,
-                    "object_key": cloud.source_key(track_id_for_job(present.id)),
-                },
-                "separation": {"sample_count": 44100},
-            },
-            duration_seconds=1.0,
-        ),
-    )
+    _write_real_lossless_package(local.parent / "package", present, checksum)
     assert await cloud.cloud_verifying(ctx) == JobStage.publishing
 
 

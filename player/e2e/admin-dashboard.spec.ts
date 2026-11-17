@@ -519,8 +519,10 @@ test.describe('Admin page (/admin)', () => {
   test('shows a link resubmission and selects the new job', async ({ page }) => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);
-    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry`, (route) =>
-      route.fulfill({
+    let resubmitted = false;
+    await page.route(`**/api/admin/jobs/${FAILED_ID}/retry`, (route) => {
+      resubmitted = true;
+      return route.fulfill({
         json: {
           status: 'resubmitted',
           resumeStage: 'pending',
@@ -528,14 +530,63 @@ test.describe('Admin page (/admin)', () => {
           action: 'resubmitted',
           newJobId: READY_ID,
         },
+      });
+    });
+    await page.route('**/api/admin/jobs?*', (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get('dismissed') === 'only') {
+        return route.fulfill({
+          json: {
+            jobs: resubmitted ? [{ ...failedJob(), dismissedAt: NOW() }] : [],
+            total: resubmitted ? 1 : 0,
+            limit: 50,
+            offset: 0,
+            counts: {},
+            dismissedCount: resubmitted ? 1 : 0,
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          jobs: resubmitted ? [readyJob()] : [failedJob(), readyJob()],
+          total: resubmitted ? 1 : 2,
+          limit: 50,
+          offset: 0,
+          counts: resubmitted ? { ready: 1 } : { failed: 1, ready: 1 },
+          dismissedCount: resubmitted ? 1 : 0,
+        },
+      });
+    });
+    await page.route(`**/api/admin/jobs/${READY_ID}*`, (route) =>
+      route.fulfill({
+        json: {
+          ...detailPayload(false),
+          job: {
+            ...readyJob(),
+            idempotencyKey: `${READY_ID}:0`,
+            profileVersion: 1,
+            inputChecksum: null,
+            outputChecksums: null,
+            stageTimings: {},
+          },
+          derivedTrackId: READY_ID,
+          dispatchAttempt: { idempotencyKey: `${READY_ID}:0`, attemptPrefix: null, runpodJobId: null },
+          events: [{ id: 100, event: 'ready_job_selected', detail: {}, createdAt: NOW() }],
+          assignments: [],
+          track: null,
+          evidence: [],
+        },
       })
     );
     await page.goto('/admin');
     await page.getByRole('button', { name: 'Retry', exact: true }).first().click();
     await expect(page.getByText('Resubmitted as a new job')).toBeVisible();
-    await expect(
-      page.locator('section[aria-label="Job detail"] h2').first()
-    ).toContainText(READY_ID.slice(0, 8));
+    await page.getByTitle('Refresh').click();
+    await expect(page.getByText('Resubmitted as a new job')).toBeVisible();
+    await page.getByRole('button', { name: `New job ${READY_ID.slice(0, 8)}` }).click();
+    await expect(page.getByText('ready_job_selected')).toBeVisible();
+    await page.getByLabel('Dismissed jobs').selectOption('only');
+    await expect(page.locator('button', { hasText: 'Broken Ballad' })).toBeVisible();
   });
 
   test('shows action refusals next to the row and detail, including unknown ids', async ({ page }) => {

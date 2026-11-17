@@ -379,6 +379,10 @@ async def test_cancelled_dismissal_finishes_cleanup_before_retry(
     )
     await asyncio.to_thread(started.wait)
     dismissing.cancel()
+    # Let the first cancellation reach the repository while the filesystem
+    # worker is still paused, then prove a second cancellation is also safe.
+    await asyncio.sleep(0.05)
+    assert not resume.is_set()
     dismissing.cancel()  # repeated cancellation must stay away from the operation
     retried = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
     assert retried.status_code == 409
