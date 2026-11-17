@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # initializing, the queue timeout is extended up to this separate budget
     # before the existing cancel/redispatch behavior applies.
     runpod_cold_start_seconds: float = 1800.0
+    # Cap on jobs holding a RunPod reservation or confirmed RunPod job at
+    # once (admin page runtime override; null = no limit, 0 = pause dispatch).
+    runpod_max_concurrent: int | None = None
 
     processing_profile_version: int = 1
 
@@ -78,6 +81,9 @@ class Settings(BaseSettings):
     #           the separation fallback after node_separate_wait_seconds.
     # "only":   never dispatch to RunPod; wait for a node.
     # "off":    today's behavior (URL jobs fail YTDLP_BLOCKED, RunPod separates).
+    # "download_only": max-performance mode — nodes only download URLs (exactly
+    #           as "prefer"), separation always goes to RunPod at once with no
+    #           node wait. Runtime-settable from the admin page.
     shizzle_node_routing: str = "prefer"
     # Per-node bearer tokens: "mac-mini=<token>,dell-9530=<token>". The node
     # row is created on first authenticated heartbeat; tokens live only here (E3).
@@ -135,14 +141,24 @@ class Settings(BaseSettings):
     # Signed-cookie validity. Refreshed by /api/media/session.
     media_ttl_seconds: int = 24 * 3600
 
+    # --- administrator surface (/api/admin, /admin) -------------------------
+    # The admin routes are reachable only through the owner's Tailscale-only
+    # reverse proxy, which adds this shared secret header; the public proxy
+    # strips it. Empty (the default) means every admin route 404s: fail
+    # closed. SHIZZLE_ADMIN_OPEN=1 skips the check for local dev/tests only.
+    shizzle_admin_proxy_secret: str = ""
+    shizzle_admin_open: bool = False
+
     @field_validator("shizzle_node_routing")
     @classmethod
     def _routing_mode(cls, value: str) -> str:
         # Fail at startup, not silently as "prefer": a typo here would make
         # URL jobs wait a day instead of failing fast.
         mode = value.strip().lower()
-        if mode not in ("prefer", "only", "off"):
-            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        if mode not in ("prefer", "only", "off", "download_only"):
+            raise ValueError(
+                "SHIZZLE_NODE_ROUTING must be one of prefer, only, off, download_only"
+            )
         return mode
 
     @property
@@ -150,8 +166,10 @@ class Settings(BaseSettings):
         # Normalized here as well: a value assigned after construction (tests,
         # tooling) bypasses the validator.
         mode = self.shizzle_node_routing.strip().lower()
-        if mode not in ("prefer", "only", "off"):
-            raise ValueError("SHIZZLE_NODE_ROUTING must be one of prefer, only, off")
+        if mode not in ("prefer", "only", "off", "download_only"):
+            raise ValueError(
+                "SHIZZLE_NODE_ROUTING must be one of prefer, only, off, download_only"
+            )
         return mode
 
     @property

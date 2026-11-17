@@ -263,6 +263,28 @@ class OrchestratorHeartbeat(Base):
 # --- worker nodes (docs/WORKER-NODES.md) --------------------------------------
 
 
+class RuntimeSetting(Base):
+    """Operator-controlled runtime settings (admin page), overriding env.
+
+    Keys currently in use:
+    - ``node_routing``: ``prefer`` | ``only`` | ``off`` | ``download_only``
+      (falls back to ``Settings.node_routing`` when absent).
+    - ``runpod_max_concurrent``: int >= 0 (0 pauses dispatch) or null (no
+      limit); falls back to ``Settings.runpod_max_concurrent`` when absent.
+
+    Values are JSON so the same column carries strings, ints and nulls.
+    """
+
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONType, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow,
+        server_default=func.now(),
+    )
+
+
 class NodeAssignmentKind(StrEnum):
     """What a node is asked to do for one job."""
 

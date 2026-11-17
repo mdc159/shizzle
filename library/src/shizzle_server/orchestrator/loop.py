@@ -25,6 +25,7 @@ from ..db.repository import (
     InvalidTransition,
     JobRepository,
     NodeRepository,
+    RuntimeSettingsRepository,
 )
 from ..errors import ErrorCode, StageError
 from ..settings import Settings, get_settings
@@ -56,6 +57,7 @@ class Orchestrator:
         self.jobs = JobRepository(sf)
         self.heartbeats = HeartbeatRepository(sf)
         self.nodes = NodeRepository(sf)
+        self.runtime = RuntimeSettingsRepository(sf)
         self.pipeline = build_pipeline(self.settings)
         self.runpod = (
             HttpRunPodClient(
@@ -160,6 +162,7 @@ class Orchestrator:
                     runpod=self.runpod,
                     worker_id=self.worker_id,
                     nodes=self.nodes,
+                    runtime=self.runtime,
                 )
                 from_stage = job.status
                 started = time.monotonic()

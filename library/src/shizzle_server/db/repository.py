@@ -33,6 +33,7 @@ from .models import (
     OrchestratorHeartbeat,
     PlaybackEvent,
     PlaybackSession,
+    RuntimeSetting,
     SourceType,
     Track,
     TrackGenerationEvent,
@@ -278,13 +279,66 @@ class JobRepository:
             res = await session.execute(select(Job).where(Job.idempotency_key == key))
             return res.scalar_one_or_none()
 
-    async def list_jobs(self, *, limit: int = 50, offset: int = 0) -> tuple[list[Job], int]:
+    async def list_jobs(
+        self, *, limit: int = 50, offset: int = 0, status: JobStage | None = None
+    ) -> tuple[list[Job], int]:
+        """Newest first; optional single-status filter."""
         async with self._sf() as session:
-            total = (await session.execute(select(func.count(Job.id)))).scalar_one()
-            res = await session.execute(
-                select(Job).order_by(Job.created_at.desc(), Job.id).limit(limit).offset(offset)
-            )
+            stmt = select(func.count(Job.id))
+            if status is not None:
+                stmt = stmt.where(Job.status == status)
+            total = (await session.execute(stmt)).scalar_one()
+            query = select(Job).order_by(Job.created_at.desc(), Job.id)
+            if status is not None:
+                query = query.where(Job.status == status)
+            res = await session.execute(query.limit(limit).offset(offset))
             return list(res.scalars().all()), total
+
+    async def count_jobs_by_status(self) -> dict[JobStage, int]:
+        async with self._sf() as session:
+            res = await session.execute(
+                select(Job.status, func.count(Job.id)).group_by(Job.status)
+            )
+            return {row[0]: int(row[1]) for row in res.all()}
+
+    async def count_runpod_dispatches(self) -> int:
+        """Jobs currently holding a RunPod reservation or confirmed RunPod job.
+
+        Counted at ``dispatched``: a confirmed RunPod job (``runpod_job_id``
+        set and not a ``node:`` executor id), or a job whose dispatch
+        reservation is still unresolved and is not bound to a node
+        (``jobs.executor`` is ``node:<id>`` the moment a node assignment is
+        created). Work already dispatched is never cancelled to make room —
+        this count only gates FRESH dispatches.
+        """
+        async with self._sf() as session:
+            res = await session.execute(select(Job).where(Job.status == JobStage.dispatched))
+            jobs = list(res.scalars().all())
+            count = 0
+            for job in jobs:
+                if job.runpod_job_id:
+                    if not job.runpod_job_id.startswith("node:"):
+                        count += 1
+                    continue
+                if job.executor and job.executor.startswith("node:"):
+                    continue
+                events_res = await session.execute(
+                    select(JobEvent)
+                    .where(
+                        JobEvent.job_id == job.id,
+                        JobEvent.event.in_(
+                            (
+                                _DISPATCH_STARTED_EVENT,
+                                _DISPATCH_CONFIRMED_EVENT,
+                                _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                            )
+                        ),
+                    )
+                    .order_by(JobEvent.id)
+                )
+                if pending_runpod_dispatch(list(events_res.scalars())) is not None:
+                    count += 1
+            return count
 
     async def list_events(self, job_id: uuid.UUID) -> list[JobEvent]:
         async with self._sf() as session:
@@ -1610,3 +1664,39 @@ class NodeRepository:
         if node is not None and node.busy_assignment_id == assignment.id:
             node.busy_assignment_id = None
             node.updated_at = now
+
+
+class RuntimeSettingsRepository:
+    """Operator runtime settings (admin page): DB overrides over env defaults.
+
+    The orchestrator reads the effective value at each routing decision, so
+    a change takes effect on the next pass without a restart. A missing row
+    falls back to the environment ``Settings`` value — behaviour is unchanged
+    until the owner changes something.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    async def get(self, key: str) -> RuntimeSetting | None:
+        async with self._sf() as session:
+            return await session.get(RuntimeSetting, key)
+
+    async def get_all(self) -> dict[str, RuntimeSetting]:
+        async with self._sf() as session:
+            res = await session.execute(select(RuntimeSetting))
+            return {row.key: row for row in res.scalars().all()}
+
+    async def set_value(self, key: str, value: Any) -> RuntimeSetting:
+        """Upsert one setting (validated by the admin API before it lands)."""
+        async with self._sf() as session, session.begin():
+            row = await session.get(RuntimeSetting, key, with_for_update=True)
+            if row is None:
+                row = RuntimeSetting(key=key, value=value)
+                session.add(row)
+            else:
+                row.value = value
+                row.updated_at = utcnow()
+            await session.flush()
+            await session.refresh(row)
+            return row

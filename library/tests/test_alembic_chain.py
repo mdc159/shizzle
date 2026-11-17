@@ -33,10 +33,11 @@ def test_single_linear_chain_with_matching_ids():
     script = _script()
     heads = script.get_heads()
     assert len(heads) == 1, f"migration chain has branched: {heads}"
-    assert heads[0] == "0006_worker_nodes"
+    assert heads[0] == "0007_runtime_settings"
 
     order = list(script.walk_revisions())
     assert [r.revision for r in order] == [
+        "0007_runtime_settings",
         "0006_worker_nodes",
         "0005_job_artist",
         "0004_worker_heartbeats",
@@ -78,3 +79,15 @@ def test_0006_adds_worker_nodes_and_rolls_back():
     for table in ("nodes", "node_assignments"):
         assert f'"{table}"' in up and f'"{table}"' in down
     assert '"executor"' in up and '"executor"' in down
+
+
+def test_0007_adds_runtime_settings_and_rolls_back():
+    module = _load("0007_runtime_settings")
+    assert module.revision == "0007_runtime_settings"
+    assert module.down_revision == "0006_worker_nodes"
+    import inspect
+
+    up = inspect.getsource(module.upgrade)
+    down = inspect.getsource(module.downgrade)
+    assert '"runtime_settings"' in up and '"runtime_settings"' in down
+    assert "create_table" in up and "drop_table" in down
