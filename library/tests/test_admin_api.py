@@ -1275,3 +1275,270 @@ async def test_contradictory_confirmed_dispatch_is_a_mismatch(admin_client):
     assert identity["status"] == "mismatch"
     assert f"key={job.id.hex}:9" in identity["observed"]
     assert f"selected dispatch {key0}" in identity["observed"]
+
+
+# --- every admin response crosses the redaction boundary (G6) ---------------------
+
+
+async def test_every_admin_response_string_uses_the_redaction_choke_point(
+    admin_client, session_factory, monkeypatch
+):
+    """Poison every free-text store, then walk every admin endpoint.
+
+    A synthetic route with a brand-new unredacted field also proves that a
+    future serializer cannot bypass the ASGI response boundary (G6).
+    """
+    from shizzle_server.api import admin as admin_module
+    from shizzle_server.db.models import Track
+    from shizzle_server.orchestrator.runtime import (
+        NODE_ROUTING_KEY,
+        RUNPOD_MAX_CONCURRENT_KEY,
+    )
+
+    c, app = admin_client
+    job = await _make_job(
+        app,
+        source_type=SourceType.url,
+        source_ref=CRED_URL,
+        title=f"title {CRED_URL}",
+        artist=f"artist {CRED_URL}",
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="w", lease_seconds=600)
+    assert claimed.id == job.id
+    await app.state.job_repo.advance(
+        job.id, worker_id="w", from_stage=JobStage.pending, to_stage=JobStage.downloading
+    )
+    await app.state.node_repo.heartbeat(
+        "mac-mini",
+        display_name=f"node {CRED_URL}",
+        capabilities={
+            "device": f"device {CRED_URL}",
+            "nested": {"detail": f"capability {CRED_URL}"},
+        },
+        agent_version=f"agent {CRED_URL}",
+    )
+    assignment = await app.state.node_repo.create_assignment(
+        job.id,
+        worker_id="w",
+        node_id="mac-mini",
+        kind=NodeAssignmentKind.download,
+        payload={"url": CRED_URL},
+        idempotency_key=f"assignment {CRED_URL}",
+    )
+    assert assignment is not None
+    assert await app.state.node_repo.progress(
+        assignment.id, node_id="mac-mini", phase=f"fetching {CRED_URL}"
+    )
+    await app.state.job_repo.append_event(
+        job.id,
+        "diagnostic",
+        {"detail": f"event {CRED_URL}", "nested": [f"history {CRED_URL}"]},
+    )
+
+    track_id = track_id_for_job(job.id)
+    async with session_factory() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.ready
+        row.title = f"title {CRED_URL}"
+        row.artist = f"artist {CRED_URL}"
+        row.runpod_job_id = CRED_URL
+        row.executor = f"executor {CRED_URL}"
+        row.worker_phase = f"phase {CRED_URL}"
+        row.idempotency_key = CRED_URL
+        row.lease_owner = f"lease {CRED_URL}"
+        row.input_checksum = CRED_URL
+        row.output_checksums = {"detail": f"output {CRED_URL}"}
+        row.error_code = CRED_URL
+        row.error_detail = f"failure {CRED_URL}"
+        row.stage_timings = {"detail": f"timing {CRED_URL}"}
+        row.track_id = track_id
+        assignment_row = await session.get(type(assignment), assignment.id)
+        assignment_row.detail = {"detail": f"assignment {CRED_URL}"}
+        session.add(
+            Track(
+                id=track_id,
+                title=f"track {CRED_URL}",
+                artist=f"performer {CRED_URL}",
+                duration_seconds=30.0,
+                s3_prefix=f"tracks/{track_id}/1/{CRED_URL}",
+                manifest_key=f"tracks/{track_id}/1/{CRED_URL}/manifest.json",
+                generation=1,
+                integrity={"detail": f"integrity {CRED_URL}"},
+            )
+        )
+    await app.state.runtime_repo.set_value(NODE_ROUTING_KEY, CRED_URL)
+    await app.state.runtime_repo.set_value(RUNPOD_MAX_CONCURRENT_KEY, CRED_URL)
+
+    def _credential_error(_settings, _key):
+        return admin_module._HeadOutcome(None, f"storage failed for {CRED_URL}")
+
+    monkeypatch.setattr(admin_module, "_head_blocking", _credential_error)
+
+    @app.get("/api/admin/_redaction_probe")
+    async def _new_unredacted_response_field():
+        return {
+            "newFreeText": f"new field {CRED_URL}",
+            "nested": [{"detail": f"future value {CRED_URL}"}],
+        }
+
+    calls = (
+        ("jobs", c.get("/api/admin/jobs", headers=HEADERS)),
+        ("job detail", c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)),
+        (
+            "job storage detail",
+            c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS),
+        ),
+        ("nodes", c.get("/api/admin/nodes", headers=HEADERS)),
+        ("settings", c.get("/api/admin/settings", headers=HEADERS)),
+        (
+            "settings validation",
+            c.put("/api/admin/settings", json={"nodeRouting": CRED_URL}, headers=HEADERS),
+        ),
+        (
+            "settings update",
+            c.put("/api/admin/settings", json={"nodeRouting": "prefer"}, headers=HEADERS),
+        ),
+        ("disable", c.post("/api/admin/nodes/mac-mini/disable", headers=HEADERS)),
+        ("enable", c.post("/api/admin/nodes/mac-mini/enable", headers=HEADERS)),
+        (
+            "release",
+            c.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        ),
+        ("future field", c.get("/api/admin/_redaction_probe", headers=HEADERS)),
+    )
+    for label, call in calls:
+        response = await call
+        assert response.status_code in (200, 422), label
+        assert CRED_FRAGMENT not in response.text, label
+        assert "https://" not in response.text, label
+
+
+# --- handoff recovery selects the recovered reservation's identity ----------------
+
+
+async def _recover_reserved_handoff(
+    app, monkeypatch, *, retry: bool, package_key: str | None = None
+):
+    """Use real repository transitions and handle_dispatched() recovery.
+
+    Only the external receipt/package observations are mocked. With ``retry``,
+    attempt 0 is confirmed and failed before attempt 1 is reserved/recovered.
+    """
+    from shizzle_server.orchestrator import cloud
+    from shizzle_server.orchestrator.runpod_client import NotConfiguredRunPodClient
+    from shizzle_server.orchestrator.stages import StageContext, handle_dispatched
+
+    job = await _make_job(app, title="Recover handoff")
+    worker = "recovery-0"
+    claimed = await app.state.job_repo.claim_next(worker_id=worker, lease_seconds=600)
+    assert claimed.id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await app.state.job_repo.advance(
+            job.id, worker_id=worker, from_stage=from_stage, to_stage=to_stage
+        )
+    key0 = f"{job.id.hex}:0"
+    assert await app.state.job_repo.reserve_dispatch(
+        job.id, worker_id=worker, idempotency_key=key0
+    )
+    selected_key = key0
+    if retry:
+        await app.state.job_repo.confirm_dispatch(
+            job.id, idempotency_key=key0, runpod_job_id="rp-dead"
+        )
+        await app.state.job_repo.record_worker_progress(
+            job.id, phase="failed", worker_id=worker
+        )
+        await app.state.job_repo.schedule_retry(
+            job.id,
+            worker_id=worker,
+            error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+            error_detail="attempt 0 failed",
+            retry_in_seconds=0,
+        )
+        worker = "recovery-1"
+        claimed = await app.state.job_repo.claim_next(worker_id=worker, lease_seconds=600)
+        assert claimed.id == job.id
+        job = claimed
+        selected_key = f"{job.id.hex}:1"
+        assert await app.state.job_repo.reserve_dispatch(
+            job.id, worker_id=worker, idempotency_key=selected_key
+        )
+    else:
+        job = claimed
+
+    async def _no_receipt(_ctx, *, idempotency_key):
+        assert idempotency_key == selected_key
+        return None
+
+    async def _handoff_present(_ctx, *, idempotency_key):
+        assert idempotency_key == selected_key
+        return True
+
+    monkeypatch.setattr(cloud, "accepted_dispatch_id", _no_receipt)
+    monkeypatch.setattr(cloud, "package_ready", _handoff_present)
+    ctx = StageContext(
+        job=job,
+        settings=app.state.settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=app.state.job_repo,
+        runpod=NotConfiguredRunPodClient(),
+        worker_id=worker,
+    )
+    assert await handle_dispatched(ctx) == JobStage.verifying
+    if package_key is not None:
+        ctx.detail["package_prefix"] = cloud.attempt_prefix(
+            track_id_for_job(job.id), package_key
+        )
+    await app.state.job_repo.advance(
+        job.id,
+        worker_id=worker,
+        from_stage=JobStage.dispatched,
+        to_stage=JobStage.verifying,
+        detail=ctx.detail,
+    )
+    return job, selected_key, cloud.attempt_prefix(track_id_for_job(job.id), selected_key)
+
+
+async def test_fresh_handoff_recovery_reports_the_reservation_identity(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job, key, prefix = await _recover_reserved_handoff(app, monkeypatch, retry=False)
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key
+    assert body["dispatchAttempt"]["attemptPrefix"] == prefix
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    assert f"recovered from handoff.json key={key}" in identity["observed"]
+
+
+async def test_retry_handoff_recovery_overrides_the_dead_confirmation(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job, key1, prefix1 = await _recover_reserved_handoff(app, monkeypatch, retry=True)
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key1
+    assert body["dispatchAttempt"]["idempotencyKey"] != f"{job.id.hex}:0"
+    assert body["dispatchAttempt"]["attemptPrefix"] == prefix1
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    assert f"recovered from handoff.json key={key1}" in identity["observed"]
+
+
+async def test_recovered_identity_must_match_the_selected_package_prefix(
+    admin_client, monkeypatch
+):
+    c, app = admin_client
+    job, key1, _prefix1 = await _recover_reserved_handoff(
+        app, monkeypatch, retry=True, package_key="wrong-attempt"
+    )
+    body = (await c.get(f"/api/admin/jobs/{job.id}", headers=HEADERS)).json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key1
+    identity = next(i for i in body["evidence"] if i["name"] == "dispatch_identity")
+    assert identity["status"] == "mismatch"
+    assert "selected package prefix" in identity["observed"]
+    assert "belongs to another key" in identity["observed"]

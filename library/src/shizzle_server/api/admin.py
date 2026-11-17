@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import json
 import re
 import uuid
 from datetime import UTC, datetime
@@ -32,6 +33,8 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..db.models import (
     NODE_ASSIGNMENT_OPEN,
@@ -426,6 +429,53 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
+class AdminResponseRedactionMiddleware:
+    """Apply the one G6 redaction policy to every admin response body.
+
+    This is deliberately an ASGI boundary instead of per-field serializer
+    calls: new response fields, nested values, validation errors and future
+    admin routes cannot accidentally bypass it. Admin endpoints return JSON;
+    a non-JSON error body still passes through the same string scrubber.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith("/api/admin/"):
+            await self.app(scope, receive, send)
+            return
+
+        start: Message | None = None
+        chunks: list[bytes] = []
+
+        async def capture(message: Message) -> None:
+            nonlocal start
+            if message["type"] == "http.response.start":
+                start = message
+            elif message["type"] == "http.response.body":
+                chunks.append(message.get("body", b""))
+            else:
+                await send(message)
+
+        await self.app(scope, receive, capture)
+        assert start is not None  # every ASGI response starts before its body
+        raw = b"".join(chunks)
+        try:
+            parsed = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            redacted = _redact_value(raw.decode("utf-8", errors="replace"))
+            body = redacted.encode("utf-8")
+        else:
+            body = json.dumps(
+                _redact_value(parsed), ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        headers = MutableHeaders(raw=start["headers"])
+        headers["content-length"] = str(len(body))
+        await send({**start, "headers": headers.raw})
+        await send({"type": "http.response.body", "body": body})
+
+
 def _stage_entry_age(job: Job, events: list[JobEvent]) -> float | None:
     """Seconds since the job entered its current stage (approximate, DB-only)."""
     for event in reversed(events):
@@ -484,16 +534,15 @@ def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str])
 
 
 def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
-    """The idempotency key of the dispatch the job's CURRENT identity rests on,
-    derived from durable dispatch history — never from ``jobs.attempt``.
+    """Resolve the selected attempt from durable history, in authority order.
 
-    Later-stage retries (verification, publication) increment the retry
-    counter WITHOUT redispatching: the selected package still belongs to the
-    dispatch that was confirmed before the dispatched->verifying transition.
-    A job still inside ``dispatched`` names its in-flight reservation or
-    confirmation when one exists, else the key a fresh dispatch would use.
+    A handoff can select a package without ever writing a confirmation (B3).
+    Its recovery event is therefore authoritative; otherwise use the latest
+    keyed confirmation, then an outstanding reservation. Events after the
+    dispatched->verifying transition cannot retroactively select its package.
+    Later-stage retries increment ``jobs.attempt`` without changing it.
     """
-    transition_index = None
+    transition_index: int | None = None
     for index, event in enumerate(events):
         detail = _event_detail(event)
         if (
@@ -502,21 +551,20 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
             and detail.get("to") == "verifying"
         ):
             transition_index = index
-    if transition_index is not None:
-        for event in reversed(events[:transition_index]):
+    history = events[:transition_index] if transition_index is not None else events
+
+    for event_name in ("runpod_dispatch_recovered", "runpod_dispatched"):
+        for event in reversed(history):
             key = _event_detail(event).get("idempotency_key")
-            if event.event == "runpod_dispatched" and isinstance(key, str):
+            if event.event == event_name and isinstance(key, str):
                 return key
-        return None  # legacy transition with no keyed confirmation
-    pending = pending_runpod_dispatch(events)
+    pending = pending_runpod_dispatch(history)
     if pending is not None:
         key = _event_detail(pending).get("idempotency_key")
         if isinstance(key, str):
             return key
-    for event in reversed(events):
-        key = _event_detail(event).get("idempotency_key")
-        if event.event == "runpod_dispatched" and isinstance(key, str):
-            return key
+    if transition_index is not None:
+        return None  # legacy transition with no durable keyed identity
     return f"{job.id.hex}:{job.attempt}"
 
 
@@ -604,44 +652,71 @@ def _build_db_evidence(
     # separate fact: later-stage retries increment it without redispatching,
     # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
+    recovered = None
     confirmed = None
     for event in reversed(events):
         detail = _event_detail(event)
-        if event.event == "runpod_dispatched" and isinstance(
-            detail.get("idempotency_key"), str
-        ):
+        key = detail.get("idempotency_key")
+        if not isinstance(key, str):
+            continue
+        if recovered is None and event.event == "runpod_dispatch_recovered":
+            recovered = detail
+        if confirmed is None and event.event == "runpod_dispatched":
             confirmed = detail
-            break
     selected_key = _selected_dispatch_key(job, events)
+    selected_prefix = _selected_package_prefix(job, events, stages)
     current_retry_key = f"{job.id.hex}:{job.attempt}"
+    expected_prefix = (
+        cloud.attempt_prefix(track_id_for_job(job.id), selected_key)
+        if selected_key is not None
+        else None
+    )
+    prefix_matches = (
+        selected_prefix is not None and selected_prefix == expected_prefix
+    )
     if "dispatched" not in stages:
         observed = "job has not reached dispatched"
         status: EvidenceStatus = "not_yet"
+    elif recovered is not None:
+        recovered_key = str(recovered.get("idempotency_key"))
+        observed = (
+            f"recovered from {recovered.get('source')} key={recovered_key}"
+        )
+        if recovered_key != selected_key:
+            observed += f"; expected the selected dispatch {selected_key}"
+            status = "mismatch"
+        elif not prefix_matches:
+            observed += f"; selected package prefix {selected_prefix} belongs to another key"
+            status = "mismatch"
+        else:
+            status = "ok"
     elif confirmed is not None:
         confirmed_key = str(confirmed.get("idempotency_key"))
         observed = (
             f"confirmed runpod_job_id={confirmed.get('runpod_job_id')} "
             f"key={confirmed_key}"
         )
-        if confirmed_key == selected_key:
-            status = "ok"
-        elif job.worker_phase == "failed":
-            # B12: the confirmed execution is closed and the retry dispatches
-            # fresh — consistent by design, not a contradiction.
-            observed += f"; worker failed, retry dispatches fresh under {selected_key}"
-            status = "ok"
-        else:
+        if confirmed_key != selected_key:
             observed += f"; expected the selected dispatch {selected_key}"
             status = "mismatch"
+        elif not prefix_matches:
+            observed += f"; selected package prefix {selected_prefix} belongs to another key"
+            status = "mismatch"
+        else:
+            status = "ok"
     elif pending is not None:
         pending_key = str(_event_detail(pending).get("idempotency_key"))
         observed = f"reservation key={pending_key} unconfirmed"
-        status = "ok" if pending_key == selected_key else "mismatch"
+        status = (
+            "ok"
+            if pending_key == selected_key and prefix_matches
+            else "mismatch"
+        )
     else:
         observed = "no dispatch recorded yet (waiting for a node or the RunPod cap)"
         status = "not_yet"
     expected = (
-        f"the selected dispatch key {selected_key} "
+        f"the selected dispatch key {selected_key} and its attempt prefix "
         f"(retry counter now at {current_retry_key})"
         if selected_key is not None
         else "a keyed dispatch selects the package"
@@ -651,7 +726,10 @@ def _build_db_evidence(
         "dispatch_identity",
         expected=expected,
         observed=observed,
-        proof="job_events (runpod_dispatch_started / runpod_dispatched)",
+        proof=(
+            "job_events (runpod_dispatch_started / runpod_dispatch_recovered / "
+            "runpod_dispatched) and the selected package prefix"
+        ),
         status=status,
     )
 

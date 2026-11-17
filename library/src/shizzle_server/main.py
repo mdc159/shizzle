@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.admin import AdminResponseRedactionMiddleware
 from .api.admin import router as admin_router
 from .api.nodes import router as nodes_router
 from .api.remote import router as remote_router
@@ -87,6 +88,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # G6: one mandatory output boundary for every current and future admin
+    # route, including framework-generated error responses.
+    app.add_middleware(AdminResponseRedactionMiddleware)
     app.include_router(router)
     app.include_router(remote_router)
     app.include_router(nodes_router)

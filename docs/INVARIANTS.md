@@ -719,8 +719,9 @@ their `payload`. Because real history can echo credential-bearing values in
 unexpected places — the URL-download completion event stores
 `detail.source.source_ref`, node failure text quotes URLs, integrity blobs
 may embed signed URLs — every nested detail and diagnostic string an admin
-route returns is recursively redacted: credential-shaped keys are replaced
-and URL-shaped strings scrubbed (defense in depth on top of E2/E3).
+route returns is recursively redacted at the response boundary (G6):
+credential-shaped keys are replaced and URL-shaped strings scrubbed
+(defense in depth on top of E2/E3).
 - Where: `library/src/shizzle_server/api/admin.py`
 - Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`, `library/tests/test_admin_api.py::test_populated_history_and_reports_are_redacted`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
 - Violation smell: adding `source_ref` or the assignment `payload` to an admin
@@ -770,3 +771,16 @@ expire or reassign an assignment themselves.
 - Guarded by: `library/tests/test_runtime_routing.py::test_disabled_node_receives_no_new_assignment`
 - Violation smell: a routing candidate list that ignores `disabled_at`, or a
   disable endpoint that also expires assignments.
+
+### G6 — every admin response string crosses one redaction boundary
+
+**Invariant:** Every string in every `/api/admin/*` response MUST pass through
+`AdminResponseRedactionMiddleware` and the single recursive `_redact_value`
+policy, including nested values, newly added fields and framework-generated
+error responses. Serializers may redact earlier for defense in depth, but no
+admin response may depend on per-field redaction for safety.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/main.py`
+- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`
+- Violation smell: returning a new admin field without response-boundary
+  coverage, bypassing the middleware, or maintaining a second divergent
+  redaction policy.
