@@ -375,11 +375,13 @@ mkdir -p /opt/shizzle/staging/secrets
 cd /opt/shizzle/staging
 cp "$CHECKOUT/deploy/vps/.env.staging.example" .env   # then edit as below
 chmod 600 .env
-# set in .env: POSTGRES_PASSWORD, SHIZZLE_PASSCODE, TOKEN_SIGNING_SECRET,
+# set in .env: POSTGRES_PASSWORD, TOKEN_SIGNING_SECRET,
 #      DATABASE_URL (same credentials, URL-encoded userinfo), AWS keys,
 #      SHIZZLE_ADMIN_PROXY_SECRET, S3_MEDIA_BUCKET=shizzle-staging-media,
 #      CLOUDFRONT_DOMAIN=<dXXX from step 4>, CLOUDFRONT_KEY_PAIR_ID=<K… from step 3>,
-#      RUNPOD_* if staging separates (SHIZZLE_NODE_TOKENS stays empty)
+#      RUNPOD_* if staging separates (SHIZZLE_NODE_TOKENS stays empty);
+#      SHIZZLE_PASSCODE stays empty too — staging runs without a passcode
+#      gate, like production
 # URL-encode a raw password without putting it in shell history; paste the
 # result into the password component of DATABASE_URL in .env.
 python3 - <<'PY'

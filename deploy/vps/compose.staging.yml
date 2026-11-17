@@ -67,7 +67,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env with URL-encoded credentials}
       DATA_DIR: /app/data
       SHIZZLE_EMBEDDED_ORCHESTRATOR: "false"
-      SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:?set SHIZZLE_PASSCODE in .env}
+      SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE-}
       TOKEN_SIGNING_SECRET: ${TOKEN_SIGNING_SECRET:?set TOKEN_SIGNING_SECRET in .env}
       CLOUDFRONT_PRIVATE_KEY_PATH: /run/secrets/cloudfront_private_key.pem
       # Caddy injects this proxy secret on the staging listener. The separate
@@ -115,8 +115,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: 768M
+          cpus: "2.0"
+          memory: 3072M
     restart: unless-stopped
 
   caddy:

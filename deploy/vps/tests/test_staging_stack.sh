@@ -138,12 +138,20 @@ if grep -q 'karaoke-pimpshizzle' "$ENV_STAGING_EXAMPLE"; then
 fi
 grep -Fq 'SHIZZLE_NODE_TOKENS=' "$ENV_STAGING_EXAMPLE"
 # Required staging credentials must start empty, not as publicly known valid
-# values. Compose's :? guards reject a copied, unedited template.
+# values. The guarded credentials' Compose :? guards reject a copied,
+# unedited template.
 if grep -Eq '^(SHIZZLE_PASSCODE|TOKEN_SIGNING_SECRET|POSTGRES_PASSWORD|DATABASE_URL)=.+' "$ENV_STAGING_EXAMPLE"; then
   echo "staging env template contains a non-empty credential placeholder" >&2
   exit 1
 fi
-grep -Fq 'SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:?' "$COMPOSE_STAGING"
+# The passcode is optional on staging (an empty value means no passcode gate,
+# matching production): the line must interpolate with a default, not a :?
+# guard.
+grep -Fq 'SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE-}' "$COMPOSE_STAGING"
+if grep -Fq 'SHIZZLE_PASSCODE: ${SHIZZLE_PASSCODE:?' "$COMPOSE_STAGING"; then
+  echo "staging passcode must not be a required variable" >&2
+  exit 1
+fi
 grep -Fq 'TOKEN_SIGNING_SECRET: ${TOKEN_SIGNING_SECRET:?' "$COMPOSE_STAGING"
 [ "$(count -F 'DATABASE_URL: ${DATABASE_URL:?' "$COMPOSE_STAGING")" = 2 ]
 if grep -E '^[[:space:]]+DATABASE_URL:.*POSTGRES_PASSWORD' "$COMPOSE_STAGING"; then
@@ -988,9 +996,10 @@ EOF
   docker compose -p shizzle-staging --env-file ./.env -f compose.staging.yml config --format json \
     > "$CFG/staging-config.json"
 )
-# Every deliberately empty template credential has a Compose :? guard: a
-# copied example cannot deploy with public placeholder or disabled auth.
-for required_var in POSTGRES_PASSWORD DATABASE_URL SHIZZLE_PASSCODE TOKEN_SIGNING_SECRET; do
+# Every deliberately empty template credential except the passcode has a
+# Compose :? guard: a copied example cannot deploy with a public placeholder
+# or disabled auth. The passcode is deliberately optional on staging.
+for required_var in POSTGRES_PASSWORD DATABASE_URL TOKEN_SIGNING_SECRET; do
   cp "$CFG/.env" "$CFG/bad.env"
   sed -i "s|^$required_var=.*|$required_var=|" "$CFG/bad.env"
   if (cd "$CFG" && docker compose -p shizzle-staging --env-file ./bad.env -f compose.staging.yml config -q) >/dev/null 2>&1; then
@@ -998,6 +1007,14 @@ for required_var in POSTGRES_PASSWORD DATABASE_URL SHIZZLE_PASSCODE TOKEN_SIGNIN
     exit 1
   fi
 done
+# An empty passcode must be ACCEPTED: staging runs without a passcode gate,
+# like production.
+cp "$CFG/.env" "$CFG/nopass.env"
+sed -i "s|^SHIZZLE_PASSCODE=.*|SHIZZLE_PASSCODE=|" "$CFG/nopass.env"
+if ! (cd "$CFG" && docker compose -p shizzle-staging --env-file ./nopass.env -f compose.staging.yml config -q) >/dev/null 2>&1; then
+  echo "staging compose rejected an empty SHIZZLE_PASSCODE" >&2
+  exit 1
+fi
 python3 - "$CFG/staging-config.json" <<'PY'
 import json, sys
 
