@@ -53,9 +53,11 @@ SEPARATION_SEGMENT = "separation"
 DISPATCH_RECEIPT = "dispatch.json"
 
 
-def source_key(track_id: uuid.UUID | str) -> str:
-    """Private upload source outside the browser cookie's ``tracks/*`` scope."""
-    return f"sources/{track_id}/source.mp4"
+def source_key(track_id: uuid.UUID | str, attempt: int | None = None) -> str:
+    """Private source object for one download attempt (legacy base for zero)."""
+    if attempt is None or attempt == 0:
+        return f"sources/{track_id}/source.mp4"
+    return f"sources/{track_id}/attempts/{attempt}/source.mp4"
 
 
 def separation_prefix(track_id: uuid.UUID | str) -> str:
@@ -247,7 +249,12 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             "worker package source checksum does not match the submitted source",
             retryable=False,
         )
-    if source_info.get("object_key") != source_key(track_id):
+    from .nodes import source_attempt_for_history
+
+    source_attempt = source_attempt_for_history(
+        ctx.job, await ctx.jobs.list_events(ctx.job.id)
+    )
+    if source_info.get("object_key") != source_key(track_id, source_attempt):
         raise StageError(
             ErrorCode.CHECKSUM_MISMATCH,
             "worker package source object does not match the submitted source",
@@ -304,9 +311,14 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
         s3 = s3_client(ctx.settings)
         source = ctx.source_path
         if not source.exists():
+            from .nodes import source_attempt_for_history
+
+            source_attempt = source_attempt_for_history(
+                ctx.job, await ctx.jobs.list_events(ctx.job.id)
+            )
             source = ctx.job_dir / "source.mp4"
             await asyncio.to_thread(
-                _download_source, s3, bucket, source_key(track_id), source
+                _download_source, s3, bucket, source_key(track_id, source_attempt), source
             )
 
         pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")

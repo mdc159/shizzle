@@ -356,6 +356,38 @@ async def test_dismiss_cleanup_lock_fences_retry(retry_env):
     assert (await jobs.get_job(job.id)).dismissed_at is not None
 
 
+async def test_cancelled_dismissal_finishes_cleanup_before_retry(
+    retry_env, data_dir, monkeypatch
+):
+    _, jobs, job, client = retry_env
+    from shizzle_server.api import admin as admin_module
+
+    import threading
+
+    started = threading.Event()
+    resume = threading.Event()
+    real_rmtree = admin_module.shutil.rmtree
+
+    def paused_rmtree(path):
+        started.set()
+        resume.wait()
+        real_rmtree(path)
+
+    monkeypatch.setattr(admin_module.shutil, "rmtree", paused_rmtree)
+    dismissing = asyncio.create_task(
+        client.post(f"/api/admin/jobs/{job.id}/dismiss", headers=HEADERS)
+    )
+    await asyncio.to_thread(started.wait)
+    dismissing.cancel()
+    retried = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert retried.status_code == 409
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await dismissing
+    assert (await jobs.get_job(job.id)).dismissed_at is not None
+    assert not (data_dir / job.id.hex).exists()
+
+
 async def test_capacity_count_cannot_miss_a_concurrent_confirmation(pg_engine, monkeypatch):
     """G3: job and event state come from one statement snapshot.
 

@@ -1224,19 +1224,8 @@ def _describe_head(head: dict[str, Any] | None) -> str:
     return f"present ({size} bytes)" if size is not None else "present"
 
 
-def _source_receipt_key(job: Job, events: list[JobEvent]) -> str:
-    track_id = track_id_for_job(job.id)
-    for event in reversed(events):
-        detail = _event_detail(event)
-        if event.event == "node_assigned" and detail.get("kind") == "download":
-            attempt = detail.get("attempt")
-            if isinstance(attempt, int):
-                return node_routing.source_json_key(track_id, attempt)
-        if event.event == "admin_retry_started" and detail.get("resume_stage") == "pending":
-            attempt = detail.get("new_attempt")
-            if isinstance(attempt, int):
-                return node_routing.source_json_key(track_id, attempt)
-    return node_routing.source_json_key(track_id, 0)
+def _source_download_attempt(job: Job, events: list[JobEvent]) -> int:
+    return node_routing.source_attempt_for_history(job, events)
 
 
 async def _add_s3_evidence(
@@ -1315,18 +1304,20 @@ async def _add_s3_evidence(
     # proven by source.json). A job that FAILED during downloading may never
     # have transferred its source, so it stays not_yet rather than missing.
     source_applies = "dispatched" in stages
-    outcome = await head(cloud.source_key(track_id))
+    source_attempt = _source_download_attempt(job, events)
+    source_object_key = cloud.source_key(track_id, source_attempt)
+    outcome = await head(source_object_key)
     note(
         "downloading",
         "source",
-        key=cloud.source_key(track_id),
+        key=source_object_key,
         expected="sources/{track}/source.mp4 exists (size and checksum match when recorded)",
         applies=source_applies,
         outcome=outcome,
         expected_sha256=job.input_checksum,
     )
     if job.source_type == SourceType.url:
-        receipt_key = _source_receipt_key(job, events)
+        receipt_key = node_routing.source_json_key(track_id, source_attempt)
         receipt = await head(receipt_key)
         note(
             "downloading",

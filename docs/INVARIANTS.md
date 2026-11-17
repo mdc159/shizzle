@@ -806,8 +806,10 @@ source checking or executor cancellation later refuses the retry. S3-only
 uploads are restored and validated at the expected local path before
 downloading. A completed URL assignment and its immutable source receipt
 satisfy only their own attempt: later attempts use
-`sources/<track>/attempts/<n>/source.json`, workers adopt only exact-attempt
-receipts, and marker completion requires that attempt's evidence. Dismissed
+`sources/<track>/attempts/<n>/source.mp4` and `source.json`, workers adopt
+only exact-attempt objects/receipts, and marker completion requires that
+attempt's evidence. A canonical-object 412 can never certify previous-attempt
+bytes as a fresh download; old objects and receipts remain immutable. Dismissed
 jobs require restore first. Concurrent retries or an orchestrator lease
 produce one winner.
 - Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
@@ -820,7 +822,10 @@ event, expires open assignments, and removes only the exact
 `DATA_DIR/<job hex>` working directory (never a symlink or outside path). A
 exclusive job row lock is acquired/revalidated before cleanup and retained
 through cleanup and dismissal commit, so a losing dismissal cannot remove a
-successfully retried or leased job's files. A filesystem failure is an
+successfully retried or leased job's files. Request cancellation waits for the
+locked operation's durable outcome rather than unwinding it while the
+filesystem worker runs; deletion and dismissal resolve before retry can reopen.
+A filesystem failure is an
 actionable per-item refusal before the dismissal marker commits, and bulk/group
 processing continues with later items. It
 deletes no database rows or S3 objects. Dismissed jobs disappear from public

@@ -696,6 +696,7 @@ async def test_old_completed_download_does_not_satisfy_reopened_attempt(
 
     receipt["attempt"] = 1
     receipt["source_json_key"] = nodes_mod.source_json_key(track_id_for_job(job.id), 1)
+    receipt["object_key"] = cloud.source_key(track_id_for_job(job.id), 1)
     assert await download_via_node(ctx) == JobStage.dispatched
 
 

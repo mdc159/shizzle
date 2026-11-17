@@ -7,6 +7,7 @@ factory, so callers cannot half-commit orchestration state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -1102,12 +1103,27 @@ class JobRepository:
         dismissed: bool,
         cleanup: Callable[[], Awaitable[None]] | None = None,
     ) -> Job:
-        """Dismiss/restore under one lock; cleanup precedes the commit.
+        """Finish cleanup and dismissal even if the caller is cancelled."""
+        operation = asyncio.create_task(
+            self._set_job_dismissed_locked(job_id, dismissed=dismissed, cleanup=cleanup)
+        )
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            # Cancelling the request must not unwind the transaction while the
+            # filesystem worker is deleting. Wait for the durable outcome so a
+            # retry cannot reopen before the dismissal has committed.
+            await operation
+            raise
 
-        When cleanup is supplied, the row lock is held throughout it. A retry
-        or orchestrator cannot change state between filesystem deletion and
-        the dismissal commit, and a cleanup exception rolls back dismissal.
-        """
+    async def _set_job_dismissed_locked(
+        self,
+        job_id: uuid.UUID,
+        *,
+        dismissed: bool,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
+        """Dismiss/restore under one lock; cleanup precedes the commit."""
         async with self._sf() as session, session.begin():
             result = await session.execute(
                 select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
