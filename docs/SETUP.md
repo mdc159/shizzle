@@ -73,12 +73,27 @@ The template is not a live deployment snapshot and contains no usable secrets.
 | `MEDIA_TTL_SECONDS`, `MEDIA_COOKIE_PATH` | Media expiry (86400 seconds default) and `/cdn` fallback path |
 | `SHIZZLE_API_IMAGE` | Digest-pinned API image required by production Compose |
 | `MAX_UPLOAD_BYTES`, `MAX_DURATION_SECONDS` | Upload copy and successful-duration-probe limits |
+| `SHIZZLE_ADMIN_PROXY_SECRET` | Shared secret the Tailscale-only reverse proxy adds as `X-Shizzle-Admin` to open `/api/admin` (and the `/admin` page). Empty (default) = every admin route 404s: fail closed. Never configure it on the public listener. |
+| `SHIZZLE_ADMIN_OPEN` | `1` skips the admin header check — local development and tests only. Never set it in production. |
+| `SHIZZLE_RUNPOD_MAX_CONCURRENT` | Environment default for the admin-settable cap on jobs at RunPod at once (null = no limit, 0 = pause dispatch). The admin page's runtime override wins when set. |
 
 Use the bucket's actual AWS region. This repository defaults to `us-east-1`;
 that is independent of a developer's general AWS-region preference. CloudFront
 key files are mounted read-only into the API; never put private keys into Git.
 Worker settings and its image identity are documented in
 [RunPod setup](../deploy/runpod/README.md).
+
+### Administrator page (local development)
+
+The `/admin` page and its `/api/admin` routes are served through the owner's
+Tailscale-only reverse proxy in production, which adds the
+`X-Shizzle-Admin` header; from anywhere else they answer 404 by design. For
+local development against the recipe above, either set
+`SHIZZLE_ADMIN_PROXY_SECRET` and send the header yourself, or set
+`SHIZZLE_ADMIN_OPEN=1` to skip the check (tests use this; never in
+production). Routing and the RunPod concurrency limit can then be changed at
+runtime from the page or `PUT /api/admin/settings`; a missing runtime value
+always falls back to the environment `Settings` value.
 
 ## Production commissioning
 

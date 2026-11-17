@@ -303,11 +303,17 @@ else (no executor yet):
                                     -> keep waiting for a node (never RunPod)
 ```
 
-Policy knobs in `settings.py`, all env-driven:
+Policy knobs in `settings.py`, all env-driven. The owner can also switch
+`node_routing` and the RunPod concurrency limit at runtime from the
+administrator page (`/api/admin/settings`, stored in the `runtime_settings`
+table): the orchestrator reads the effective value at each routing decision,
+so a change applies to the next job without a restart, and a missing runtime
+value falls back to the environment value.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `SHIZZLE_NODE_ROUTING` | `prefer` | `prefer` (nodes first, RunPod fallback), `only` (never RunPod), `off` (today's behavior) |
+| `SHIZZLE_NODE_ROUTING` | `prefer` | `prefer` (nodes first, RunPod fallback), `only` (never RunPod), `off` (today's behavior), `download_only` (max performance: nodes download exactly as `prefer`, but separation always dispatches to RunPod at once — no node wait, invariant G4) |
+| `SHIZZLE_RUNPOD_MAX_CONCURRENT` | none | Cap on jobs holding a RunPod reservation or confirmed RunPod job; at/over the cap a fresh dispatch parks without spending an attempt (one `runpod_wait` event per outage) and dispatched work is never disturbed (G3). Runtime-settable from the admin page; `0` pauses RunPod dispatch. |
 | `NODE_ONLINE_SECONDS` | 45 | heartbeat age that still counts as online |
 | `NODE_STALL_SECONDS` | 300 | assignment heartbeat age that fails the attempt (mirrors `RUNPOD_WORKER_STALL_SECONDS`) |
 | `NODE_SEPARATE_WAIT_SECONDS` | 120 | how long to hold a separation for a node before RunPod |

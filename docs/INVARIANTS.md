@@ -686,3 +686,73 @@ rather than being overwritten. Isolated contract databases may run
 - Guarded by: `library/tests/test_repository.py::test_idempotency_key_unique`
 - Violation smell: relaxing the unique constraint or reusing a key across
   dispatches.
+
+## G. Administrator surface (/api/admin, /admin)
+
+The admin routes and page exist to trace jobs end to end and to steer routing
+at runtime. They are reachable only through the owner's Tailscale-only reverse
+proxy, which adds the shared `X-Shizzle-Admin` header; the public proxy strips
+it. Runtime overrides live in the `runtime_settings` table (migration 0007)
+and are read by the orchestrator at each routing decision, so a change takes
+effect on the next pass without a restart; a missing key falls back to the
+environment `Settings` value.
+
+### G1 — admin routes fail closed without the proxy secret
+
+**Invariant:** Every `/api/admin` route MUST require the `X-Shizzle-Admin`
+header to equal `SHIZZLE_ADMIN_PROXY_SECRET`, compared in constant time. When
+the setting is empty every admin route returns 404 — fail closed. The check
+exists as a dependency (`require_admin`) applied to every route in
+`library/src/shizzle_server/api/admin.py`; `SHIZZLE_ADMIN_OPEN=1` skips it for
+local development and tests only (documented in `docs/SETUP.md`).
+- Where: `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_admin_api.py::test_admin_routes_404_without_the_secret_header`, `library/tests/test_admin_api.py::test_empty_secret_means_every_admin_route_404s`
+- Violation smell: an admin route without the `Admin` dependency, a non-constant-time comparison, or a non-empty-secret default that opens the surface.
+
+### G2 — admin responses never carry source_ref
+
+**Invariant:** No admin response MUST ever expose `source_ref` (the raw
+submitted URL), node assignment payloads (which carry it, E6), node tokens,
+S3 credentials, signed URLs or the admin secret itself. The job-detail
+response includes every other job column; assignments are returned without
+their `payload`.
+- Where: `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`
+- Violation smell: adding `source_ref` or the assignment `payload` to an admin
+  schema, or echoing request URLs into evidence text.
+
+### G3 — the RunPod limit parks without spending an attempt and never disturbs dispatched work
+
+**Invariant:** With `runpod_max_concurrent` at or above the count of jobs
+holding a RunPod reservation or confirmed RunPod job in `dispatched`, a FRESH
+dispatch MUST park instead of submitting: no attempt is consumed and exactly
+one deduplicated `runpod_wait` event is appended per wait outage (the B6/B9
+pattern). Work already dispatched is never cancelled, expired or otherwise
+disturbed to make room; the count only gates fresh dispatches.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`count_runpod_dispatches`)
+- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`
+- Violation smell: counting node-held work, spending an attempt or appending a
+  `runpod_wait` per poll, or cancelling/polling-failing a dispatched job when
+  the limit is reached.
+
+### G4 — download_only never assigns separation to a node
+
+**Invariant:** In `download_only` routing, URL downloads are assigned to
+nodes exactly as in `prefer`, but separation MUST NEVER be assigned to a node:
+a fresh separation dispatch goes to RunPod at once, with no node wait and no
+`node_wait`/`fallback_runpod` events.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runtime.py`
+- Guarded by: `library/tests/test_runtime_routing.py::test_download_only_url_job_downloads_via_node_then_separates_on_runpod`, `library/tests/test_runtime_routing.py::test_download_only_dispatches_runpod_with_no_node_wait`
+- Violation smell: a `separate` assignment created while the effective routing
+  is `download_only`, or a wait window inserted before the RunPod dispatch.
+
+### G5 — a disabled node receives no new assignment
+
+**Invariant:** A node with `disabled_at` set MUST NOT be offered or assigned
+new work (download or separation); work it already holds is left alone for the
+watchdogs. The admin enable/disable endpoints only flip this flag; they never
+expire or reassign an assignment themselves.
+- Where: `library/src/shizzle_server/db/repository.py` (`NodeRepository.available`, `next_for_node`), `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_runtime_routing.py::test_disabled_node_receives_no_new_assignment`
+- Violation smell: a routing candidate list that ignores `disabled_at`, or a
+  disable endpoint that also expires assignments.

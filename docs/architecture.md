@@ -8,14 +8,14 @@ Known deviations and bugs are tracked in [Review](REVIEW.md).
 
 | Component | Implementation | Responsibility |
 |---|---|---|
-| API | `library/src/shizzle_server/api/` | Uploads, passcode/token authentication, jobs, library, manifests with signed media URLs, telemetry, WebSocket relay |
-| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats |
-| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, submits/polls RunPod, reconciles dispatch receipts, verifies and publishes |
+| API | `library/src/shizzle_server/api/` | Uploads, passcode/token authentication, jobs, library, manifests with signed media URLs, telemetry, worker-node API, fail-closed admin API, WebSocket relay |
+| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats, node assignments, runtime settings overrides |
+| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, routes to worker nodes or RunPod under the runtime routing policy, submits/polls RunPod, reconciles dispatch receipts, verifies and publishes |
 | GPU worker | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source, extracts audio, separates with htdemucs_6s, writes lossless package and progress |
 | Delivery policy | `library/src/shizzle_server/publish/` | Verifies lossless bytes, derives AAC/video, measures common attenuation, audits, stages and promotes |
 | Media storage | Private S3 | Sources, per-dispatch packages, staged and published generations |
 | Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
-| Browser | `player/src/` | Audio-master-aligned playback, six-stem mixing, health sensing, remote and dashboard pages |
+| Browser | `player/src/` | Audio-master-aligned playback, six-stem mixing, health sensing, remote and dashboard pages, Tailscale-only administrator page |
 
 The [README system diagram](../README.md#system-diagram) maps these boundaries.
 `ingest/` is documentation, not a deployed process. The app origin is Caddy on
@@ -254,8 +254,29 @@ must not serve more than one trusted user without adding session routing.
 
 The shared `PipelinePanel` polls jobs and `/api/health` every five seconds while
 active, shows stage columns and recent outcomes, and loads the selected job's
-event timeline. Its duration baseline is currently a 40-second placeholder.
+event timeline. Failed job cards carry the structured error code and message.
+Its duration baseline is currently a 40-second placeholder.
 It does not measure RunPod pool capacity or source-duration-specific baselines.
+
+## Administrator page (/admin)
+
+The `/admin` page is the owner's operational console, served on the same build
+as the player but backed by `/api/admin` routes that are reachable only
+through the Tailscale-only reverse proxy (it adds the `X-Shizzle-Admin`
+secret header; the public proxy strips it; an empty secret means every admin
+route 404s — invariant G1). It traces each job end to end: failure detail,
+event timeline with wall-clock gaps, node assignments, and an evidence
+checklist of database checks (ready→track join, open assignments on terminal
+jobs, stale busy pointers, unresolved reservations, overdue acknowledgements,
+stalls and caps, expired leases, over-window waits, silent stages) plus
+optional `?verify=s3` storage checks that HEAD the exact source, attempt-package
+and generation keys (S3 errors report `unknown`, never a false verdict). It
+also steers runtime behaviour without a restart: node use switches, the four
+routing modes (`prefer`, `only`, `off`, `download_only`) and the RunPod
+concurrency limit (park-without-attempt, never disturbing dispatched work,
+invariant G3). These overrides live in the `runtime_settings` table
+(migration `0007`) and fall back to the environment `Settings` values when
+unset; the orchestrator re-reads them at each routing decision.
 
 Production uses separate API/orchestrator services, Postgres and Caddy.
 Only the explicit release transaction migrates the production schema.
