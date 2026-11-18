@@ -121,10 +121,14 @@ exec "$HOME/.local/bin/uv" run --directory "$HOME/Projects/shizzle/node" shizzle
 
 ### Updating the Mac
 
+Schedule this update for an idle node. `kickstart -k` terminates the running
+process; it does not wait for an active job to finish. Check the node's
+assignment before restarting and do not use this command to drain work.
+
 ```sh
 cd ~/Projects/shizzle && git pull --ff-only
 uv sync --locked --directory node --python 3.11
-launchctl kickstart -k gui/$(id -u)/com.shizzle.node   # finishes a running job first
+launchctl kickstart -k gui/$(id -u)/com.shizzle.node
 ```
 
 ## Install on the Dell 9530 (Windows, RTX 4070): container in WSL

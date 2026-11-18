@@ -18,7 +18,7 @@ Known deviations and bugs are tracked in [Review](REVIEW.md).
 | Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
 | Browser | `player/src/` | Audio-master-aligned playback, six-stem mixing, health sensing, remote and dashboard pages |
 
-The [README system diagram](../README.md#system-diagram) maps these boundaries.
+The [README system diagram](../README.md#where-everything-runs) maps these boundaries.
 `ingest/` is documentation, not a deployed process. The app origin is Caddy on
 the VPS; CloudFront is the media origin. Same-origin `/cdn` proxy delivery is a
 retained fallback, not the normal seven-object media path.
