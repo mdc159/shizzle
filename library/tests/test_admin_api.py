@@ -1621,7 +1621,8 @@ async def test_retry_handoff_recovery_overrides_the_dead_confirmation(
     assert f"recovered from handoff.json key={key1}" in identity["observed"]
 
 
-async def test_newer_confirmation_supersedes_old_recovery_identity(admin_client):
+@pytest.mark.parametrize("fresh_admin_window", [False, True])
+async def test_newer_confirmation_supersedes_old_recovery_identity(admin_client, fresh_admin_window):
     """Recovery is authoritative only inside the latest reservation window."""
     c, app = admin_client
     job = await _make_job(app, title="Confirmed retry")
@@ -1635,6 +1636,12 @@ async def test_newer_confirmation_supersedes_old_recovery_identity(admin_client)
             job.id, worker_id="w0", from_stage=from_stage, to_stage=to_stage
         )
     key0 = f"{job.id.hex}:0"
+    if fresh_admin_window:
+        # The same precedence rule holds inside a fresh administrator retry
+        # window: its older recovery cannot outrank a later reservation.
+        await app.state.job_repo.append_event(
+            job.id, "admin_retry_started", {"resume_stage": "pending"}, worker_id="w0"
+        )
     assert await app.state.job_repo.reserve_dispatch(
         job.id, worker_id="w0", idempotency_key=key0
     )

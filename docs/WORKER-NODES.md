@@ -285,12 +285,16 @@ fallback for download because RunPod cannot download either.
 ### dispatched stage
 
 ```text
-if job.executor startswith "node:"  -> poll that node assignment:
+if job.executor startswith "node:"
+   and its CONFIRMED dispatch key == <job hex>:<attempt>
+                                    -> poll that node separation assignment:
      handoff.json present under the attempt prefix -> verifying (as today;
                                                       the marker, not the report)
      assignment failed or heartbeat stale          -> fail attempt, redispatch
                                                       fresh key (B12)
      otherwise park
+   (a retained node: executor from an earlier URL download is not proof a
+    separation reservation is node-bound; it falls through to fresh routing)
 elif job.executor == "runpod"       -> existing RunPod branch, unchanged
 else (no executor yet):
      SHIZZLE_NODE_ROUTING = off     -> existing RunPod dispatch, no node lookup

@@ -59,7 +59,7 @@ prove a deployment has those prerequisites.
 - `src/shizzle_server/publish/` — lossless intake, drop-box import, delivery policy, media/audio
   audits, immutable S3 promotion, and generation migration tooling.
 - `alembic/` — Postgres schema migrations. The current linear chain ends at
-  `0007_runtime_settings`; production migrations belong to the deploy transaction.
+  `0008_job_dismissal`; production migrations belong to the deploy transaction.
 - `tests/` — isolated unit/media tests and the real-Postgres contract suite.
 
 ## Development setup

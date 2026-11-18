@@ -463,6 +463,24 @@ test.describe('Admin page (/admin)', () => {
     await expect(page.getByLabel('Separate stems on this node: Mac mini')).toBeChecked();
   });
 
+  test('preserves one node error while another node is changed', async ({ page }) => {
+    test.setTimeout(20_000);
+    const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
+    routeAdminApi(page, captured);
+    await page.route('**/api/admin/nodes/mac-mini/separation/disable', (route) =>
+      route.fulfill({ status: 500, json: { detail: 'Mac maintenance refusal' } })
+    );
+    await page.goto('/admin');
+    await page.getByLabel('Separate stems on this node: Mac mini').click();
+    await expect(page.getByText('Mac maintenance refusal')).toBeVisible({ timeout: 5000 });
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes('/nodes/dell-9530/separation/enable')),
+      page.getByLabel('Separate stems on this node: Dell 9530').click(),
+    ]);
+    await expect(page.getByText('Mac maintenance refusal')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByLabel('Separate stems on this node: Mac mini')).toBeChecked();
+  });
+
   test('aborts a hung settings request at the refresh timeout', async ({ page }) => {
     const captured: Captured = { puts: [], nodePosts: [], statusQueries: [], s3Queries: [] };
     routeAdminApi(page, captured);

@@ -7,8 +7,10 @@ import hashlib
 import json
 import shutil
 import struct
+import threading
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -40,6 +42,249 @@ from shizzle_server.orchestrator import cloud
 
 SECRET = "admin-action-test-secret"
 HEADERS = {"x-shizzle-admin": SECRET}
+
+
+async def test_ordinary_retry_fences_dismiss_then_restore(admin_client, monkeypatch):
+    c, app = admin_client
+    job = await _job(app)
+    workdir = _source(app, job)
+    await _fail(app, job, JobStage.pending)
+
+    async def intervene(*_args, **_kwargs):
+        assert (await c.post(f"/api/admin/jobs/{job.id}/dismiss", headers=HEADERS)).status_code == 200
+        assert (await c.post(f"/api/admin/jobs/{job.id}/restore", headers=HEADERS)).status_code == 200
+        return {"status": "not_recorded"}
+
+    monkeypatch.setattr(admin_module, "_stop_runpod_for_restart", intervene)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 409, response.text
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.failed and current.dismissed_at is None
+    assert not workdir.exists()
+    names = [e.event for e in await app.state.job_repo.list_events(job.id)]
+    assert names.count("admin_restored") == 1
+    assert "admin_retry_started" not in names
+
+
+async def _s3_only_failed_job(app, monkeypatch):
+    job = await _job(app, input_checksum=hashlib.sha256(b"source").hexdigest())
+    await _fail(app, job, JobStage.pending)
+    monkeypatch.setattr(
+        admin_module, "_head_blocking",
+        lambda *_args: admin_module._HeadOutcome({"ContentLength": 6}, None),
+    )
+    return job
+
+
+async def test_losing_source_download_preserves_retry_winner(admin_client, monkeypatch):
+    c, app = admin_client
+    job = await _s3_only_failed_job(app, monkeypatch)
+    started, resume = threading.Event(), threading.Event()
+
+    class S3:
+        calls = 0
+
+        def download_file(self, _bucket, _key, destination):
+            self.calls += 1
+            if self.calls == 1:
+                started.set()
+                assert resume.wait(5)
+                raise OSError("synthetic losing download failure")
+            Path(destination).write_bytes(b"source")
+
+    s3 = S3()
+    monkeypatch.setattr(admin_module, "s3_client", lambda _settings: s3)
+    loser = asyncio.create_task(c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        winner = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+        assert winner.status_code == 200, winner.text
+    finally:
+        resume.set()
+    assert (await loser).status_code == 409
+    assert (app.state.settings.data_dir / job.id.hex / "source.mp4").read_bytes() == b"source"
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.pending and current.attempt == 1
+    events = await app.state.job_repo.list_events(job.id)
+    assert sum(e.event == "admin_retry_started" for e in events) == 1
+    assert not list(app.state.settings.data_dir.glob(f".source-{job.id.hex}-*"))
+
+
+@pytest.mark.parametrize("restore", [False, True])
+async def test_source_promotion_cannot_recreate_dismissed_workdir(admin_client, monkeypatch, restore):
+    c, app = admin_client
+    job = await _s3_only_failed_job(app, monkeypatch)
+    started, resume = threading.Event(), threading.Event()
+
+    class S3:
+        def download_file(self, _bucket, _key, destination):
+            started.set()
+            assert resume.wait(5)
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"source")
+
+    monkeypatch.setattr(admin_module, "s3_client", lambda _settings: S3())
+    retry = asyncio.create_task(c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        assert (await c.post(f"/api/admin/jobs/{job.id}/dismiss", headers=HEADERS)).status_code == 200
+        if restore:
+            assert (await c.post(f"/api/admin/jobs/{job.id}/restore", headers=HEADERS)).status_code == 200
+    finally:
+        resume.set()
+    assert (await retry).status_code == 409
+    assert not (app.state.settings.data_dir / job.id.hex).exists()
+    assert not list(app.state.settings.data_dir.glob(f".source-{job.id.hex}-*"))
+    current = await app.state.job_repo.get_job(job.id)
+    assert current.status == JobStage.failed
+    assert (current.dismissed_at is None) == restore
+    assert not any(e.event == "admin_retry_started" for e in await app.state.job_repo.list_events(job.id))
+
+
+async def test_cancelled_source_download_drains_before_cleanup(admin_client, monkeypatch):
+    c, app = admin_client
+    job = await _s3_only_failed_job(app, monkeypatch)
+    started, resume = threading.Event(), threading.Event()
+
+    class S3:
+        def download_file(self, _bucket, _key, destination):
+            started.set()
+            assert resume.wait(5)
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"source")
+
+    monkeypatch.setattr(admin_module, "s3_client", lambda _settings: S3())
+    retry = asyncio.create_task(c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        retry.cancel()
+        await asyncio.sleep(0)
+        retry.cancel()
+        await asyncio.sleep(0)
+        assert not retry.done()
+    finally:
+        resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await retry
+    assert not list(app.state.settings.data_dir.glob(f".source-{job.id.hex}-*"))
+    assert not (app.state.settings.data_dir / job.id.hex).exists()
+    assert (await app.state.job_repo.get_job(job.id)).status == JobStage.failed
+
+
+@pytest.mark.skipif(not shutil.which("ffprobe"), reason="ffprobe required")
+async def test_fresh_admin_retry_discards_same_size_package_cache(admin_client, monkeypatch):
+    from shizzle_server.orchestrator.stages import StageContext, handle_verifying
+
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job = await _job(app, input_checksum=checksum)
+    _source(app, job)
+    await _fail(app, job, JobStage.pending)
+    package = app.state.settings.data_dir / job.id.hex / "package"
+    _write_real_lossless_package(package, job, checksum)
+    stem = package / "stems" / "vocals.wav"
+    fresh = stem.read_bytes()
+    corrupt = bytearray(fresh)
+    corrupt[-1] ^= 1
+    stem.write_bytes(corrupt)
+    response = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    await _claim_and_advance(app, job, JobStage.dispatched)
+    key = f"{job.id.hex}:1"
+    assert await app.state.job_repo.reserve_dispatch(job.id, worker_id="action-test", idempotency_key=key)
+    await app.state.job_repo.confirm_dispatch(job.id, idempotency_key=key, runpod_job_id="fresh-execution")
+    prefix = cloud.attempt_prefix(track_id_for_job(job.id), key)
+    await app.state.job_repo.advance(
+        job.id, worker_id="action-test", from_stage=JobStage.dispatched,
+        to_stage=JobStage.verifying, detail={"package_prefix": prefix},
+    )
+
+    def download(_s3, _bucket, selected_prefix, destination):
+        assert selected_prefix == prefix
+        if not (destination / "handoff.json").exists():
+            _write_real_lossless_package(destination, job, checksum)
+
+    monkeypatch.setattr(cloud, "download_package", download)
+    app.state.settings.shizzle_pipeline = "cloud"
+    ctx = StageContext(
+        job=await app.state.job_repo.get_job(job.id), settings=app.state.settings,
+        pipeline=None, jobs=app.state.job_repo, worker_id="action-test",  # type: ignore[arg-type]
+        runpod=admin_module._runpod_for(app.state.settings),
+    )
+    assert await handle_verifying(ctx) == JobStage.publishing
+    assert stem.read_bytes() == fresh
+
+
+@pytest.mark.skipif(not shutil.which("ffprobe"), reason="ffprobe required")
+async def test_admin_recovery_evidence_follows_latest_restart_window(admin_client, monkeypatch):
+    from shizzle_server.orchestrator.stages import StageContext
+
+    c, app = admin_client
+    checksum = hashlib.sha256(b"source").hexdigest()
+    job = await _job(app, input_checksum=checksum)
+    _source(app, job)
+    await _fail(app, job, JobStage.verifying)
+
+    async def stopped(*_args, **_kwargs):
+        return {"status": "cancelled"}
+
+    original_stop = admin_module._stop_runpod_for_restart
+    monkeypatch.setattr(admin_module, "_stop_runpod_for_restart", stopped)
+    restart = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert restart.status_code == 200, restart.text
+    monkeypatch.setattr(admin_module, "_stop_runpod_for_restart", original_stop)
+    await _claim_and_advance(app, job, JobStage.dispatched)
+    key = f"{job.id.hex}:1"
+    assert await app.state.job_repo.reserve_dispatch(job.id, worker_id="action-test", idempotency_key=key)
+    await app.state.job_repo.schedule_retry(
+        job.id, worker_id="action-test", error_code=ErrorCode.RUNPOD_TIMEOUT,
+        error_detail="ambiguous submit", retry_in_seconds=0,
+    )
+    claimed = await app.state.job_repo.claim_next(worker_id="reconcile", lease_seconds=600)
+    assert claimed.id == job.id and claimed.attempt == 2
+    await app.state.job_repo.fail_job(
+        job.id, worker_id="reconcile", error_code=ErrorCode.RUNPOD_TIMEOUT,
+        error_detail="reconciliation failed",
+    )
+    prefix = cloud.attempt_prefix(track_id_for_job(job.id), key)
+
+    async def handoff(_ctx, *, idempotency_key):
+        assert idempotency_key == key
+        return cloud.DispatchAttemptInspection(receipt_present=False, runpod_job_id=None, handoff_present=True)
+
+    def download(_s3, _bucket, selected, destination):
+        assert selected == prefix
+        _write_real_lossless_package(destination, job, checksum)
+
+    monkeypatch.setattr(cloud, "inspect_dispatch_attempt", handoff)
+    monkeypatch.setattr(admin_module, "download_package", download)
+    recovered = await c.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["action"] == "recovered"
+    heads = []
+
+    def head(_settings, object_key):
+        heads.append(object_key)
+        return admin_module._HeadOutcome(None, None)
+
+    monkeypatch.setattr(admin_module, "_head_blocking", head)
+    response = await c.get(f"/api/admin/jobs/{job.id}?verify=s3", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dispatchAttempt"]["idempotencyKey"] == key
+    assert body["dispatchAttempt"]["attemptPrefix"] == prefix
+    identity = next(e for e in body["evidence"] if e["name"] == "dispatch_identity")
+    assert identity["status"] == "ok"
+    ctx = StageContext(
+        job=await app.state.job_repo.get_job(job.id), settings=app.state.settings,
+        pipeline=None, jobs=app.state.job_repo, worker_id="proof",  # type: ignore[arg-type]
+        runpod=admin_module._runpod_for(app.state.settings),
+    )
+    assert await cloud._selected_package_prefix(ctx, track_id_for_job(job.id)) == prefix
+    package_heads = [object_key for object_key in heads if "/separation/" in object_key]
+    assert package_heads and all(object_key.startswith(prefix + "/") for object_key in package_heads)
 
 
 @pytest_asyncio.fixture
@@ -364,8 +609,8 @@ async def test_retry_refuses_missing_upload_source_but_uses_s3_fallback(
     ctx.job = claimed
     ctx.job_dir = local.parent
 
-    def download_package(*_args):
-        return None
+    def download_package(_s3, _bucket, _prefix, destination):
+        _write_real_lossless_package(destination, present, checksum)
 
     monkeypatch.setattr(cloud, "download_package", download_package)
     _write_real_lossless_package(local.parent / "package", present, checksum)

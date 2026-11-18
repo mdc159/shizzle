@@ -12,6 +12,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, text, update
@@ -1184,17 +1185,17 @@ class JobRepository:
             historical = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id)
             )).all())
-            if restore:
-                latest_dismissal = next(
-                    (event for event in reversed(historical) if event.event == "admin_dismissed"),
-                    None,
-                )
-                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
-                    # Source/package preflight ran before this lock. A newer
-                    # dismissal may have cleaned those bytes; never restore from
-                    # stale evidence. A standalone restore adds no dismissal and
-                    # is therefore safe to join.
-                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the fence is not restore-only. Source/package preflight
+                # ran before this lock against the caller's dismissal snapshot;
+                # a newer dismissal — restored or not — deleted those bytes, so
+                # the reopen refuses to act on stale evidence. A standalone
+                # restore adds no dismissal and is therefore safe to join.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             pending = pending_runpod_dispatch(historical)
             if (
                 pending is None
@@ -1280,13 +1281,15 @@ class JobRepository:
                 # immutable completion evidence, not that persistent state,
                 # decides whether another fresh URL job may be created.
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
-            if restore:
-                latest_dismissal = next(
-                    (event for event in reversed(historical) if event.event == "admin_dismissed"),
-                    None,
-                )
-                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
-                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the dismissal-generation fence applies to ordinary
+                # resubmissions exactly as to restores — an intervening
+                # dismissal invalidated the preflighted source evidence.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
             pending = pending_runpod_dispatch(historical)
             if (
                 pending is None
@@ -1360,6 +1363,49 @@ class JobRepository:
                 detail={"old_job_id": str(old.id)},
             ))
             return new
+
+    async def install_retry_source(
+        self,
+        job_id: uuid.UUID,
+        *,
+        src: Path,
+        dest: Path,
+        expected_dismissal_event_id: int | None = None,
+    ) -> bool:
+        """Promote verified retry-source bytes into the canonical workdir.
+
+        The S3 download and checksum ran in request-private scratch OUTSIDE
+        ``DATA_DIR/<job>`` (a concurrent dismissal removes exactly that
+        workdir, and a losing restoration must never unlink or half-write the
+        winner's file). Before anything appears at the canonical path the job
+        is revalidated under its row lock: still failed, unleased, and on the
+        dismissal generation the retry snapshotted (G7). The final retry
+        transaction repeats that fence; the lock is never held across the
+        S3 transfer itself.
+        """
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            job = result.scalar_one_or_none()
+            now = utcnow()
+            if job is None or job.status != JobStage.failed or _has_live_lease(job, now):
+                return False
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                return False
+            if not dest.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Same filesystem by construction (both under DATA_DIR), so
+                # the promotion of already-verified bytes is atomic.
+                src.replace(dest)
+            return dest.is_file()
 
     async def set_job_dismissed(
         self,
@@ -1485,13 +1531,16 @@ class JobRepository:
             events = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
-            if restore:
-                latest_dismissal = next(
-                    (event for event in reversed(events) if event.event == "admin_dismissed"),
-                    None,
-                )
-                if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
-                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            latest_dismissal = next(
+                (event for event in reversed(events) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the fence is not restore-only. Recovery preflight (bytes,
+                # completion evidence) ran before this lock against the
+                # caller's dismissal snapshot; any newer dismissal deleted the
+                # workdir bytes this recovery would verify from, so refuse.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             failure = next(
                 (event for event in reversed(events) if event.event == "failed"),
                 None,
@@ -2344,13 +2393,24 @@ class NodeRepository:
         """
         now = utcnow()
         async with self._sf() as session, session.begin():
-            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
-            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+            # Lock order is job -> assignment, matching dismissal and every
+            # retry transition (they expire assignments while holding the job
+            # lock). Locking the assignment first let a concurrent dismissal
+            # deadlock against this path on Postgres.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
                 return False
             if worker_id is not None:
                 job = await session.get(Job, assignment.job_id, with_for_update=True)
                 if job is None or not _lease_is_owned(job, worker_id, now):
                     return False
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+                return False
             assignment.status = NodeAssignmentStatus.expired
             assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
             assignment.updated_at = now
@@ -2368,11 +2428,21 @@ class NodeRepository:
         """
         now = utcnow()
         async with self._sf() as session, session.begin():
-            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
-            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+            # Job -> assignment lock order (see ``expire``): the terminal-job
+            # recheck still happens under the job lock, and the assignment is
+            # revalidated after its own lock is taken.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
                 return None
             job = await session.get(Job, assignment.job_id, with_for_update=True)
             if job is None or job.status not in TERMINAL_STAGES:
+                return None
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
                 return None
             assignment.status = NodeAssignmentStatus.expired
             assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
@@ -2400,15 +2470,24 @@ class NodeRepository:
         node. Lease-fenced like ``expire`` when ``worker_id`` is given."""
         now = utcnow()
         async with self._sf() as session, session.begin():
-            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
-            if assignment is None or assignment.status in (
-                NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
-            ):
+            # Job -> assignment lock order (see ``expire``), fenced to the
+            # job's lease exactly as before.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
                 return False
             if worker_id is not None:
                 job = await session.get(Job, assignment.job_id, with_for_update=True)
                 if job is None or not _lease_is_owned(job, worker_id, now):
                     return False
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status in (
+                NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
+            ):
+                return False
             assignment.status = NodeAssignmentStatus.failed
             assignment.detail = {**(assignment.detail or {}), "rejected_reason": reason}
             assignment.updated_at = now

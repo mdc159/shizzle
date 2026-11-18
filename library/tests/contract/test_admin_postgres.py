@@ -15,9 +15,10 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from shizzle_server.db import create_session_factory
-from shizzle_server.db.models import Job, JobStage, NodeAssignmentKind, SourceType
+from shizzle_server.db.models import Job, JobStage, NodeAssignment, NodeAssignmentKind, SourceType
 from shizzle_server.db.repository import NodeRepository
 from shizzle_server.main import create_app
 from shizzle_server.settings import Settings
@@ -28,6 +29,88 @@ pytestmark = pytest.mark.postgres
 
 SECRET = "contract-admin-secret"
 HEADERS = {"x-shizzle-admin": SECRET}
+
+
+async def test_release_and_dismissal_use_one_lock_order(release_env, data_dir, monkeypatch):
+    sf, nodes, jobs, job, assignment, client = release_env
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.lease_owner = None
+        row.lease_expires_at = None
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"source")
+    cleaning, release_waiting, resume = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    real_get = AsyncSession.get
+
+    async def signaling_get(session, entity, ident, **kwargs):
+        if (asyncio.current_task().get_name() == "release-lock-order"
+                and entity is Job and kwargs.get("with_for_update")):
+            release_waiting.set()
+        return await real_get(session, entity, ident, **kwargs)
+
+    async def cleanup():
+        import shutil
+
+        cleaning.set()
+        await asyncio.wait_for(resume.wait(), 5)
+        shutil.rmtree(workdir)
+
+    monkeypatch.setattr(AsyncSession, "get", signaling_get)
+    dismissal = asyncio.create_task(jobs.set_job_dismissed(job.id, dismissed=True, cleanup=cleanup))
+    await asyncio.wait_for(cleaning.wait(), 5)
+    release = asyncio.create_task(
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        name="release-lock-order",
+    )
+    try:
+        await asyncio.wait_for(release_waiting.wait(), 5)
+    finally:
+        resume.set()
+    dismissed, released = await asyncio.wait_for(asyncio.gather(dismissal, release), 8)
+    assert dismissed.dismissed_at is not None
+    assert released.status_code == 409
+    assert (await nodes.get_assignment(assignment.id)).status.value == "expired"
+    assert (await nodes.get("mac-mini")).busy_assignment_id is None
+    assert not workdir.exists()
+    names = [e.event for e in await jobs.list_events(job.id)]
+    assert names.count("admin_dismissed") == 1
+    assert "admin_assignment_released" not in names
+
+
+@pytest.mark.parametrize("winner", ["release", "complete"])
+async def test_release_refreshes_assignment_after_unlocked_lookup(release_env, monkeypatch, winner):
+    _sf, nodes, jobs, job, assignment, client = release_env
+    read, resume = asyncio.Event(), asyncio.Event()
+    real_get = AsyncSession.get
+
+    async def pause_lookup(session, entity, ident, **kwargs):
+        row = await real_get(session, entity, ident, **kwargs)
+        if (asyncio.current_task().get_name() == "stale-release"
+                and entity is NodeAssignment and not kwargs.get("with_for_update")):
+            read.set()
+            await asyncio.wait_for(resume.wait(), 5)
+        return row
+
+    monkeypatch.setattr(AsyncSession, "get", pause_lookup)
+    loser = asyncio.create_task(
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        name="stale-release",
+    )
+    try:
+        await asyncio.wait_for(read.wait(), 5)
+        if winner == "release":
+            won = await client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS)
+            assert won.status_code == 200
+        else:
+            assert await nodes.complete(assignment.id, node_id="mac-mini", detail={"winner": True})
+    finally:
+        resume.set()
+    assert (await loser).status_code == 409
+    fresh = await nodes.get_assignment(assignment.id)
+    assert fresh.status.value == ("expired" if winner == "release" else "completed")
+    events = await jobs.list_events(job.id)
+    assert sum(e.event == "admin_assignment_released" for e in events) == (1 if winner == "release" else 0)
 
 
 @pytest_asyncio.fixture

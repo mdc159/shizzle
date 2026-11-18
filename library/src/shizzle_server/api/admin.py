@@ -589,16 +589,42 @@ def _last_meaningful_event_age(events: list[JobEvent]) -> float | None:
     return None
 
 
-def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str]) -> str | None:
-    """The attempt prefix the dispatched->verifying transition selected.
+def _fresh_retry_marker_index(events: list[JobEvent]) -> int | None:
+    """Index of the latest admin retry marker that opens a fresh window.
 
-    Falls back to the current attempt's prefix (what a fresh dispatch would
-    use) when the transition has not happened yet.
+    Only a pending restart (resume_stage=pending) starts a new dispatch
+    authority window. Publication-recovery markers resume the SAME
+    reservation and must not erase its reservation/recovery evidence —
+    exactly like ``repository.pending_runpod_dispatch`` (G7).
+    """
+    for index in range(len(events) - 1, -1, -1):
+        detail = _event_detail(events[index])
+        if (
+            events[index].event == "admin_retry_started"
+            and detail.get("resume_stage") == JobStage.pending.value
+        ):
+            return index
+    return None
+
+
+def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str]) -> str | None:
+    """The attempt prefix the pipeline selected (or a fresh dispatch would).
+
+    Mirrors cloud._selected_package_prefix: a publication-recovery event is
+    authoritative for its dispatch key even without a dispatched->verifying
+    transition, and the newest selection wins. A pending-restart marker voids
+    older selections — until its dispatch reaches verifying, the current
+    attempt's prefix (what a fresh dispatch would use) is the honest answer.
     """
     track_id = track_id_for_job(job.id)
     base = cloud.separation_prefix(track_id)
-    for event in reversed(events):
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
         detail = _event_detail(event)
+        if event.event == "publication_recovery_started":
+            dispatch_key = detail.get("dispatch_key")
+            if isinstance(dispatch_key, str) and dispatch_key:
+                return cloud.attempt_prefix(track_id, dispatch_key)
         if (
             event.event == "stage_completed"
             and detail.get("from") == "dispatched"
@@ -610,6 +636,11 @@ def _selected_package_prefix(job: Job, events: list[JobEvent], stages: set[str])
             # Rolling-upgrade fallback: this transition predates the
             # attempts/<hash> layout, exactly as cloud._selected_package_prefix.
             return base
+        if (
+            event.event == "admin_retry_started"
+            and detail.get("resume_stage") == JobStage.pending.value
+        ):
+            break  # a fresh restart voided every earlier selection
     if "dispatched" in stages:
         return cloud.attempt_prefix(track_id, f"{job.id.hex}:{job.attempt}")
     return None
@@ -633,14 +664,21 @@ def _selected_dispatch_key(job: Job, events: list[JobEvent]) -> str | None:
             and detail.get("to") == "verifying"
         ):
             transition_index = index
-    history = events[:transition_index] if transition_index is not None else events
-    retry_index = next(
-        (index for index in range(len(history) - 1, -1, -1)
-         if history[index].event == "admin_retry_started"),
-        None,
-    )
-    if retry_index is not None:
-        history = history[retry_index:]
+    retry_index = _fresh_retry_marker_index(events)
+    if retry_index is not None and (
+        transition_index is None or retry_index > transition_index
+    ):
+        # The latest fresh authority window comes FIRST: a restart that
+        # happened after the newest dispatched->verifying transition opens a
+        # window in which that older transition must not cut away the
+        # restart, its reservation, or its recovery events.
+        history = events[retry_index:]
+        transition_index = None
+    else:
+        history = events[:transition_index] if transition_index is not None else events
+        window_retry_index = _fresh_retry_marker_index(history)
+        if window_retry_index is not None:
+            history = history[window_retry_index:]
     pending = pending_runpod_dispatch(history)
     # The latest keyed reservation opens the current execution's authority
     # window even after it is confirmed. Otherwise an old handoff recovery
@@ -766,13 +804,7 @@ def _build_db_evidence(
     # so it must never be presented as the dispatch identity.
     pending = pending_runpod_dispatch(events)
     authority_start = 0
-    retry_index = next(
-        (index for index in range(len(events) - 1, -1, -1)
-         if events[index].event == "admin_retry_started"),
-        None,
-    )
-    if retry_index is not None:
-        authority_start = retry_index
+    retry_index = _fresh_retry_marker_index(events)
     latest_reservation_index = next(
         (
             index
@@ -782,12 +814,19 @@ def _build_db_evidence(
         ),
         None,
     )
+    # The authority window is bounded by the LATEST applicable boundary —
+    # fresh retry marker, keyed reservation, or legacy pending reservation —
+    # so recovery evidence from an older execution can never outrank a newer
+    # confirmed execution inside the same restart window.
     if retry_index is not None:
-        pass
-    elif latest_reservation_index is not None:
-        authority_start = latest_reservation_index
+        authority_start = retry_index
+    if latest_reservation_index is not None:
+        authority_start = max(authority_start, latest_reservation_index)
     elif pending is not None:
-        authority_start = next(index for index, event in enumerate(events) if event is pending)
+        pending_index = next(
+            index for index, event in enumerate(events) if event is pending
+        )
+        authority_start = max(authority_start, pending_index)
     recovered = None
     confirmed = None
     authority_keys = {
@@ -1750,9 +1789,21 @@ def _runpod_for(settings: Settings) -> RunPodClient:
 
 
 async def _source_is_obtainable(
-    request: Request, job: Job, *, recovery: bool = False
+    request: Request,
+    job: Job,
+    *,
+    recovery: bool = False,
+    expected_dismissal_event_id: int | None = None,
 ) -> bool:
-    """Ensure the source is present where downloading/recovery expects it."""
+    """Ensure the source is present where downloading/recovery expects it.
+
+    S3 restoration downloads and hashes request-private scratch OUTSIDE
+    ``DATA_DIR/<job>`` (dismissal removes exactly that workdir, and a losing
+    restoration must never unlink or half-write a winner's bytes), then
+    revalidates the job under its row lock — failed, unleased, same dismissal
+    generation the retry snapshotted — before installing at the canonical
+    path. The final retry transaction repeats the fence (G7).
+    """
     if job.source_type == SourceType.url and not recovery:
         return True  # A node re-downloads the submitted URL on the fresh run.
     settings = _settings(request)
@@ -1763,21 +1814,59 @@ async def _source_is_obtainable(
     outcome = await asyncio.to_thread(_head_blocking, settings, key)
     if outcome.error is not None or outcome.head is None:
         return False
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    # The API can run before the orchestrator first creates DATA_DIR.
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    scratch_dir = Path(tempfile.mkdtemp(
+        prefix=f".source-{job.id.hex}-{uuid.uuid4().hex}-",
+        dir=settings.data_dir,
+    ))
+    scratch = scratch_dir / "source.mp4"
+
+    async def preflight() -> bool:
         await asyncio.to_thread(
             s3_client(settings).download_file,
             settings.s3_media_bucket,
             key,
-            str(destination),
+            str(scratch),
         )
-        if job.input_checksum and await asyncio.to_thread(source_digest, destination) != job.input_checksum:
-            destination.unlink(missing_ok=True)
+        return not job.input_checksum or await asyncio.to_thread(
+            source_digest, scratch
+        ) == job.input_checksum
+
+    # Cancelling a coroutine does not stop its S3 thread. Keep the operation
+    # shielded and drain it before cleanup — exactly like the handoff
+    # preflight — or that thread would recreate an orphan scratch file after
+    # the rmtree below.
+    operation = asyncio.create_task(preflight())
+    cancelled = False
+    error: Exception | None = None
+    try:
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception as exc:
+                error = exc
+        try:
+            await operation
+        except Exception as exc:
+            error = exc
+        current = asyncio.current_task()
+        if cancelled or (current is not None and current.cancelling()):
+            raise asyncio.CancelledError
+        if error is not None or not operation.result():
+            # Only request-owned scratch is discarded; a concurrent
+            # winner's canonical source stays intact.
             return False
-    except Exception:
-        destination.unlink(missing_ok=True)
-        return False
-    return destination.is_file()
+        return await _jobs(request).install_retry_source(
+            job.id,
+            src=scratch,
+            dest=destination,
+            expected_dismissal_event_id=expected_dismissal_event_id,
+        )
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
 def _provider_rejected_reservation(
@@ -2056,7 +2145,9 @@ async def _recover_handoff_reservation(
         )
     expected_checksum = job.input_checksum
     assert expected_checksum is not None
-    if not await _source_is_obtainable(request, job, recovery=True):
+    if not await _source_is_obtainable(
+        request, job, recovery=True, expected_dismissal_event_id=expected_dismissal_event_id
+    ):
         raise HTTPException(
             409,
             "The upload source no longer exists locally or in S3; the complete "
@@ -2077,6 +2168,7 @@ async def _recover_handoff_reservation(
     prefix = cloud.attempt_prefix(track_id_for_job(job.id), dispatch_key)
     # Scratch lives outside DATA_DIR/<job>: a concurrent Dismiss can remove
     # that workdir without this blocked preflight recreating it afterwards.
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
     scratch = Path(tempfile.mkdtemp(
         prefix=f".retry-{job.id.hex}-{recovery_id.hex}-",
         dir=settings.data_dir,
@@ -2202,7 +2294,9 @@ async def _retry_job(
         )
     # Source refusal precedes reservation/storage refusal for uploads: show
     # the actionable missing-input blocker instead of an execution mystery.
-    if job.source_type == SourceType.upload and not await _source_is_obtainable(request, job):
+    if job.source_type == SourceType.upload and not await _source_is_obtainable(
+        request, job, expected_dismissal_event_id=expected_dismissal_event_id
+    ):
         await _jobs(request).append_event(
             job.id,
             "admin_retry_refused",

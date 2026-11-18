@@ -113,7 +113,8 @@ switch controls separation only—unchecked nodes still download URLs.
 3. Configure GitHub credentials, environment approval, SSH host trust and registry
    access following [Automation](AUTOMATION.md). Build the UI and digest-pinned
    API image through the supported release workflow. Apply schema migration
-   `0005_job_artist` through the explicit deploy transaction.
+   `0008_job_dismissal` (the current chain head) through the explicit deploy
+   transaction.
 4. Publish the lossless GPU image using `worker-image.yml`, configure/repoint the
    RunPod template, and verify endpoint configuration. Repointing intentionally
    parks the pool; enabling workers is a separate operational action.

@@ -103,6 +103,13 @@ async def recover(args: argparse.Namespace) -> dict:
         if not dispatch_key:
             raise ValueError("No confirmed dispatch reservation for this provider job")
         # Verify existing bytes without altering the terminal job or package.
+        # The dismissal generation is snapshotted with the same events the
+        # dispatch key came from, so the fenced transition below refuses if a
+        # dismissal intervenes before the locked claim (G7).
+        expected_dismissal_event_id = next(
+            (event.id for event in reversed(events) if event.event == "admin_dismissed"),
+            None,
+        )
         await verify_publication_assets(ctx, args.input_checksum)
         report = {
             "job_id": str(job.id), "provider_job_id": job.runpod_job_id,
@@ -118,6 +125,7 @@ async def recover(args: argparse.Namespace) -> dict:
             expected_checksum=args.input_checksum,
             expected_idempotency_key=job.idempotency_key,
             expected_dispatch_key=dispatch_key,
+            expected_dismissal_event_id=expected_dismissal_event_id,
             recovery_id=recovery_id, worker_id=worker_id,
             lease_seconds=orchestrator.settings.orchestrator_lease_seconds,
         )

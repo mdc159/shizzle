@@ -922,18 +922,25 @@ const RoutingSection: React.FC<{
 // --- nodes ------------------------------------------------------------------------
 
 const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({ nodes, onChanged }) => {
-  const [error, setError] = useState<string | null>(null);
+  // Errors stay associated with the node that produced them: toggling another
+  // node must neither clear nor overwrite this node's failure message.
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [pendingNode, setPendingNode] = useState<string | null>(null);
 
   const toggle = async (node: AdminNode, enabled: boolean) => {
     setPendingNode(node.id);
-    setError(null);
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next[node.id];
+      return next;
+    });
     try {
       await setAdminNodeSeparationEnabled(node.id, enabled);
       onChanged();
     } catch (err) {
       // No optimistic write: the checkbox remains at the confirmed state.
-      setError(err instanceof Error ? err.message : `Failed to update ${node.displayName}`);
+      const message = err instanceof Error ? err.message : `Failed to update ${node.displayName}`;
+      setErrors((prev) => ({ ...prev, [node.id]: message }));
     } finally {
       setPendingNode(null);
     }
@@ -942,7 +949,6 @@ const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({
   return (
     <section aria-label="Worker nodes">
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Nodes</h2>
-      {error && <p role="alert" className="mb-2 text-sm text-red-400">{error}</p>}
       {nodes.length === 0 ? (
         <p className="text-sm text-zinc-600">No worker nodes registered.</p>
       ) : (
@@ -985,6 +991,11 @@ const NodesSection: React.FC<{ nodes: AdminNode[]; onChanged: () => void }> = ({
                     : 'idle'}
                   {!node.separationEnabled && <span className="text-red-400"> · separation unchecked</span>}
                 </div>
+                {errors[node.id] && (
+                  <p role="alert" data-node-error={node.id} className="mt-2 text-sm text-red-400">
+                    {errors[node.id]}
+                  </p>
+                )}
               </div>
             );
           })}

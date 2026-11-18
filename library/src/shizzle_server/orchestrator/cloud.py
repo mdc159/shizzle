@@ -326,13 +326,24 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
         if any(
             event.event == "admin_retry_started"
             and isinstance(event.detail, dict)
-            and event.detail.get("reservation_resolution") == "handoff"
-            and isinstance(event.detail.get("dispatch_key"), str)
-            and attempt_prefix(track_id, event.detail["dispatch_key"]) == prefix
+            and (
+                # Every admin restart boundary invalidates the local cache:
+                # intake skips downloads solely by size and WAV sizes repeat
+                # across separations, so bytes left by an older attempt would
+                # otherwise survive into this attempt's verification. A fresh
+                # pending restart selects a new attempt prefix, and handoff
+                # recovery re-proves the recovered reservation from S3.
+                # Publication recovery alone reuses the same package, keeping
+                # its crash-idempotent cache.
+                event.detail.get("resume_stage") == JobStage.pending.value
+                or (
+                    event.detail.get("reservation_resolution") == "handoff"
+                    and isinstance(event.detail.get("dispatch_key"), str)
+                    and attempt_prefix(track_id, event.detail["dispatch_key"]) == prefix
+                )
+            )
             for event in events
         ):
-            # A same-size cache from another attempt is not proof of this
-            # handoff. Recovered attempts always re-download into a clean dir.
             await asyncio.to_thread(shutil.rmtree, pkg_dir, ignore_errors=True)
     pkg_dir.mkdir(parents=True, exist_ok=True)
     try:
