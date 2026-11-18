@@ -4,6 +4,7 @@ import './index.css'
 import App from './App.tsx'
 import { RemoteMixerPage } from '@/pages/RemoteMixerPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { AdminPage } from '@/pages/AdminPage'
 import { playbackEngine } from '@/lib/playback/mediaElementEngine'
 import { useStore } from '@/stores/useStore'
 
@@ -24,8 +25,17 @@ if (import.meta.env.DEV) {
 
 // Path-based entry: the control surface and dashboard are standalone pages
 // (no router dependency; Caddy's SPA fallback serves index.html for both).
+// /admin is the Tailscale-only administrator page; its API calls 404 off the
+// owner's network and the page says so plainly.
 const path = location.pathname.replace(/\/+$/, '') || '/';
-const Root = path === '/remote' ? RemoteMixerPage : path === '/dashboard' ? DashboardPage : App;
+const Root =
+  path === '/remote'
+    ? RemoteMixerPage
+    : path === '/dashboard'
+      ? DashboardPage
+      : path === '/admin'
+        ? AdminPage
+        : App;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

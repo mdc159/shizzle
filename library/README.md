@@ -28,9 +28,17 @@ local job directory.
 | Source / mode | Current behavior |
 | --- | --- |
 | Upload, `SHIZZLE_PIPELINE=cloud` | `pending → downloading → dispatched → verifying → publishing → ready`, subject to configuration and validation gates. |
-| URL submission | Accepted as a job, then fails with `YTDLP_BLOCKED`; URL acquisition is not implemented. |
+| URL submission | A worker node downloads one YouTube video and proves it with `sources/<track>/source.json` (A12); separation then follows the routing policy (docs/WORKER-NODES.md). With node routing `off`, or outside `SHIZZLE_PIPELINE=cloud`, the job fails `YTDLP_BLOCKED`. |
 | Local reference pipeline | Runs local FFmpeg/Demucs through verification; publication of its `local/` location is refused by invariant C7. It is not an end-to-end library startup path. |
 | Test pipeline | Deterministic fault-injection stages; requires `SHIZZLE_ALLOW_TEST_PIPELINE=1`, produces no playable media, and publication is refused. |
+
+Separation routing is `prefer` / `only` / `off` / `download_only` (max
+performance: nodes download, RunPod always separates) from
+`SHIZZLE_NODE_ROUTING`, and the owner can switch mode and the RunPod
+concurrency limit at runtime from the administrator page (`/api/admin`,
+`runtime_settings` table) — the orchestrator re-reads the effective value at
+each routing decision, and a missing runtime value falls back to the
+environment.
 
 Cloud ingestion needs working RunPod configuration and available worker
 capacity. The presence of implementation and passing unit tests does not
@@ -39,15 +47,19 @@ prove a deployment has those prerequisites.
 ## Code map
 
 - `src/shizzle_server/api/` — passcode/device-token authentication, routes,
-  CloudFront signing, manifest rewriting, and the deployment-wide remote relay.
+  CloudFront signing, manifest rewriting, the worker-node API, the
+  fail-closed administrator API (`admin.py`, invariants G1–G10), and the
+  deployment-wide remote relay.
 - `src/shizzle_server/db/` — jobs, append-only events, tracks, generation
-  activation, playback sessions/events, and orchestrator heartbeats.
+  activation, playback sessions/events, orchestrator heartbeats, and runtime
+  settings overrides.
 - `src/shizzle_server/orchestrator/` — leases, stage transitions, retry/park
-  behavior, RunPod polling/reconciliation, and cloud publication integration.
+  behavior, RunPod polling/reconciliation, node routing, cloud publication
+  integration, and runtime-setting resolution (`runtime.py`).
 - `src/shizzle_server/publish/` — lossless intake, drop-box import, delivery policy, media/audio
   audits, immutable S3 promotion, and generation migration tooling.
 - `alembic/` — Postgres schema migrations. The current linear chain ends at
-  `0005_job_artist`; production migrations belong to the deploy transaction.
+  `0008_job_dismissal`; production migrations belong to the deploy transaction.
 - `tests/` — isolated unit/media tests and the real-Postgres contract suite.
 
 ## Development setup
@@ -86,6 +98,7 @@ Use the maintained
 | `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID` | Submit/poll/cancel access to a configured lossless worker endpoint with available capacity. |
 | AWS credentials, `AWS_REGION`, `S3_MEDIA_BUCKET` | Source/package access and browser-generation publication in private object storage. |
 | `SHIZZLE_PASSCODE`, `TOKEN_SIGNING_SECRET` | Shared passcode gate and signed device tokens. |
+| `SHIZZLE_ADMIN_PROXY_SECRET` | Tailscale-only proxy secret for `/api/admin` (empty = every admin route 404s, fail closed); `SHIZZLE_ADMIN_OPEN=1` is local-dev/tests only. |
 | `CLOUDFRONT_DOMAIN`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_PATH` | Expiring file-scoped media URLs; the signing key is mounted read-only. |
 
 The API starts without running production migrations. The explicit deploy

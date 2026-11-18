@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from shizzle_server.db.models import JobStage
 from shizzle_server.db.repository import track_id_for_job
+from shizzle_server.errors import ErrorCode
 from shizzle_server.main import create_app
 
 
@@ -258,6 +259,62 @@ async def test_job_events_and_worker_fields(client):
     ]
     assert events[-1]["detail"] == {"phase": "separating"}
     assert all(event["createdAt"] for event in events)
+
+
+async def test_public_job_free_text_uses_the_shared_redaction_policy(client):
+    """E1/E2: public cards and timelines cannot expose credential echoes."""
+    c, app = client
+    credential_url = "https://youtu.be/dQw4w9WgXcQ?token=public-secret"
+    response = await c.post(
+        "/api/submit-url",
+        json={"url": credential_url, "title": f"failure {credential_url}"},
+    )
+    job_id = response.json()["jobId"]
+    parsed_id = uuid.UUID(job_id)
+    claimed = await app.state.job_repo.claim_next(worker_id="api-test", lease_seconds=60)
+    assert claimed is not None and claimed.id == parsed_id
+    await app.state.job_repo.append_event(
+        parsed_id,
+        "diagnostic",
+        {
+            "message": f"downloader refused {credential_url}",
+            "aws_access_key_id": "AKIA-PRIVATE-TEST-VALUE",
+            "source_ref": credential_url,
+            "nested": {"apiKey": "private-api-key"},
+        },
+    )
+    await app.state.job_repo.fail_job(
+        parsed_id,
+        worker_id="api-test",
+        error_code=ErrorCode.NODE_FAILED,
+        error_detail=f"worker failed while fetching {credential_url}",
+    )
+
+    responses = [
+        await c.get(f"/api/jobs/{job_id}"),
+        await c.get("/api/jobs"),
+        await c.get(f"/api/jobs/{job_id}/events"),
+    ]
+    assert all(response.status_code == 200 for response in responses)
+    for response in responses:
+        assert "public-secret" not in response.text
+        assert "https://" not in response.text
+        assert "AKIA-PRIVATE-TEST-VALUE" not in response.text
+        assert "private-api-key" not in response.text
+        assert "source_ref" not in response.text
+
+    detail = responses[0].json()
+    assert detail["errorCode"] == "NODE_FAILED"
+    assert detail["error"] == "worker failed while fetching [redacted]"
+    diagnostic = next(
+        event["detail"]
+        for event in responses[2].json()["events"]
+        if event["event"] == "diagnostic"
+    )
+    assert diagnostic["message"] == "downloader refused [redacted]"
+    assert "aws_access_key_id" not in diagnostic
+    assert "source_ref" not in diagnostic
+    assert diagnostic["nested"] == {}
 
 
 async def test_library_track_serving_and_soft_delete(client, upload_job, session_factory):

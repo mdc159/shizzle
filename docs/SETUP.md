@@ -73,12 +73,33 @@ The template is not a live deployment snapshot and contains no usable secrets.
 | `MEDIA_TTL_SECONDS`, `MEDIA_COOKIE_PATH` | Media expiry (86400 seconds default) and `/cdn` fallback path |
 | `SHIZZLE_API_IMAGE` | Digest-pinned API image required by production Compose |
 | `MAX_UPLOAD_BYTES`, `MAX_DURATION_SECONDS` | Upload copy and successful-duration-probe limits |
+| `SHIZZLE_ADMIN_PROXY_SECRET` | Shared secret the Tailscale-only reverse proxy adds as `X-Shizzle-Admin` to open `/api/admin/*`. Empty (default) = every admin API route 404s: fail closed. Never configure it on the public listener. |
+| `SHIZZLE_ADMIN_OPEN` | `1` skips the admin header check — local development and tests only. Never set it in production. |
+| `RUNPOD_MAX_CONCURRENT` | Environment default for the admin-settable cap on jobs at RunPod at once (unset = no limit, `0` = pause dispatch). The admin page's runtime override wins when a row is stored. |
 
 Use the bucket's actual AWS region. This repository defaults to `us-east-1`;
 that is independent of a developer's general AWS-region preference. CloudFront
 key files are mounted read-only into the API; never put private keys into Git.
 Worker settings and its image identity are documented in
 [RunPod setup](../deploy/runpod/README.md).
+
+### Administrator page (local development)
+
+The `/api/admin/*` routes are served through the owner's Tailscale-only
+reverse proxy in production, which adds the `X-Shizzle-Admin` header. The
+Tailscale header-injecting listener is being added separately in #66; until it
+is deployed, only the local-development path below is available. The public
+SPA fallback may serve the `/admin` shell anywhere, but its admin API calls
+answer 404 off the tailnet and the page reports that it cannot fetch data. For
+local development against the recipe above, either set
+`SHIZZLE_ADMIN_PROXY_SECRET` and send the header yourself, or set
+`SHIZZLE_ADMIN_OPEN=1` to skip the check (tests use this; never in
+production). Routing and the RunPod concurrency limit can then be changed at
+runtime from the page or `PUT /api/admin/settings`; a missing runtime value
+always falls back to the environment `Settings` value. Failed jobs can be
+retried, dismissed/restored and bulk-processed; Library tracks and duplicates
+are cleaned only through reversible dismiss/soft-delete actions. The node
+switch controls separation only—unchecked nodes still download URLs.
 
 ## Production commissioning
 
@@ -92,7 +113,8 @@ Worker settings and its image identity are documented in
 3. Configure GitHub credentials, environment approval, SSH host trust and registry
    access following [Automation](AUTOMATION.md). Build the UI and digest-pinned
    API image through the supported release workflow. Apply schema migration
-   `0005_job_artist` through the explicit deploy transaction.
+   `0008_job_dismissal` (the current chain head) through the explicit deploy
+   transaction.
 4. Publish the lossless GPU image using `worker-image.yml`, configure/repoint the
    RunPod template, and verify endpoint configuration. Repointing intentionally
    parks the pool; enabling workers is a separate operational action.

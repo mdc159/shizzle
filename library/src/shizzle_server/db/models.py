@@ -75,6 +75,11 @@ RUNNABLE_STAGES = (
 # Legal forward transitions (state-machine authority, enforced by the repository).
 # In cloud mode `dispatched` IS the splitting (decision 6: no splitting-noop
 # hop) — it advances straight to `verifying` once the worker package is proven.
+# Explicit administrator-only retry transition. This is deliberately not in
+# ALLOWED_TRANSITIONS: ordinary advance() can never reopen a terminal job.
+ADMIN_RETRY_TRANSITION = (JobStage.failed, JobStage.pending)
+
+
 ALLOWED_TRANSITIONS: dict[JobStage, frozenset[JobStage]] = {
     JobStage.pending: frozenset({JobStage.downloading, JobStage.failed}),
     JobStage.downloading: frozenset({JobStage.dispatched, JobStage.splitting, JobStage.failed}),
@@ -127,6 +132,9 @@ class Job(Base):
     output_checksums: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_detail: Mapped[str | None] = mapped_column(Text)
+    # Hidden from public/default admin history after an administrator dismisses
+    # a failed job. The row and append-only event history are retained.
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stage_timings: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     # Linkage written by the publishing stage (idempotent re-runs check it).
     track_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tracks.id"))
@@ -263,6 +271,28 @@ class OrchestratorHeartbeat(Base):
 # --- worker nodes (docs/WORKER-NODES.md) --------------------------------------
 
 
+class RuntimeSetting(Base):
+    """Operator-controlled runtime settings (admin page), overriding env.
+
+    Keys currently in use:
+    - ``node_routing``: ``prefer`` | ``only`` | ``off`` | ``download_only``
+      (falls back to ``Settings.node_routing`` when absent).
+    - ``runpod_max_concurrent``: int >= 0 (0 pauses dispatch) or null (no
+      limit); falls back to ``Settings.runpod_max_concurrent`` when absent.
+
+    Values are JSON so the same column carries strings, ints and nulls.
+    """
+
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONType, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow,
+        server_default=func.now(),
+    )
+
+
 class NodeAssignmentKind(StrEnum):
     """What a node is asked to do for one job."""
 
@@ -310,8 +340,11 @@ class Node(Base):
         ForeignKey("node_assignments.id", ondelete="SET NULL", use_alter=True,
                    name="fk_nodes_busy_assignment"),
     )
-    # Operator kill switch: a disabled node is never assigned work.
+    # Legacy operator kill switch: a disabled node is never assigned work.
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Admin console switch: suppress only new separation assignments. Downloads
+    # remain eligible because URL ingest depends on residential-IP home nodes.
+    separation_disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now()
     )

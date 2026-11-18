@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from ..db.models import Job, JobStage, Track
+from .redaction import _redact_value
 
 # Backwards-compat alias: Phase 1 tests/clients imported JobStatusEnum.
 JobStatusEnum = JobStage
@@ -35,23 +36,26 @@ class JobResponse(BaseModel):
 
     @classmethod
     def from_job(cls, job: Job) -> JobResponse:
-        return cls(
-            jobId=job.id.hex,
-            status=job.status,
-            sourceType=job.source_type.value,
-            title=job.title,
-            artist=job.artist,
-            attempt=job.attempt,
-            error=job.error_detail,
-            errorCode=job.error_code,
-            stageTimings=job.stage_timings,
-            workerPhase=job.worker_phase,
-            workerHeartbeatAt=job.worker_heartbeat_at,
-            executor=job.executor,
-            trackId=str(job.track_id) if job.track_id else None,
-            createdAt=job.created_at,
-            updatedAt=job.updated_at,
-        )
+        # Public failure text and nested diagnostics can echo the submitted
+        # URL or provider credentials. Use the same policy as admin responses
+        # (E1/E2/G6), while leaving structured status and identity intact.
+        return cls.model_validate(_redact_value({
+            "jobId": job.id.hex,
+            "status": job.status,
+            "sourceType": job.source_type.value,
+            "title": job.title,
+            "artist": job.artist,
+            "attempt": job.attempt,
+            "error": job.error_detail,
+            "errorCode": job.error_code,
+            "stageTimings": job.stage_timings,
+            "workerPhase": job.worker_phase,
+            "workerHeartbeatAt": job.worker_heartbeat_at,
+            "executor": job.executor,
+            "trackId": str(job.track_id) if job.track_id else None,
+            "createdAt": job.created_at,
+            "updatedAt": job.updated_at,
+        }))
 
 
 class JobListResponse(BaseModel):

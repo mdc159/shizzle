@@ -9,7 +9,12 @@ import httpx
 import pytest
 
 from shizzle_server.errors import ErrorCode, StageError
-from shizzle_server.orchestrator.runpod_client import HttpRunPodClient, parse_worker_progress
+from shizzle_server.orchestrator.runpod_client import (
+    HttpRunPodClient,
+    NotConfiguredRunPodClient,
+    is_terminal_dispatch_rejection,
+    parse_worker_progress,
+)
 
 
 def client(handler) -> HttpRunPodClient:
@@ -41,6 +46,58 @@ async def test_http_errors_are_mapped(status: int, retryable: bool) -> None:
         await runpod.poll("job-1")
     assert exc.value.code == ErrorCode.RUNPOD_DISPATCH_FAILED
     assert exc.value.retryable is retryable
+
+
+@pytest.mark.parametrize("status", [400, 401, 404, 409, 499])
+async def test_terminal_dispatch_rejection_marks_provider_not_accepted(status: int) -> None:
+    runpod = client(lambda _request: httpx.Response(status))
+    with pytest.raises(StageError) as exc:
+        await runpod.dispatch(job_id=uuid.uuid4(), idempotency_key="k", payload={})
+    assert exc.value.retryable is False
+    assert exc.value.provider_accepted is False
+    assert is_terminal_dispatch_rejection(exc.value.code, exc.value.detail)
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_ambiguous_dispatch_http_error_does_not_mark_rejection(status: int) -> None:
+    runpod = client(lambda _request: httpx.Response(status))
+    with pytest.raises(StageError) as exc:
+        await runpod.dispatch(job_id=uuid.uuid4(), idempotency_key="k", payload={})
+    assert exc.value.provider_accepted is None
+    assert not is_terminal_dispatch_rejection(exc.value.code, exc.value.detail)
+
+
+async def test_poll_rejection_does_not_claim_dispatch_was_rejected() -> None:
+    runpod = client(lambda _request: httpx.Response(409))
+    with pytest.raises(StageError) as exc:
+        await runpod.poll("accepted-job")
+    assert exc.value.provider_accepted is None
+
+
+@pytest.mark.parametrize(
+    ("code", "detail", "expected"),
+    [
+        (
+            "RUNPOD_DISPATCH_FAILED",
+            NotConfiguredRunPodClient._DETAIL,
+            True,
+        ),
+        (
+            "RUNPOD_DISPATCH_FAILED",
+            NotConfiguredRunPodClient._DETAIL + " (extra)",
+            False,
+        ),
+        ("RUNPOD_DISPATCH_FAILED", "RunPod returned HTTP 409", True),
+        ("RUNPOD_DISPATCH_FAILED", "RunPod returned HTTP 409 (max attempts)", False),
+        ("RUNPOD_DISPATCH_FAILED", "RunPod returned HTTP 429", False),
+        ("RUNPOD_DISPATCH_FAILED", "RunPod returned HTTP 500", False),
+        ("RUNPOD_TIMEOUT", "RunPod returned HTTP 409", False),
+    ],
+)
+def test_legacy_terminal_rejection_shapes_are_exact(
+    code: str, detail: str, expected: bool
+) -> None:
+    assert is_terminal_dispatch_rejection(code, detail) is expected
 
 
 async def test_cancel_posts_to_expected_endpoint() -> None:

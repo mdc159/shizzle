@@ -624,15 +624,20 @@ def is_node_executor(value: str | None) -> bool:
     return value is not None and value.startswith("node:")
 
 
-async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str | None:
+async def choose_separation_node(
+    ctx: StageContext, *, dispatch_key: str, routing: str
+) -> str | None:
     """Routing decision for a fresh dispatch.
 
     Returns a node id to assign, ``"runpod"`` to use the cloud, or None to
     keep parking (the caller parks). Emits ``node_wait`` / ``fallback_runpod``
-    events exactly once per wait.
+    events exactly once per wait. ``routing`` is the EFFECTIVE mode (admin
+    override over env); ``off`` and ``download_only`` both go straight to
+    RunPod — the caller already skips the node block for them, this is
+    defense in depth.
     """
     settings = ctx.settings
-    if not settings.node_routing_enabled:
+    if routing in ("off", "download_only"):
         return "runpod"
     candidates = await _repo(ctx).available(
         NodeAssignmentKind.separate, online_seconds=settings.node_online_seconds
@@ -645,16 +650,18 @@ async def choose_separation_node(ctx: StageContext, *, dispatch_key: str) -> str
     # Only nodes that already stalled or failed this job are available: treat
     # that as no node, so the wait window and the RunPod fallback apply.
     runpod_configured = not isinstance(ctx.runpod, NotConfiguredRunPodClient)
-    if settings.node_routing == "prefer" and runpod_configured:
+    if routing == "prefer" and runpod_configured:
         # No node has ever registered: nothing to wait for, RunPod right away.
         # (A registered-but-offline node earns the wait window: it may wake.)
         registered = await _repo(ctx).list_nodes()
         if not any(
-            isinstance(n.capabilities, dict) and n.capabilities.get("separate")
+            isinstance(n.capabilities, dict)
+            and n.capabilities.get("separate")
+            and n.separation_disabled_at is None
             for n in registered
         ):
             return "runpod"
-    if settings.node_routing == "only" or not runpod_configured:
+    if routing == "only" or not runpod_configured:
         await _note_wait(ctx, events, "separate", ctx.job.attempt)
         await ctx.jobs.record_worker_progress(
             ctx.job.id, phase="waiting for a separation node", worker_id=ctx.worker_id

@@ -443,6 +443,30 @@ class TestSchemaContract:
             assert {"jobs", "job_events", "tracks", "orchestrator_heartbeats"} <= tables
             assert "alembic_version" in tables
 
+            # 0007_runtime_settings: the admin page's runtime overrides table
+            # really is created by the migration (not create_all).
+            assert "runtime_settings" in tables
+            rs_columns = {
+                r[0]
+                for r in await conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'runtime_settings'"
+                    )
+                )
+            }
+            assert {"key", "value", "updated_at"} <= rs_columns
+            node_columns = {
+                r[0]
+                for r in await conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'nodes'"
+                    )
+                )
+            }
+            assert "separation_disabled_at" in node_columns
+
             # 0005_job_artist: jobs.artist is NOT NULL with a '' default so
             # pre-migration rows stay valid.
             columns = {
@@ -458,6 +482,8 @@ class TestSchemaContract:
             nullable, default = columns["artist"]
             assert nullable == "NO"
             assert default == "''::text"
+            # 0008_job_dismissal: nullable visibility marker, not a deleted row.
+            assert columns["dismissed_at"][0] == "YES"
 
             await conn.execute(
                 text(

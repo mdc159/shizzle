@@ -278,6 +278,37 @@ async def test_worker_progress_writes_only_on_phase_change(job_repo, upload_job)
     assert events[-1].detail == {"phase": "separate"}
 
 
+async def test_publish_step_is_change_only_and_lease_fenced(job_repo, upload_job):
+    await job_repo.claim_next(worker_id="worker-a", lease_seconds=60)
+    assert await job_repo.record_publish_step(
+        upload_job.id,
+        phase="verifying: downloading package",
+        worker_id="worker-a",
+    ) is True
+    assert await job_repo.record_publish_step(
+        upload_job.id,
+        phase="verifying: downloading package",
+        worker_id="worker-a",
+    ) is False
+    async with job_repo._sf() as session, session.begin():
+        row = await session.get(Job, upload_job.id)
+        row.lease_owner = "worker-b"
+    assert await job_repo.record_publish_step(
+        upload_job.id,
+        phase="verifying: checking stems",
+        worker_id="worker-a",
+    ) is False
+    current = await job_repo.get_job(upload_job.id)
+    assert current.worker_phase == "verifying: downloading package"
+    events = [event for event in await job_repo.list_events(upload_job.id) if event.event == "publish_step"]
+    assert len(events) == 1
+    assert events[0].detail == {
+        "step": "verifying: downloading package",
+        "previous_step": None,
+        "previous_seconds": 0.0,
+    }
+
+
 async def test_record_dispatch_requires_dispatched_stage_and_lease_owner(job_repo, upload_job):
     with pytest.raises(InvalidTransition):
         await job_repo.record_dispatch(

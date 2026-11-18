@@ -202,10 +202,11 @@ lease-independent by design (B4).
 
 Operator publication recovery is a separate, explicit claim, never a normal
 `advance` from a terminal state. `recover_publication` locks the exact failed
-job with `FOR UPDATE SKIP LOCKED`, requires its latest failure to be at
-publication with `PUBLISH_FAILED`, checks the expected provider/input/reservation
-identity, refuses a live lease or published track, and grants a bounded lease
-at `verifying`. It preserves the provider ID, reservation and attempt counter
+job with `FOR UPDATE SKIP LOCKED`, requires a recoverable publication failure
+(or a selected-package verification failure whose completion evidence the
+admin retry has checked), checks the expected provider/input/reservation
+identity, refuses a live lease, dismissal or published track, and grants a
+bounded lease at `verifying`. It preserves the provider ID, reservation and attempt counter
 and appends recovery provenance. The operator command first verifies provider
 completion, package bytes and source identity. A crash can only resume
 verification/publication, never dispatch. Ordinary terminal transitions stay
@@ -218,7 +219,7 @@ generation can activate only when its immutable manifest equals the rebuilt
 candidate; mismatches fail closed for reconciliation.
 - Recovery guards: `library/tests/test_publication_recovery.py`
 - Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
+- Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`, `library/tests/test_runtime_routing.py::test_reserve_dispatch_rechecks_lease_after_capacity_wait`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
   pair without re-reading owner and expiry under lock.
 
@@ -270,10 +271,17 @@ transient poll error propagates.
 ### B8 — heartbeats only on phase change
 
 **Invariant:** Worker-phase heartbeats MUST be written only on phase change
-(bounded history per job).
-- Where: `library/src/shizzle_server/db/repository.py`
-- Guarded by: `library/tests/test_repository.py::test_worker_progress_writes_only_on_phase_change`
-- Violation smell: a DB write per progress tick.
+(bounded history per job). Leaving `dispatched` for verification clears the
+separator's final phase; verification and publication then report each real
+step in plain language. Each changed step atomically appends a lease-fenced
+`publish_step` event (`step`, `previous_step`, `previous_seconds`) with the
+phase write, is best-effort and logged on failure, and never fails media work.
+Terminal `ready` and `failed` transitions clear the executor phase.
+- Where: `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/cloud.py`, `library/src/shizzle_server/publish/lossless_intake.py`
+- Guarded by: `library/tests/test_repository.py::test_worker_progress_writes_only_on_phase_change`, `library/tests/test_repository.py::test_publish_step_is_change_only_and_lease_fenced`, `library/tests/test_orchestrator_unit.py::test_cloud_publish_progress_replaces_executor_phase_and_records_steps`, `library/tests/test_orchestrator_unit.py::test_cloud_progress_write_failure_does_not_fail_verification`
+- Violation smell: a DB write per progress tick, a stale separator upload
+  percentage displayed during publication, an unfenced/unlogged progress
+  write, or a terminal job still displaying its last executor step.
 
 ### B9 — park frees the lease, costs no attempt
 
@@ -589,10 +597,12 @@ browser evidence — the validator rejects credential-shaped keys recursively
 ### E2 — source_ref never exposed in API responses
 
 **Invariant:** `source_ref` (the raw submitted URL) is stored on the job row
-but MUST NEVER be exposed in API responses (`JobResponse` omits it).
-- Where: `library/src/shizzle_server/api/models.py`, `library/src/shizzle_server/db/models.py`
-- UNGUARDED — no test asserts the omission; a wanted test should post a job
-  with a credential-bearing URL and assert every response body lacks it.
+but MUST NEVER be exposed in API responses (`JobResponse` omits it). Public
+job responses and event details MUST also pass their free-text fields through
+the shared recursive redaction policy, so error text or nested diagnostics
+cannot echo credential-bearing URLs, access keys or API keys (E1/G6).
+- Where: `library/src/shizzle_server/api/models.py`, `library/src/shizzle_server/api/routes.py`, `library/src/shizzle_server/api/redaction.py`, `library/src/shizzle_server/db/models.py`
+- Guarded by: `library/tests/test_api.py::test_public_job_free_text_uses_the_shared_redaction_policy`
 
 ### E3 — secrets only in env
 
@@ -641,7 +651,7 @@ Guard: `library/tests/test_nodes_api.py`
 
 **Invariant:** Migrations MUST form a single linear chain with numeric prefix ==
 revision id, explicit `down_revision`, and a paired real downgrade.
-- Where: `library/alembic/versions/` — revisions 0001 through 0005
+- Where: `library/alembic/versions/` — revisions 0001 through 0008
 - Violation smell: a branch, a filename/revision mismatch, or a no-op
   downgrade.
 
@@ -686,3 +696,214 @@ rather than being overwritten. Isolated contract databases may run
 - Guarded by: `library/tests/test_repository.py::test_idempotency_key_unique`
 - Violation smell: relaxing the unique constraint or reusing a key across
   dispatches.
+
+## G. Administrator surface (/api/admin, /admin)
+
+The admin API exists to trace jobs end to end and to steer routing at runtime.
+Every `/api/admin/*` route is reachable only through the owner's Tailscale-only
+reverse proxy, which adds the shared `X-Shizzle-Admin` header; the public proxy
+strips it. The public SPA fallback may still serve the `/admin` page shell, but
+it cannot fetch admin data off the tailnet. Runtime overrides live in the
+`runtime_settings` table (migration 0007)
+and are read by the orchestrator at each routing decision, so a change takes
+effect on the next pass without a restart; a missing key falls back to the
+environment `Settings` value.
+
+### G1 — admin routes fail closed without the proxy secret
+
+**Invariant:** Every `/api/admin` route MUST require the `X-Shizzle-Admin`
+header to equal `SHIZZLE_ADMIN_PROXY_SECRET`, compared in constant time. When
+the setting is empty every admin route returns 404 — fail closed. The check
+exists as a dependency (`require_admin`) applied to every route in
+`library/src/shizzle_server/api/admin.py`; `SHIZZLE_ADMIN_OPEN=1` skips it for
+local development and tests only (documented in `docs/SETUP.md`).
+- Where: `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_admin_api.py::test_admin_routes_404_without_the_secret_header`, `library/tests/test_admin_api.py::test_empty_secret_means_every_admin_route_404s`
+- Violation smell: an admin route without the `Admin` dependency, a non-constant-time comparison, or a non-empty-secret default that opens the surface.
+
+### G2 — admin responses never carry source_ref
+
+**Invariant:** No admin response MUST ever expose `source_ref` (the raw
+submitted URL), node assignment payloads (which carry it, E6), node tokens,
+S3 credentials, signed URLs or the admin secret itself. The job-detail
+response includes every other job column; assignments are returned without
+their `payload`. Because real history can echo credential-bearing values in
+unexpected places — the URL-download completion event stores
+`detail.source.source_ref`, node failure text quotes URLs, integrity blobs
+may embed signed URLs — every nested detail and diagnostic string an admin
+route returns is recursively redacted at the response boundary (G6):
+credential-shaped keys (including access-key, API-key and source_ref fields)
+are omitted entirely and URL-shaped strings scrubbed (defense in depth on top
+of E2/E3).
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`
+- Guarded by: `library/tests/test_admin_api.py::test_no_admin_response_ever_carries_source_ref`, `library/tests/test_admin_api.py::test_job_detail_excludes_assignment_payloads`, `library/tests/test_admin_api.py::test_populated_history_and_reports_are_redacted`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
+- Violation smell: adding `source_ref` or the assignment `payload` to an admin
+  schema, or echoing request URLs into evidence text.
+
+### G3 — the RunPod limit parks without spending an attempt and never disturbs dispatched work
+
+**Invariant:** When the count of jobs holding a RunPod reservation or
+confirmed RunPod job in `dispatched` is at or above `runpod_max_concurrent`,
+a FRESH dispatch MUST park instead of submitting: no attempt is consumed and exactly
+one deduplicated `runpod_wait` event is appended per wait outage (the B6/B9
+pattern). Work already dispatched is never cancelled, expired or otherwise
+disturbed to make room; the count only gates fresh dispatches. The count
+counts LIVE work only — a worker the orchestrator marked failed is a closed
+execution whose retry dispatches fresh (B12) and must not count itself, and a
+retained `executor = node:<id>` from an earlier URL download is not proof
+that a separation reservation is node-bound (only a separation assignment
+carrying the reservation's idempotency key is). The check is ATOMIC with the
+reservation: on Postgres every capacity-gated `reserve_dispatch` takes the
+capacity advisory xact lock before counting, so two orchestrator instances
+racing for the last slot serialize and exactly one reserves. The capacity
+count reads jobs, events and separation assignments in one SQL statement, so
+a concurrent confirmation cannot split them across snapshots or hide live
+work; it does not use per-job queries.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/db/repository.py` (`reserve_dispatch`, `_count_runpod_work`)
+- Guarded by: `library/tests/test_runtime_routing.py::test_runpod_limit_parks_without_attempt_and_never_disturbs_dispatched_work`, `library/tests/test_runtime_routing.py::test_runpod_limit_zero_pauses_dispatch`, `library/tests/test_runtime_routing.py::test_count_excludes_failed_worker_executions`, `library/tests/test_runtime_routing.py::test_count_includes_unconfirmed_reservations_ignoring_download_executor`, `library/tests/test_capacity_retry.py::test_retry_reservation_counts_despite_closed_execution`, `library/tests/test_capacity_retry.py::test_submit_timeout_reservation_counts_and_predecessor_does_not`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_one_instance_takes_the_final_slot`, `library/tests/contract/test_admin_postgres.py::test_concurrent_reservations_see_a_retry_reservation_slot`, `library/tests/contract/test_admin_postgres.py::test_capacity_count_cannot_miss_a_concurrent_confirmation`, `library/tests/test_runtime_routing.py::test_capacity_count_uses_one_consistent_snapshot`, `library/tests/test_runtime_routing.py::test_reserve_dispatch_rechecks_lease_after_capacity_wait`
+- Violation smell: counting node-held work or closed executions, spending an
+  attempt or appending a `runpod_wait` per poll, cancelling/polling-failing a
+dispatched job when the limit is reached, or checking capacity outside the
+reservation's lock.
+
+### G4 — download_only never assigns separation to a node
+
+**Invariant:** In `download_only` routing, URL downloads are assigned to
+nodes exactly as in `prefer`, but separation MUST NEVER be assigned to a node:
+a fresh separation dispatch goes to RunPod at once, with no node wait and no
+`node_wait`/`fallback_runpod` events. Routing overrides apply only to fresh
+choices: a same-attempt node assignment left unconfirmed by a crash is adopted
+first (B16), never duplicated on RunPod.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runtime.py`
+- Guarded by: `library/tests/test_runtime_routing.py::test_download_only_url_job_downloads_via_node_then_separates_on_runpod`, `library/tests/test_runtime_routing.py::test_download_only_dispatches_runpod_with_no_node_wait`, `library/tests/test_runtime_routing.py::test_routing_override_adopts_existing_separation_before_runpod`
+- Violation smell: a `separate` assignment created while the effective routing
+  is `download_only`, or a wait window inserted before the RunPod dispatch.
+
+### G5 — separation-unchecked nodes still download
+
+**Invariant:** A node with `separation_disabled_at` set MUST NOT be offered or
+assigned new separation work, but MUST remain eligible for downloads exactly
+as before; work it already holds is left alone. The admin separation
+enable/disable endpoints flip only this new field, never the legacy
+`disabled_at` kill switch. In `prefer`, having no separation-eligible node
+triggers immediate RunPod fallback; `only` waits, while `download_only` and
+`off` are unaffected.
+- Where: `library/src/shizzle_server/db/repository.py` (`NodeRepository.available`, `create_assignment`, `set_separation_disabled`), `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/orchestrator/nodes.py`
+- Guarded by: `library/tests/test_runtime_routing.py::test_separation_disabled_node_still_receives_downloads`, `library/tests/test_runtime_routing.py::test_prefer_separation_disabled_falls_back_to_runpod_at_once`, `library/tests/test_runtime_routing.py::test_only_separation_disabled_waits_for_an_eligible_node`, `library/tests/test_runtime_routing.py::test_runpod_modes_ignore_separation_disabled`
+- Violation smell: an unchecked node losing a download assignment, a fresh
+  separation assignment racing the locked write, or `prefer` waiting for a
+  node whose separation is unchecked.
+
+### G7 — admin retry is source-safe, fenced and fresh
+
+**Invariant:** Only a non-dismissed failed job can be retried. Upload restart
+uses the explicit admin-only failed-to-pending transition, an obtainable source,
+a monotonically fresh dispatch attempt, and one locked transaction that expires
+open assignments, clears old execution state and appends `admin_retry_started`.
+Ordinary `advance()` remains unable to reopen failed jobs. An unresolved accepted
+reservation refuses reopening even when no provider id was recorded, but it is
+resolved by durable evidence in a fixed order: a structured terminal dispatch
+rejection (`provider_accepted: false`, with only the client's exact legacy
+rejection shapes as fallback); otherwise exact-attempt `dispatch.json` and
+`handoff.json` inspection; otherwise an empty prefix older than B10's shared
+reconciliation deadline. Receipt presence, handoff presence and every storage
+error fail closed. A valid handoff can instead enter publication recovery for
+the same reservation and immutable package. Inside the deadline, refusal reports
+when retry becomes eligible; all such operator refusals name Dismiss. The locked
+transaction revalidates the exact reservation event id, and resolution/cancel
+outcome is recorded as `reservation_resolution` on the retry event. The pending
+restart event is an append-only authority boundary so old reservations/receipts
+cannot satisfy the new attempt, including through the repository's filtered SQL
+queries; publication recovery does not open a fresh authority window. Resolved
+RunPod work is cancelled best-effort and the outcome recorded; node identities
+instead expire their assignments and never call RunPod cancellation. Failure to
+confirm other uncertain executors stopped refuses the retry. A
+verifying/publishing failure with a selected package first uses
+completion, package-byte and source-identity-checked publication recovery
+without another separation, and records why if it falls back to the ordinary
+source-checked restart, whose preflight fallback reason is appended even when
+source checking or executor cancellation later refuses the retry. S3-only
+uploads are restored and validated at the expected local path before
+downloading. A failed URL job that cannot use publication recovery is instead
+RESUBMITTED AS A NEW JOB: new id, track id and storage keys, with
+`admin_resubmitted` on the old job, `admin_resubmitted_from` on the new job,
+and dismissal of the old job in the same transaction. A12's canonical
+`sources/<track>/source.mp4` and `source.json` interface is unchanged; no
+per-attempt source/receipt naming or cross-attempt adoption is introduced.
+Dismissed jobs require restore first, except that `retry?restore=true` may
+atomically restore and retry under the final locked retry transaction. Its
+normal preflight/refusal rules are unchanged, and a refusal leaves the job
+dismissed without an `admin_restored` or `admin_retry_started` event. A
+concurrent standalone restore converges to one restore and one retry. Retry
+preflight reads the job and event authority under one short row lock; the final
+transition refuses any newer dismissal event, so intervening cleanup cannot
+validate stale source/package evidence. Concurrent URL restore-retries have one
+resubmission winner even though the predecessor remains dismissed; durable
+`admin_resubmitted` evidence permanently bars another successor for that old
+job. Concurrent retries or an orchestrator lease produce one winner.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`, `library/src/shizzle_server/orchestrator/recover_publication.py`
+- Guarded by: `library/tests/test_admin_actions.py` (including `test_restore_and_retry_is_one_successful_action`, `test_restore_and_retry_refusal_leaves_job_dismissed`, `test_restore_and_retry_fences_new_dismissal_after_source_preflight`, `test_dismissed_url_restore_retry_cannot_resubmit_twice`, `test_retry_uses_durable_closed_executor_evidence_after_phase_clear`, `test_terminal_dispatch_rejection_retries_with_real_fresh_key_fence`, `test_empty_attempt_after_deadline_retries_and_cancel_is_best_effort`, `test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix`), `library/tests/contract/test_admin_postgres.py::test_restore_and_retry_racing_restore_converges_on_postgres`, `library/tests/contract/test_admin_postgres.py::test_dismissed_url_restore_retries_have_one_postgres_winner`, `library/tests/contract/test_admin_postgres.py::test_simultaneous_admin_retries_have_exactly_one_winner`, `library/tests/contract/test_admin_postgres.py::test_retry_racing_an_orchestrator_pass_is_refused`, `library/tests/contract/test_admin_postgres.py::test_retry_with_resolved_reservation_racing_orchestrator_is_refused`
+
+### G8 — dismissal hides history without deleting evidence
+
+**Invariant:** Only failed jobs can be dismissed/restored. Dismissal appends an
+event, expires open assignments, and removes only the exact
+`DATA_DIR/<job hex>` working directory (never a symlink or outside path). A
+exclusive job row lock is acquired/revalidated before cleanup and retained
+through cleanup and dismissal commit, so a losing dismissal cannot remove a
+successfully retried or leased job's files. Every request cancellation, including
+repeated cancellation, remains shielded while waiting for the locked
+operation's durable outcome; deletion and dismissal resolve before retry can
+reopen, and only then is the cancellation re-raised.
+A filesystem failure is an
+actionable per-item refusal before the dismissal marker commits, and bulk/group
+processing continues with later items. It
+deletes no database rows or S3 objects. Dismissed jobs disappear from public
+and default admin history/counts, are visible through explicit filters, and
+cannot be retried until restored (or atomically restored and retried through
+G7's explicit `restore=true` action).
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/models.py`, `library/src/shizzle_server/db/repository.py`, `library/alembic/versions/0008_job_dismissal.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_dismiss_restore_visibility_workdir_and_retry_guard`, `library/tests/test_alembic_chain.py::test_0008_adds_job_dismissal_and_rolls_back`
+
+### G9 — admin library removal is soft and ledgered
+
+**Invariant:** Admin remove/restore changes only `tracks.deleted_at` and commits
+an `admin_removed`/`admin_restored` generation-ledger event in the same
+transaction. It never deletes S3 objects. Deleted-track filters and originating
+job ids are explicit in the admin API.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/db/repository.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_track_remove_restore_and_deleted_filters`
+
+### G10 — duplicate cleanup keeps a live ready track and stays reversible
+
+**Invariant:** Duplicate groups use input checksum, YouTube video id, then
+case/whitespace/punctuation-folded title+artist, never expose source URLs, and
+select only the newest ready non-deleted track as keeper (none when no such
+track exists). A ready job and the track it produced are ONE item: the job
+retains grouping evidence internally while only its track is displayed, and a
+group requires at least two distinct items. Before any cleanup, the action
+revalidates keeper existence,
+readiness, deletion state and exact group membership, then locks keeper and
+alternative rows so a stale/unavailable keeper cannot cause the last live
+alternative to be removed. Group actions dismiss failed jobs and soft-remove
+non-keeper tracks through the same reversible single-item rules; no-keeper
+groups only dismiss failed jobs. No action hard-deletes rows or media.
+- Where: `library/src/shizzle_server/api/admin.py`
+- Guarded by: `library/tests/test_admin_actions.py::test_duplicate_grouping_rules_and_url_redaction`, `library/tests/test_admin_actions.py::test_single_ready_job_and_its_track_are_not_a_duplicate_group`, `library/tests/test_admin_actions.py::test_two_ready_jobs_same_file_form_one_two_item_group`, `library/tests/test_admin_actions.py::test_failed_job_plus_different_ready_item_is_a_duplicate_group`, `library/tests/test_admin_actions.py::test_duplicate_keeper_choice_and_group_actions`, `player/e2e/admin-dashboard.spec.ts`
+
+### G6 — every admin response string crosses one redaction boundary
+
+**Invariant:** Every string in every `/api/admin/*` response MUST pass through
+`AdminResponseRedactionMiddleware` and the single recursive `_redact_value`
+policy, including nested values, dictionary keys, newly added fields and
+framework-generated error responses. Credential/source-reference keys are
+omitted rather than returned with placeholders. URL matching is
+case-insensitive, and noncredential keys that sanitize to the same placeholder
+are disambiguated without leaking or dropping entries. Serializers may redact
+earlier for defense in depth, but
+no admin response may depend on per-field redaction for safety.
+- Where: `library/src/shizzle_server/api/admin.py`, `library/src/shizzle_server/api/redaction.py`, `library/src/shizzle_server/main.py`
+- Guarded by: `library/tests/test_admin_api.py::test_every_admin_response_string_uses_the_redaction_choke_point`, `library/tests/test_admin_api.py::test_redaction_covers_url_keys_mixed_case_schemes_and_collisions`, `library/tests/test_admin_api.py::test_track_integrity_is_redacted`
+- Violation smell: returning a new admin field without response-boundary
+  coverage, bypassing the middleware, or maintaining a second divergent
+  redaction policy.

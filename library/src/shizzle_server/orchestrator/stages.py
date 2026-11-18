@@ -22,6 +22,7 @@ from ..db.repository import (
     JobRepository,
     NodeRepository,
     PublishRefusedError,
+    RuntimeSettingsRepository,
     pending_runpod_dispatch,
     track_id_for_job,
 )
@@ -30,6 +31,7 @@ from ..settings import Settings
 from . import cloud, nodes
 from .pipelines import Pipeline
 from .runpod_client import NotConfiguredRunPodClient, RunPodClient, parse_worker_progress
+from .runtime import effective_node_routing, effective_runpod_max_concurrent
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,17 @@ def _age_seconds(since: datetime | None) -> float | None:
     if since.tzinfo is None:
         since = since.replace(tzinfo=UTC)
     return (utcnow() - since).total_seconds()
+
+
+def dispatch_reconciliation_window(settings: Settings) -> float:
+    """B10's one fail-closed window, shared with administrator retry."""
+    return (
+        max(
+            settings.runpod_queue_timeout_seconds,
+            settings.runpod_cold_start_seconds,
+        )
+        + settings.runpod_worker_stall_seconds
+    )
 
 
 async def _cancel_best_effort(
@@ -119,6 +132,36 @@ async def _confirm_dispatch(
             )
 
 
+RUNPOD_WAIT_EVENT = "runpod_wait"
+
+# An event that ends a runpod_wait outage (dispatch happened, routing or
+# stage moved) — mirrors node_wait's dedupe window (B6 pattern).
+_RUNPOD_WAIT_RESET_EVENTS = frozenset(
+    {"runpod_dispatch_started", "runpod_dispatched", "node_assigned", "node_expired",
+     "node_failed", "retry_scheduled", "stage_completed", "fallback_runpod"}
+)
+
+
+async def _note_runpod_wait(ctx: StageContext, events: list[Any]) -> None:
+    """One ``runpod_wait`` event per wait outage (deduped like node_wait).
+
+    Walking back from the newest event: an existing ``runpod_wait`` means
+    this outage already has its row; any routing/stage event in between
+    means the outage ended and this is a new one (B6 dedupe pattern).
+    """
+    for event in reversed(events):
+        if event.event == RUNPOD_WAIT_EVENT:
+            return
+        if event.event in _RUNPOD_WAIT_RESET_EVENTS:
+            break
+    await ctx.jobs.append_event(
+        ctx.job.id,
+        RUNPOD_WAIT_EVENT,
+        {"attempt": ctx.job.attempt, "reason": "runpod concurrency limit reached"},
+        worker_id=ctx.worker_id,
+    )
+
+
 @dataclass
 class StageContext:
     job: Job
@@ -129,6 +172,8 @@ class StageContext:
     worker_id: str
     # Worker-node registry (docs/WORKER-NODES.md); None in lightweight unit contexts.
     nodes: NodeRepository | None = None
+    # Runtime settings overrides (admin page); None in lightweight unit contexts.
+    runtime: RuntimeSettingsRepository | None = None
     # Set by handle_publishing when it commits the track+ready transaction
     # itself; the loop then skips its own advance() call.
     published: bool = False
@@ -162,7 +207,13 @@ async def handle_downloading(ctx: StageContext) -> JobStage | None:
     if ctx.job.source_type == SourceType.url:
         # The VPS never downloads (datacenter addresses are blocked). A worker
         # node does, and proves it with sources/<track>/source.json (A12).
-        if ctx.settings.cloud_pipeline and ctx.settings.node_routing_enabled and ctx.nodes:
+        # download_only routes downloads exactly like prefer/only: only "off"
+        # keeps the old YTDLP_BLOCKED behavior.
+        if (
+            ctx.settings.cloud_pipeline
+            and ctx.nodes
+            and await effective_node_routing(ctx) != "off"
+        ):
             return await nodes.download_via_node(ctx)
         raise StageError(
             ErrorCode.YTDLP_BLOCKED,
@@ -503,13 +554,7 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
         # which, since a cold start extends that wait, is now
         # max(queue_timeout, cold_start) rather than the plain queue timeout —
         # plus one more running-stall window after that.
-        fail_closed_after = (
-            max(
-                ctx.settings.runpod_queue_timeout_seconds,
-                ctx.settings.runpod_cold_start_seconds,
-            )
-            + ctx.settings.runpod_worker_stall_seconds
-        )
+        fail_closed_after = dispatch_reconciliation_window(ctx.settings)
         if pending_for > fail_closed_after:
             failure_detail: dict[str, Any] = {
                 "pending_seconds": round(pending_for, 1),
@@ -541,14 +586,22 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
 
     dispatch_key = f"{job.id.hex}:{job.attempt}"
     payload["idempotency_key"] = dispatch_key
-    if ctx.nodes and ctx.settings.node_routing_enabled:
+    if ctx.nodes:
         # A previous attempt's open assignment is history now: free its node.
         await nodes.expire_superseded_assignments(ctx, dispatch_key=dispatch_key)
+    if ctx.nodes and await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
+        # B16 crash recovery precedes the current routing override. An
+        # assignment committed before a crash remains authoritative even when
+        # the new policy would choose RunPod for fresh work (G4).
+        ctx.park_seconds = ctx.settings.node_poll_seconds
+        return None
+    routing = await effective_node_routing(ctx)
+    if ctx.nodes and routing in ("prefer", "only"):
         # Routing (B17): a node first, RunPod only after the wait window.
-        if await nodes.adopt_existing_separation(ctx, dispatch_key=dispatch_key):
-            ctx.park_seconds = ctx.settings.node_poll_seconds
-            return None
-        choice = await nodes.choose_separation_node(ctx, dispatch_key=dispatch_key)
+        # "download_only" and "off" skip fresh node selection entirely.
+        choice = await nodes.choose_separation_node(
+            ctx, dispatch_key=dispatch_key, routing=routing
+        )
         if choice is None:
             ctx.park_seconds = ctx.settings.node_poll_seconds
             return None
@@ -558,12 +611,27 @@ async def handle_dispatched(ctx: StageContext) -> JobStage | None:
             )
             ctx.park_seconds = ctx.settings.node_poll_seconds
             return None
+    # Fresh RunPod dispatch: honour the admin concurrency limit. At or over
+    # the cap, park without spending an attempt (one deduped runpod_wait per
+    # wait). Work already dispatched is never cancelled or disturbed. The
+    # cheap pre-check parks the common case; reserve_dispatch re-checks
+    # ATOMICALLY under the capacity advisory lock so two orchestrator
+    # instances cannot both take the last slot.
+    limit = await effective_runpod_max_concurrent(ctx)
+    if limit is not None and await ctx.jobs.count_runpod_dispatches() >= limit:
+        await _note_runpod_wait(ctx, events)
+        ctx.park_seconds = ctx.settings.runpod_poll_seconds
+        return None
     reserved = await ctx.jobs.reserve_dispatch(
         job.id,
         worker_id=ctx.worker_id,
         idempotency_key=dispatch_key,
+        max_concurrent=limit,
     )
     if not reserved:
+        # An outstanding reservation exists, or the atomic capacity gate
+        # refused this instance: park either way (no attempt, deduped wait).
+        await _note_runpod_wait(ctx, events)
         ctx.park_seconds = ctx.settings.runpod_poll_seconds
         return None
     try:

@@ -564,6 +564,56 @@ async def test_accepted_dispatch_id_reads_legacy_base_receipt(settings, monkeypa
     assert await cloud.accepted_dispatch_id(ctx, idempotency_key=None) == "rp-legacy"
 
 
+async def test_dispatch_inspection_distinguishes_mismatched_receipt_from_absence(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+    dispatch_key = f"{ctx.job.id.hex}:0"
+    receipt = {
+        # Presence is worker evidence even when identity/provider id is bad.
+        "idempotency_key": "another-attempt",
+        "track_id": str(track_id_for_job(ctx.job.id)),
+        "generation": cloud.GENERATION,
+    }
+
+    class Body:
+        def read(self):
+            return json.dumps(receipt).encode()
+
+    class S3:
+        def get_object(self, **_kwargs):
+            return {"Body": Body()}
+
+        def head_object(self, **_kwargs):
+            return {"ContentLength": 100}
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    inspection = await cloud.inspect_dispatch_attempt(
+        ctx, idempotency_key=dispatch_key
+    )
+    assert inspection.receipt_present is True
+    assert inspection.runpod_job_id is None
+    assert inspection.handoff_present is True
+
+
+async def test_dispatch_inspection_storage_error_is_not_empty_evidence(
+    settings, monkeypatch
+):
+    ctx = _ctx_for_upload(settings, settings.data_dir)
+
+    class S3:
+        def get_object(self, **_kwargs):
+            raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: S3())
+    with pytest.raises(StageError) as raised:
+        await cloud.inspect_dispatch_attempt(
+            ctx, idempotency_key=f"{ctx.job.id.hex}:0"
+        )
+    assert raised.value.code == ErrorCode.S3_UPLOAD_FAILED
+    assert "storage unavailable" in raised.value.detail
+
+
 # --- WS4: dispatched reconciliation (FakeRunPodClient) ------------------------
 # These exercise handle_dispatched through the real loop: park-on-None, phase
 # recording on change, queue/stall watchdogs, and fresh re-dispatch after a
@@ -2073,6 +2123,166 @@ async def test_accepted_dispatch_recovers_remote_id_from_worker_receipt(
     }
 
 
+async def _claim_cloud_stage(job_repo, job, worker_id: str, target: JobStage):
+    claimed = await job_repo.claim_next(worker_id=worker_id, lease_seconds=60)
+    assert claimed is not None and claimed.id == job.id
+    stages = (
+        JobStage.pending,
+        JobStage.downloading,
+        JobStage.dispatched,
+        JobStage.verifying,
+        JobStage.publishing,
+    )
+    current = claimed
+    for from_stage, to_stage in zip(stages, stages[1:], strict=False):
+        current = await job_repo.advance(
+            job.id, from_stage=from_stage, to_stage=to_stage, worker_id=worker_id
+        )
+        if to_stage == target:
+            return current
+    return current
+
+
+async def test_cloud_publish_progress_replaces_executor_phase_and_records_steps(
+    settings, job_repo, upload_job, monkeypatch
+):
+    worker = "publish-progress"
+    job = await _claim_cloud_stage(job_repo, upload_job, worker, JobStage.dispatched)
+    await job_repo.record_worker_progress(
+        job.id, phase="upload: vocals.wav: 40%", worker_id=worker
+    )
+    job = await job_repo.advance(
+        job.id,
+        from_stage=JobStage.dispatched,
+        to_stage=JobStage.verifying,
+        worker_id=worker,
+    )
+    assert job.worker_phase is None
+
+    checksum = "a" * 64
+    job.input_checksum = checksum
+    pkg = SimpleNamespace(
+        handoff={
+            "source": {
+                "sha256": checksum,
+                "object_key": cloud.source_key(track_id_for_job(job.id)),
+            },
+            "separation": {"sample_count": 44100},
+        },
+        duration_seconds=1.0,
+    )
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(cloud, "download_package", lambda *_args: None)
+    monkeypatch.setattr(cloud, "load_and_verify_package", lambda _path: pkg)
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id=worker,
+    )
+    assert await cloud.cloud_verifying(ctx) == JobStage.publishing
+
+    ctx.job = await job_repo.advance(
+        job.id,
+        from_stage=JobStage.verifying,
+        to_stage=JobStage.publishing,
+        worker_id=worker,
+    )
+
+    def transform_with_progress(*_args, progress):
+        progress("publishing: measuring loudness")
+        for index in range(1, 7):
+            progress(f"publishing: encoding stems ({index} of 6)")
+        progress("publishing: encoding video")
+        progress("publishing: auditing")
+        return {"title": "Cloud", "duration": 1.0, "integrity": {}}
+
+    class FakePublisher:
+        def __init__(self, *_args):
+            pass
+
+        async def publish_async(self, *_args):
+            tid = track_id_for_job(job.id)
+            return SimpleNamespace(
+                s3_prefix=f"tracks/{tid}/1",
+                manifest_key=f"tracks/{tid}/1/manifest.json",
+                verification=None,
+                already_published=False,
+            )
+
+    monkeypatch.setattr(cloud, "transform", transform_with_progress)
+    monkeypatch.setattr(cloud, "stage", lambda *_args: [])
+    monkeypatch.setattr(cloud, "Publisher", FakePublisher)
+    assert await cloud.cloud_publishing(ctx) == JobStage.ready
+
+    current = await job_repo.get_job(job.id)
+    assert current.status == JobStage.ready and current.worker_phase is None
+    steps = [
+        event.detail
+        for event in await job_repo.list_events(job.id)
+        if event.event == "publish_step"
+    ]
+    expected = [
+        "verifying: downloading package",
+        "verifying: checking stems",
+        "verifying: checking source",
+        "publishing: checking package",
+        "publishing: measuring loudness",
+        *(f"publishing: encoding stems ({index} of 6)" for index in range(1, 7)),
+        "publishing: encoding video",
+        "publishing: auditing",
+        "publishing: uploading",
+        "publishing: finalising",
+    ]
+    assert [detail["step"] for detail in steps] == expected
+    assert steps[0]["previous_step"] is None
+    assert steps[0]["previous_seconds"] == 0.0
+    for previous, detail in zip(steps, steps[1:], strict=False):
+        assert detail["previous_step"] == previous["step"]
+        assert detail["previous_seconds"] >= 0.0
+
+
+async def test_cloud_progress_write_failure_does_not_fail_verification(
+    settings, job_repo, upload_job, monkeypatch, caplog
+):
+    worker = "progress-outage"
+    job = await _claim_cloud_stage(job_repo, upload_job, worker, JobStage.verifying)
+
+    async def progress_outage(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(job_repo, "record_publish_step", progress_outage)
+    monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
+    monkeypatch.setattr(cloud, "download_package", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud,
+        "load_and_verify_package",
+        lambda _path: SimpleNamespace(
+            handoff={
+                "source": {
+                    "sha256": "a" * 64,
+                    "object_key": cloud.source_key(track_id_for_job(job.id)),
+                },
+                "separation": {"sample_count": 44100},
+            },
+            duration_seconds=1.0,
+        ),
+    )
+    ctx = StageContext(
+        job=job,
+        settings=settings,
+        pipeline=None,  # type: ignore[arg-type]
+        jobs=job_repo,
+        runpod=None,  # type: ignore[arg-type]
+        worker_id=worker,
+    )
+    with caplog.at_level(logging.ERROR, logger=cloud.logger.name):
+        assert await cloud.cloud_verifying(ctx) == JobStage.publishing
+    assert "could not record publish step" in caplog.text
+
+
 async def test_cloud_verifying_missing_handoff_is_retryable(
     settings, monkeypatch
 ):
@@ -2183,7 +2393,7 @@ async def test_cloud_publish_cleans_job_dir_and_persists_verification(
     monkeypatch.setattr(
         cloud,
         "transform",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "title": "Cloud",
             "artist": "",
             "duration": 1.0,
@@ -2259,7 +2469,7 @@ async def test_cloud_publish_plumbs_job_artist_to_manifest_and_track(
 
     transform_calls = []
 
-    def _transform(_pkg, _source, _candidate, title, artist):
+    def _transform(_pkg, _source, _candidate, title, artist, **_kwargs):
         transform_calls.append((title, artist))
         return {"title": "Cloud", "duration": 1.0, "integrity": {}}
 
@@ -2308,7 +2518,7 @@ async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(
     monkeypatch.setattr(
         cloud,
         "transform",
-        lambda *_args: (_ for _ in ()).throw(IntakeError("ffmpeg gate")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(IntakeError("ffmpeg gate")),
     )
     ctx = StageContext(
         job=job,
@@ -2328,7 +2538,7 @@ async def test_cloud_publish_failures_retain_job_dir_and_map_retryability(
     monkeypatch.setattr(
         cloud,
         "transform",
-        lambda *_args: {"title": "Cloud", "duration": 1.0, "integrity": {}},
+        lambda *_args, **_kwargs: {"title": "Cloud", "duration": 1.0, "integrity": {}},
     )
     monkeypatch.setattr(
         cloud, "stage", lambda *_args: (_ for _ in ()).throw(RuntimeError("S3 down"))

@@ -249,7 +249,10 @@ Operator and dashboard reads (passcode-gated, existing auth):
 A node is **online** when `last_seen_at` is younger than
 `NODE_ONLINE_SECONDS` (default 45) and `disabled_at` is null. It is
 **available** for a kind when it is online, advertises that capability,
-and `busy_assignment_id` is null. Selection among several available nodes:
+and `busy_assignment_id` is null. Separation additionally requires
+`separation_disabled_at` to be null; the admin "Separate stems on this node"
+switch changes only that field, so unchecked nodes remain download candidates.
+Selection among several available nodes:
 the one least recently heard from (`updated_at`, a stable spread rather than a strict round-robin), ties by name.
 
 ### downloading stage
@@ -282,12 +285,16 @@ fallback for download because RunPod cannot download either.
 ### dispatched stage
 
 ```text
-if job.executor startswith "node:"  -> poll that node assignment:
+if job.executor startswith "node:"
+   and its CONFIRMED dispatch key == <job hex>:<attempt>
+                                    -> poll that node separation assignment:
      handoff.json present under the attempt prefix -> verifying (as today;
                                                       the marker, not the report)
      assignment failed or heartbeat stale          -> fail attempt, redispatch
                                                       fresh key (B12)
      otherwise park
+   (a retained node: executor from an earlier URL download is not proof a
+    separation reservation is node-bound; it falls through to fresh routing)
 elif job.executor == "runpod"       -> existing RunPod branch, unchanged
 else (no executor yet):
      SHIZZLE_NODE_ROUTING = off     -> existing RunPod dispatch, no node lookup
@@ -303,11 +310,17 @@ else (no executor yet):
                                     -> keep waiting for a node (never RunPod)
 ```
 
-Policy knobs in `settings.py`, all env-driven:
+Policy knobs in `settings.py`, all env-driven. The owner can also switch
+`node_routing` and the RunPod concurrency limit at runtime from the
+administrator page (`/api/admin/settings`, stored in the `runtime_settings`
+table): the orchestrator reads the effective value at each routing decision,
+so a change applies to the next job without a restart, and a missing runtime
+value falls back to the environment value.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `SHIZZLE_NODE_ROUTING` | `prefer` | `prefer` (nodes first, RunPod fallback), `only` (never RunPod), `off` (today's behavior) |
+| `SHIZZLE_NODE_ROUTING` | `prefer` | `prefer` (nodes first, RunPod fallback), `only` (never RunPod), `off` (today's behavior), `download_only` (max performance: nodes download exactly as `prefer`, but separation always dispatches to RunPod at once — no node wait, invariant G4) |
+| `RUNPOD_MAX_CONCURRENT` | none | Environment default for the cap on jobs holding a RunPod reservation or confirmed RunPod job; at/over the cap a fresh dispatch parks without spending an attempt (one `runpod_wait` event per outage) and dispatched work is never disturbed (G3). Runtime-settable from the admin page (a stored row overrides this); `0` pauses RunPod dispatch. |
 | `NODE_ONLINE_SECONDS` | 45 | heartbeat age that still counts as online |
 | `NODE_STALL_SECONDS` | 300 | assignment heartbeat age that fails the attempt (mirrors `RUNPOD_WORKER_STALL_SECONDS`) |
 | `NODE_SEPARATE_WAIT_SECONDS` | 120 | how long to hold a separation for a node before RunPod |

@@ -23,15 +23,19 @@ to S3, submits and polls RunPod, verifies the lossless package, derives browser
 media, and publishes it. Dispatch reservations and worker-written S3 receipts
 support recovery after interrupted requests. There is no completion webhook.
 
-URL ingestion is not implemented: the API can create a URL job, but its
-downloading stage fails with `YTDLP_BLOCKED`. The player offers file upload.
+URL ingestion runs through a worker node: the node downloads one YouTube
+video and proves it with an S3 receipt (`source.json`); with node routing
+off the job fails with `YTDLP_BLOCKED`. The player offers file upload.
 `ingest/` documents that boundary; executable ingestion lives in
 `library/src/shizzle_server/api/routes.py` and `orchestrator/`.
 
 Three pages share the passcode gate: `/` plays and mixes tracks, `/remote`
 controls a playing browser, and `/dashboard` shows job stages and events.
 The dashboard polls job records and API liveness; it does not query the RunPod
-pool or show a measured capacity model.
+pool or show a measured capacity model. `/admin` is the owner's console
+(job tracing with discrepancy evidence, node use switches, and runtime
+routing/RunPod-limit control); its API answers only through the Tailscale-only
+proxy, and 404s everywhere else.
 
 ## System diagram
 

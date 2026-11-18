@@ -34,8 +34,18 @@ class StageError(Exception):
     deterministic re-runs cannot fix.
     """
 
-    def __init__(self, code: ErrorCode, detail: str, *, retryable: bool = True) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        detail: str,
+        *,
+        retryable: bool = True,
+        provider_accepted: bool | None = None,
+    ) -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
         self.retryable = retryable
+        # Only a dispatch-path rejection sets False. Poll/cancel failures and
+        # ambiguous network errors leave this unknown.
+        self.provider_accepted = provider_accepted

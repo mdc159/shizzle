@@ -13,6 +13,35 @@ import pytest
 from shizzle_server.lib.circuit_breaker import CircuitBreaker, CircuitState
 
 
+class FakeClock:
+    """Deterministic monotonic clock for the half-open timeout tests.
+
+    The recovery timeout used to be observed by sleeping 1.1 s against a 1 s
+    boundary measured on the wall clock — a 0.1 s margin that load-induced
+    clock wobble can erase. Advancing a fake monotonic clock proves the same
+    transitions with no race and no sleep.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _open_breaker(clock: FakeClock) -> CircuitBreaker:
+    """A breaker on the fake clock, OPEN after its failure threshold."""
+    breaker = CircuitBreaker(failure_threshold=3, timeout_seconds=1, clock=clock)
+    for _ in range(3):
+        with pytest.raises(ZeroDivisionError):
+            breaker.call(lambda: 1 / 0)
+    assert breaker.state == CircuitState.OPEN
+    return breaker
+
+
 class TestCircuitBreakerStates:
     """Test circuit breaker state transitions."""
 
@@ -69,71 +98,85 @@ class TestCircuitBreakerStates:
 
         assert call_count == 0  # Function was not called
 
-    def test_circuit_transitions_to_half_open_after_timeout(
-        self, circuit_breaker: CircuitBreaker
-    ) -> None:
+    def test_circuit_transitions_to_half_open_after_timeout(self) -> None:
         """Circuit enters half-open state after timeout expires."""
-        # Open the circuit
-        for _ in range(3):
-            with pytest.raises(ZeroDivisionError):
-                circuit_breaker.call(lambda: 1 / 0)
+        clock = FakeClock()
+        breaker = _open_breaker(clock)
 
-        assert circuit_breaker.is_open()
+        assert breaker.is_open()
 
-        # Wait for timeout (1 second in test fixture)
-        time.sleep(1.1)
+        # Advance past the timeout (no wall-clock sleep: deterministic)
+        clock.advance(1.1)
 
         # Check should transition to half-open
-        assert not circuit_breaker.is_open()
-        assert circuit_breaker.state == CircuitState.HALF_OPEN
+        assert not breaker.is_open()
+        assert breaker.state == CircuitState.HALF_OPEN
 
-    def test_successful_call_in_half_open_closes_circuit(
-        self, circuit_breaker: CircuitBreaker
-    ) -> None:
+    def test_successful_call_in_half_open_closes_circuit(self) -> None:
         """Successful call in half-open state closes the circuit."""
-        # Open the circuit
-        for _ in range(3):
-            with pytest.raises(ZeroDivisionError):
-                circuit_breaker.call(lambda: 1 / 0)
+        clock = FakeClock()
+        breaker = _open_breaker(clock)
 
-        # Wait for timeout
-        time.sleep(1.1)
+        # Advance past the timeout (no wall-clock sleep: deterministic)
+        clock.advance(1.1)
 
         # Verify half-open
-        circuit_breaker.is_open()  # Triggers transition
-        assert circuit_breaker.state == CircuitState.HALF_OPEN
+        breaker.is_open()  # Triggers transition
+        assert breaker.state == CircuitState.HALF_OPEN
 
         # Successful call
-        result = circuit_breaker.call(lambda: "recovered")
+        result = breaker.call(lambda: "recovered")
         assert result == "recovered"
 
         # Circuit should be closed
-        assert circuit_breaker.state == CircuitState.CLOSED
-        assert circuit_breaker.failures == 0
+        assert breaker.state == CircuitState.CLOSED
+        assert breaker.failures == 0
 
-    def test_failed_call_in_half_open_reopens_circuit(
-        self, circuit_breaker: CircuitBreaker
-    ) -> None:
+    def test_failed_call_in_half_open_reopens_circuit(self) -> None:
         """Failed call in half-open state reopens the circuit."""
-        # Open the circuit
-        for _ in range(3):
-            with pytest.raises(ZeroDivisionError):
-                circuit_breaker.call(lambda: 1 / 0)
+        clock = FakeClock()
+        breaker = _open_breaker(clock)
 
-        # Wait for timeout
-        time.sleep(1.1)
+        # Advance past the timeout (no wall-clock sleep: deterministic)
+        clock.advance(1.1)
 
         # Trigger half-open
-        circuit_breaker.is_open()
-        assert circuit_breaker.state == CircuitState.HALF_OPEN
+        breaker.is_open()
+        assert breaker.state == CircuitState.HALF_OPEN
 
         # Failed call
         with pytest.raises(ValueError):
-            circuit_breaker.call(lambda: int("not a number"))
+            breaker.call(lambda: int("not a number"))
 
         # Circuit should be open again
-        assert circuit_breaker.state == CircuitState.OPEN
-        assert circuit_breaker.failures == 4  # Original 3 + 1
+        assert breaker.state == CircuitState.OPEN
+        assert breaker.failures == 4  # Original 3 + 1
+
+    def test_recovery_timeout_ignores_wall_clock_steps(self, monkeypatch) -> None:
+        """The recovery interval is measured on a MONOTONIC clock: a wall-clock
+        step (NTP/w32time adjustment) must never hold the breaker OPEN past
+        its configured timeout, nor recover it early. The wall clock is frozen
+        at an arbitrary constant that disagrees with the fake monotonic clock:
+        if the breaker measured its interval on the wall clock, no advance of
+        the monotonic clock could ever cross the recovery boundary.
+        """
+        monkeypatch.setattr(time, "time", lambda: 42.0)
+        clock = FakeClock()
+        breaker = _open_breaker(clock)
+
+        clock.advance(1.1)  # the recovery timeout genuinely elapses
+        assert breaker.is_open() is False
+        assert breaker.state == CircuitState.HALF_OPEN
+
+        # A subsequent failure re-opens with a fresh monotonic interval.
+        with pytest.raises(ZeroDivisionError):
+            breaker.call(lambda: 1 / 0)
+        assert breaker.state == CircuitState.OPEN
+        clock.advance(1.0)
+        assert breaker.is_open() is True  # boundary is exclusive: 1.0 is not > 1.0
+        clock.advance(0.1)
+        assert breaker.is_open() is False
+        assert breaker.failures == 4  # Original 3 + the half-open failure
 
     def test_reset_clears_state(self, circuit_breaker: CircuitBreaker) -> None:
         """Manual reset clears all state."""

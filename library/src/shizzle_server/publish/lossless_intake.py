@@ -30,6 +30,7 @@ import math
 import re
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -370,19 +371,30 @@ def audit_candidate(candidate: Path, duration: float) -> list[dict[str, Any]]:
 
 # --- 4. transform: package -> candidate generation on disk --------------------
 
-def transform(pkg: Package, source_video: Path, candidate: Path,
-              title: str, artist: str) -> dict[str, Any]:
+def transform(
+    pkg: Package,
+    source_video: Path,
+    candidate: Path,
+    title: str,
+    artist: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Run the fixed transformation; return the v3 delivery manifest."""
+    report = progress or (lambda _step: None)
     (candidate / "stems").mkdir(parents=True, exist_ok=True)
 
+    report("publishing: measuring loudness")
     tp = measure_default_mix_true_peak(pkg)
     gain = common_gain_db(tp)
     logger.info("default-mix true peak %.1f dBTP -> default_gain_db %.1f", tp, gain)
 
-    for role in STEM_ROLES:
+    for index, role in enumerate(STEM_ROLES, start=1):
+        report(f"publishing: encoding stems ({index} of {len(STEM_ROLES)})")
         logger.info("encode %s.m4a", role)
         encode_stem(pkg.root / "stems" / f"{role}.wav", candidate / "stems" / f"{role}.m4a")
     duration = pkg.duration_seconds
+    report("publishing: encoding video")
     logger.info("derive video.mp4")
     derive_video(source_video, candidate / "video.mp4", duration)
 
@@ -404,6 +416,7 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
             "(audio measures %.3f Mb/s)",
             _avg_bps() / 1e6, allowance_kbps, audio_bps / 1e6,
         )
+        report("publishing: re-encoding video")
         derive_video(
             source_video, candidate / "video.mp4", duration,
             maxrate_kbps=allowance_kbps,
@@ -418,6 +431,7 @@ def transform(pkg: Package, source_video: Path, candidate: Path,
         )
     logger.info("generation average %.3f Mb/s (budget %.1f)", avg_bps / 1e6, TRACK_BUDGET_BPS / 1e6)
 
+    report("publishing: auditing")
     audits = audit_candidate(candidate, duration)
     object_provenance = [
         {

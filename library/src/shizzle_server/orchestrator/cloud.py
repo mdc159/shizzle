@@ -20,6 +20,7 @@ import json
 import logging
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,48 @@ SEPARATION_SEGMENT = "separation"
 DISPATCH_RECEIPT = "dispatch.json"
 
 
+class _PublishProgress:
+    """Best-effort, lease-fenced phase and elapsed-step reporting."""
+
+    def __init__(self, ctx: StageContext) -> None:
+        self.ctx = ctx
+
+    async def start(self, step: str) -> None:
+        if self.ctx.jobs is None:  # lightweight intake unit contexts
+            return
+        try:
+            await self.ctx.jobs.record_publish_step(
+                self.ctx.job.id,
+                phase=step,
+                worker_id=self.ctx.worker_id,
+            )
+        except Exception:
+            # Progress is observability, never a reason to fail paid media work.
+            logger.exception("job %s: could not record publish step %s", self.ctx.job.id, step)
+
+
+def _threaded_progress(progress: _PublishProgress) -> Any:
+    """Bridge synchronous ffmpeg helpers back to the orchestrator event loop."""
+    loop = asyncio.get_running_loop()
+
+    def report(step: str) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(progress.start(step), loop).result()
+        except Exception:
+            logger.exception("could not deliver threaded publish step %s", step)
+
+    return report
+
+
+@dataclass(frozen=True)
+class DispatchAttemptInspection:
+    """Durable worker evidence at one exact attempt prefix."""
+
+    receipt_present: bool
+    runpod_job_id: str | None
+    handoff_present: bool
+
+
 def source_key(track_id: uuid.UUID | str) -> str:
     """Private upload source outside the browser cookie's ``tracks/*`` scope."""
     return f"sources/{track_id}/source.mp4"
@@ -79,6 +122,38 @@ def dispatch_receipt_key(
         else separation_prefix(track_id)
     )
     return f"{prefix}/{DISPATCH_RECEIPT}"
+
+
+def _receipt_runpod_id(
+    ctx: StageContext,
+    receipt: dict[str, Any],
+    key: str,
+    idempotency_key: str | None,
+) -> str | None:
+    track_id = track_id_for_job(ctx.job.id)
+    expected = {
+        "track_id": str(track_id),
+        "generation": GENERATION,
+    }
+    if idempotency_key is not None:
+        expected.update(
+            {
+                "idempotency_key": idempotency_key,
+                "package_prefix": attempt_prefix(track_id, idempotency_key),
+            }
+        )
+    if any(receipt.get(field) != value for field, value in expected.items()):
+        logger.warning(
+            "job %s: ignoring stale or mismatched dispatch receipt at %s",
+            ctx.job.id,
+            key,
+        )
+        return None
+    runpod_job_id = receipt.get("runpod_job_id")
+    if not isinstance(runpod_job_id, str) or not runpod_job_id:
+        logger.warning("job %s: dispatch receipt has no RunPod id", ctx.job.id)
+        return None
+    return runpod_job_id
 
 
 async def accepted_dispatch_id(
@@ -109,29 +184,7 @@ async def accepted_dispatch_id(
     if receipt is None:
         return None
 
-    expected = {
-        "track_id": str(track_id),
-        "generation": GENERATION,
-    }
-    if idempotency_key is not None:
-        expected.update(
-            {
-                "idempotency_key": idempotency_key,
-                "package_prefix": attempt_prefix(track_id, idempotency_key),
-            }
-        )
-    if any(receipt.get(field) != value for field, value in expected.items()):
-        logger.warning(
-            "job %s: ignoring stale or mismatched dispatch receipt at %s",
-            ctx.job.id,
-            key,
-        )
-        return None
-    runpod_job_id = receipt.get("runpod_job_id")
-    if not isinstance(runpod_job_id, str) or not runpod_job_id:
-        logger.warning("job %s: dispatch receipt has no RunPod id", ctx.job.id)
-        return None
-    return runpod_job_id
+    return _receipt_runpod_id(ctx, receipt, key, idempotency_key)
 
 
 async def package_ready(
@@ -159,6 +212,56 @@ async def package_ready(
             retryable=True,
         ) from exc
     return head is not None
+
+
+async def inspect_dispatch_attempt(
+    ctx: StageContext, *, idempotency_key: str
+) -> DispatchAttemptInspection:
+    """Read receipt + handoff at the reservation's exact immutable prefix.
+
+    A malformed or mismatched receipt still counts as present: it is durable
+    worker evidence and must never turn into permission to dispatch afresh.
+    Both blocking S3 operations run in threads; every storage error propagates
+    as ``S3_UPLOAD_FAILED`` so callers fail closed rather than as "empty".
+    """
+    track_id = track_id_for_job(ctx.job.id)
+    receipt_key = dispatch_receipt_key(track_id, idempotency_key)
+    handoff_key = f"{attempt_prefix(track_id, idempotency_key)}/handoff.json"
+    try:
+        receipt = await asyncio.to_thread(
+            _read_json_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            receipt_key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch retry failed to read {receipt_key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    try:
+        handoff = await asyncio.to_thread(
+            _head_or_none,
+            s3_client(ctx.settings),
+            ctx.settings.s3_media_bucket,
+            handoff_key,
+        )
+    except Exception as exc:
+        raise StageError(
+            ErrorCode.S3_UPLOAD_FAILED,
+            f"dispatch retry failed to inspect {handoff_key}: {exc}"[:500],
+            retryable=True,
+        ) from exc
+    return DispatchAttemptInspection(
+        receipt_present=receipt is not None,
+        runpod_job_id=(
+            _receipt_runpod_id(ctx, receipt, receipt_key, idempotency_key)
+            if receipt is not None
+            else None
+        ),
+        handoff_present=handoff is not None,
+    )
 
 
 # --- WS1: upload source to S3 ------------------------------------------------
@@ -216,9 +319,35 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
     """
     track_id = track_id_for_job(ctx.job.id)
     pkg_dir = ctx.job_dir / "package"
-    pkg_dir.mkdir(parents=True, exist_ok=True)
+    progress = _PublishProgress(ctx)
     prefix = await _selected_package_prefix(ctx, track_id)
+    if ctx.jobs is not None:
+        events = await ctx.jobs.list_events(ctx.job.id)
+        if any(
+            event.event == "admin_retry_started"
+            and isinstance(event.detail, dict)
+            and (
+                # Every admin restart boundary invalidates the local cache:
+                # intake skips downloads solely by size and WAV sizes repeat
+                # across separations, so bytes left by an older attempt would
+                # otherwise survive into this attempt's verification. A fresh
+                # pending restart selects a new attempt prefix, and handoff
+                # recovery re-proves the recovered reservation from S3.
+                # Publication recovery alone reuses the same package, keeping
+                # its crash-idempotent cache.
+                event.detail.get("resume_stage") == JobStage.pending.value
+                or (
+                    event.detail.get("reservation_resolution") == "handoff"
+                    and isinstance(event.detail.get("dispatch_key"), str)
+                    and attempt_prefix(track_id, event.detail["dispatch_key"]) == prefix
+                )
+            )
+            for event in events
+        ):
+            await asyncio.to_thread(shutil.rmtree, pkg_dir, ignore_errors=True)
+    pkg_dir.mkdir(parents=True, exist_ok=True)
     try:
+        await progress.start("verifying: downloading package")
         await asyncio.to_thread(
             download_package,
             s3_client(ctx.settings),
@@ -226,6 +355,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             prefix,
             pkg_dir,
         )
+        await progress.start("verifying: checking stems")
         pkg = await asyncio.to_thread(load_and_verify_package, pkg_dir)
     except PackageNotReady as exc:
         raise StageError(
@@ -240,6 +370,7 @@ async def cloud_verifying(ctx: StageContext) -> JobStage:
             retryable=False,
         ) from exc
     source_info = pkg.handoff.get("source", {})
+    await progress.start("verifying: checking source")
     source_sha256 = source_info.get("sha256")
     if ctx.job.input_checksum and source_sha256 != ctx.job.input_checksum:
         raise StageError(
@@ -276,6 +407,10 @@ async def _selected_package_prefix(
     events = await ctx.jobs.list_events(ctx.job.id)
     for event in reversed(events):
         detail = event.detail if isinstance(event.detail, dict) else {}
+        if event.event == "publication_recovery_started":
+            dispatch_key = detail.get("dispatch_key")
+            if isinstance(dispatch_key, str) and dispatch_key:
+                return attempt_prefix(track_id, dispatch_key)
         if (
             event.event == "stage_completed"
             and detail.get("from") == JobStage.dispatched.value
@@ -299,25 +434,36 @@ async def cloud_publishing(ctx: StageContext) -> JobStage:
     """
     track_id = track_id_for_job(ctx.job.id)
     bucket = ctx.settings.s3_media_bucket
+    progress = _PublishProgress(ctx)
 
     try:
         s3 = s3_client(ctx.settings)
         source = ctx.source_path
         if not source.exists():
             source = ctx.job_dir / "source.mp4"
+            await progress.start("publishing: downloading source")
             await asyncio.to_thread(
                 _download_source, s3, bucket, source_key(track_id), source
             )
 
+        await progress.start("publishing: checking package")
         pkg = await asyncio.to_thread(load_and_verify_package, ctx.job_dir / "package")
         candidate = ctx.job_dir / "candidate"
         title = ctx.job.title or ctx.job.id.hex
         manifest = await asyncio.to_thread(
-            transform, pkg, source, candidate, title, ctx.job.artist or ""
+            transform,
+            pkg,
+            source,
+            candidate,
+            title,
+            ctx.job.artist or "",
+            progress=_threaded_progress(progress),
         )
+        await progress.start("publishing: uploading")
         staged = await asyncio.to_thread(
             stage, s3, bucket, track_id, GENERATION, candidate, manifest
         )
+        await progress.start("publishing: finalising")
         result = await Publisher(s3, bucket).publish_async(track_id, GENERATION, staged)
         if result.already_published:
             existing = await asyncio.to_thread(

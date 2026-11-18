@@ -235,7 +235,7 @@ async def test_execute_uses_real_lease_loop_and_atomic_publication(
     monkeypatch.setattr(cloud, "download_package", download)
     monkeypatch.setattr(cloud, "s3_client", lambda _settings: object())
 
-    def transform(*_args):
+    def transform(*_args, **_kwargs):
         if outcome == "failure":
             raise IntakeError("Synthetic publication failure")
         return {"duration": 1.0, "title": "recovered"}

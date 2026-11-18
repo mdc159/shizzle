@@ -1,0 +1,656 @@
+"""Contract: the admin assignment-release path under real Postgres locking.
+
+The release endpoint's guarantee (one winner, node freed exactly once, one
+audit event) depends on ``NodeRepository.expire``'s FOR UPDATE row lock and on
+racing a node-side terminal report — behaviour SQLite cannot prove. Runs only
+against the disposable compose test database (pytest.mark.postgres; skipped
+cleanly when Postgres is unreachable).
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shizzle_server.db import create_session_factory
+from shizzle_server.db.models import Job, JobStage, NodeAssignment, NodeAssignmentKind, SourceType
+from shizzle_server.db.repository import NodeRepository
+from shizzle_server.main import create_app
+from shizzle_server.settings import Settings
+
+from .conftest import PG_URL
+
+pytestmark = pytest.mark.postgres
+
+SECRET = "contract-admin-secret"
+HEADERS = {"x-shizzle-admin": SECRET}
+
+
+async def test_release_and_dismissal_use_one_lock_order(release_env, data_dir, monkeypatch):
+    sf, nodes, jobs, job, assignment, client = release_env
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.lease_owner = None
+        row.lease_expires_at = None
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"source")
+    cleaning, release_waiting, resume = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    real_get = AsyncSession.get
+
+    async def signaling_get(session, entity, ident, **kwargs):
+        if (asyncio.current_task().get_name() == "release-lock-order"
+                and entity is Job and kwargs.get("with_for_update")):
+            release_waiting.set()
+        return await real_get(session, entity, ident, **kwargs)
+
+    async def cleanup():
+        import shutil
+
+        cleaning.set()
+        await asyncio.wait_for(resume.wait(), 5)
+        shutil.rmtree(workdir)
+
+    monkeypatch.setattr(AsyncSession, "get", signaling_get)
+    dismissal = asyncio.create_task(jobs.set_job_dismissed(job.id, dismissed=True, cleanup=cleanup))
+    await asyncio.wait_for(cleaning.wait(), 5)
+    release = asyncio.create_task(
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        name="release-lock-order",
+    )
+    try:
+        await asyncio.wait_for(release_waiting.wait(), 5)
+    finally:
+        resume.set()
+    dismissed, released = await asyncio.wait_for(asyncio.gather(dismissal, release), 8)
+    assert dismissed.dismissed_at is not None
+    assert released.status_code == 409
+    assert (await nodes.get_assignment(assignment.id)).status.value == "expired"
+    assert (await nodes.get("mac-mini")).busy_assignment_id is None
+    assert not workdir.exists()
+    names = [e.event for e in await jobs.list_events(job.id)]
+    assert names.count("admin_dismissed") == 1
+    assert "admin_assignment_released" not in names
+
+
+@pytest.mark.parametrize("winner", ["release", "complete"])
+async def test_release_refreshes_assignment_after_unlocked_lookup(release_env, monkeypatch, winner):
+    _sf, nodes, jobs, job, assignment, client = release_env
+    read, resume = asyncio.Event(), asyncio.Event()
+    real_get = AsyncSession.get
+
+    async def pause_lookup(session, entity, ident, **kwargs):
+        row = await real_get(session, entity, ident, **kwargs)
+        if (asyncio.current_task().get_name() == "stale-release"
+                and entity is NodeAssignment and not kwargs.get("with_for_update")):
+            read.set()
+            await asyncio.wait_for(resume.wait(), 5)
+        return row
+
+    monkeypatch.setattr(AsyncSession, "get", pause_lookup)
+    loser = asyncio.create_task(
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        name="stale-release",
+    )
+    try:
+        await asyncio.wait_for(read.wait(), 5)
+        if winner == "release":
+            won = await client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS)
+            assert won.status_code == 200
+        else:
+            assert await nodes.complete(assignment.id, node_id="mac-mini", detail={"winner": True})
+    finally:
+        resume.set()
+    assert (await loser).status_code == 409
+    fresh = await nodes.get_assignment(assignment.id)
+    assert fresh.status.value == ("expired" if winner == "release" else "completed")
+    events = await jobs.list_events(job.id)
+    assert sum(e.event == "admin_assignment_released" for e in events) == (1 if winner == "release" else 0)
+
+
+@pytest_asyncio.fixture
+async def release_env(pg_engine, data_dir):
+    """The app plus one leaked open assignment on a terminal (failed) job."""
+    sf = create_session_factory(pg_engine)
+    nodes = NodeRepository(sf)
+    await nodes.heartbeat("mac-mini", capabilities={"download": True, "separate": True})
+
+    from shizzle_server.db.repository import JobRepository
+
+    jobs = JobRepository(sf)
+    job = await jobs.create_job(
+        source_type=SourceType.url, source_ref="https://youtu.be/x1y2z3a4b5c", title="Leak"
+    )
+    claimed = await jobs.claim_next(worker_id="w", lease_seconds=60)
+    assert claimed is not None and claimed.id == job.id
+    assignment = await nodes.create_assignment(
+        job.id,
+        worker_id="w",
+        node_id="mac-mini",
+        kind=NodeAssignmentKind.separate,
+        payload={},
+        idempotency_key=f"{job.id.hex}:0",
+    )
+    assert assignment is not None
+    # The job failed elsewhere; the assignment and the busy pointer leaked.
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.failed
+        row.error_code = "NODE_FAILED"
+
+    settings = Settings(
+        database_url=PG_URL,
+        data_dir=data_dir,
+        shizzle_embedded_orchestrator=False,
+        shizzle_admin_proxy_secret=SECRET,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield sf, nodes, jobs, job, assignment, client
+
+
+async def test_concurrent_releases_have_exactly_one_winner(release_env):
+    sf, nodes, jobs, job, assignment, client = release_env
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+        client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS),
+    )
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses == [200, 409]
+
+    fresh = await nodes.get_assignment(assignment.id)
+    assert fresh.status.value == "expired"
+    assert "released by an administrator" in fresh.detail["expired_reason"]
+    node = await nodes.get("mac-mini")
+    assert node.busy_assignment_id is None
+
+    events = await jobs.list_events(job.id)
+    released = [e for e in events if e.event == "admin_assignment_released"]
+    assert len(released) == 1
+
+
+async def test_release_racing_a_node_report_leaves_one_terminal_state(release_env):
+    sf, nodes, jobs, job, assignment, client = release_env
+    release_task = client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS)
+    report_task = nodes.complete(assignment.id, node_id="mac-mini", detail={"late": True})
+    release_response, reported = await asyncio.gather(release_task, report_task)
+
+    assert release_response.status_code in (200, 409)
+    fresh = await nodes.get_assignment(assignment.id)
+    assert fresh.status.value in ("expired", "completed")  # exactly one writer won
+    node = await nodes.get("mac-mini")
+    assert node.busy_assignment_id is None  # freed either way
+
+    # And a second release after either outcome is a clean 409.
+    again = await client.post(f"/api/admin/assignments/{assignment.id}/release", headers=HEADERS)
+    assert again.status_code == 409
+
+
+async def test_runtime_settings_table_is_written_and_read_back(release_env, pg_engine):
+    """The admin settings PUT path commits JSON the orchestrator's engine sees."""
+    _, _, _, _, _, client = release_env
+    put = await client.put(
+        "/api/admin/settings",
+        json={"nodeRouting": "download_only", "runpodMaxConcurrent": 2},
+        headers=HEADERS,
+    )
+    assert put.status_code == 200
+    body = put.json()
+    assert body["nodeRouting"] == {"value": "download_only", "source": "database", "error": None}
+    assert body["runpodMaxConcurrent"]["value"] == 2
+
+    got = await client.get("/api/admin/settings", headers=HEADERS)
+    assert got.json()["nodeRouting"]["value"] == "download_only"
+
+    async with pg_engine.connect() as conn:
+        rows = {
+            r[0]: r[1]
+            for r in await conn.execute(text("SELECT key, value FROM runtime_settings"))
+        }
+    assert rows["node_routing"] == '"download_only"' or rows["node_routing"] == "download_only"
+    assert rows["runpod_max_concurrent"] in (2, "2")
+
+
+async def test_concurrent_reservations_one_instance_takes_the_final_slot(
+    pg_engine, data_dir
+):
+    """G3 atomicity on real Postgres: with a cap of 1 and no work dispatched,
+    two orchestrator instances reserving different jobs concurrently must not
+    both win the last slot. The capacity advisory xact lock serializes the
+    check-and-reserve, so exactly one reservation commits."""
+    from shizzle_server.db import create_engine, create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository
+
+    async def make_repo():
+        engine = create_engine(PG_URL)
+        sf = create_session_factory(engine)
+        return JobRepository(sf), engine
+
+    repo_a, engine_a = await make_repo()
+    repo_b, engine_b = await make_repo()
+    try:
+        jobs = []
+        for worker in ("w1", "w2"):
+            job = await repo_a.create_job(
+                source_type=SourceType.upload, source_ref="source.mp4", title=worker
+            )
+            claimed = await repo_a.claim_next(worker_id=worker, lease_seconds=600)
+            assert claimed is not None and claimed.id == job.id
+            await repo_a.advance(
+                job.id,
+                worker_id=worker,
+                from_stage=JobStage.pending,
+                to_stage=JobStage.downloading,
+            )
+            await repo_a.advance(
+                job.id,
+                worker_id=worker,
+                from_stage=JobStage.downloading,
+                to_stage=JobStage.dispatched,
+            )
+            jobs.append(job)
+
+        results = await asyncio.gather(
+            repo_a.reserve_dispatch(
+                jobs[0].id, worker_id="w1",
+                idempotency_key=f"{jobs[0].id.hex}:0", max_concurrent=1,
+            ),
+            repo_b.reserve_dispatch(
+                jobs[1].id, worker_id="w2",
+                idempotency_key=f"{jobs[1].id.hex}:0", max_concurrent=1,
+            ),
+        )
+        assert sorted(results) == [False, True]
+        assert await repo_a.count_runpod_dispatches() == 1
+        # The loser parked (no reservation of its own) — it may retry later.
+        loser_events = await repo_a.list_events(jobs[results.index(False)].id)
+        assert not any(e.event == "runpod_dispatch_started" for e in loser_events)
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_concurrent_reservations_see_a_retry_reservation_slot(pg_engine):
+    """G3 atomicity around retries: a job whose attempt 0 failed (row keeps
+    runpod_job_id + worker_phase='failed') holds a real slot once its retry's
+    reservation is outstanding (submit-timeout shape, B3). Two further jobs
+    racing with cap 2 — one slot already consumed — must not both win."""
+    from shizzle_server.db import create_engine, create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.errors import ErrorCode
+
+    engine = create_engine(PG_URL)
+    sf = create_session_factory(engine)
+    repo = JobRepository(sf)
+    try:
+        retried = await repo.create_job(
+            source_type=SourceType.upload, source_ref="source.mp4", title="retried"
+        )
+        assert (await repo.claim_next(worker_id="w0", lease_seconds=600)).id == retried.id
+        for from_stage, to_stage in (
+            (JobStage.pending, JobStage.downloading),
+            (JobStage.downloading, JobStage.dispatched),
+        ):
+            await repo.advance(
+                retried.id, worker_id="w0", from_stage=from_stage, to_stage=to_stage
+            )
+        key0 = f"{retried.id.hex}:0"
+        assert await repo.reserve_dispatch(retried.id, worker_id="w0", idempotency_key=key0)
+        await repo.confirm_dispatch(retried.id, idempotency_key=key0, runpod_job_id="rp-dead")
+        await repo.record_worker_progress(retried.id, phase="failed", worker_id="w0")
+        await repo.schedule_retry(
+            retried.id,
+            worker_id="w0",
+            error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+            error_detail="worker died",
+            retry_in_seconds=0.0,
+        )
+        assert (await repo.claim_next(worker_id="w0", lease_seconds=600)).id == retried.id
+        assert await repo.reserve_dispatch(
+            retried.id, worker_id="w0", idempotency_key=f"{retried.id.hex}:1"
+        )
+        assert await repo.count_runpod_dispatches() == 1
+
+        repo_a = JobRepository(create_session_factory(create_engine(PG_URL)))
+        repo_b = JobRepository(create_session_factory(create_engine(PG_URL)))
+        competitors = []
+        for worker in ("w1", "w2"):
+            job = await repo.create_job(
+                source_type=SourceType.upload, source_ref="source.mp4", title=worker
+            )
+            assert (await repo.claim_next(worker_id=worker, lease_seconds=600)).id == job.id
+            for from_stage, to_stage in (
+                (JobStage.pending, JobStage.downloading),
+                (JobStage.downloading, JobStage.dispatched),
+            ):
+                await repo.advance(
+                    job.id, worker_id=worker, from_stage=from_stage, to_stage=to_stage
+                )
+            competitors.append(job)
+
+        results = await asyncio.gather(
+            repo_a.reserve_dispatch(
+                competitors[0].id, worker_id="w1",
+                idempotency_key=f"{competitors[0].id.hex}:0", max_concurrent=2,
+            ),
+            repo_b.reserve_dispatch(
+                competitors[1].id, worker_id="w2",
+                idempotency_key=f"{competitors[1].id.hex}:0", max_concurrent=2,
+            ),
+        )
+        # One slot of two is taken by the retry reservation: exactly one more.
+        assert sorted(results) == [False, True]
+        assert await repo.count_runpod_dispatches() == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def retry_env(pg_engine, data_dir):
+    """One failed upload with an obtainable source and an admin client."""
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.main import create_app
+    from shizzle_server.settings import Settings
+
+    sf = create_session_factory(pg_engine)
+    jobs = JobRepository(sf)
+    job = await jobs.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"retry source")
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.failed
+        row.error_code = "INTERNAL"
+    settings = Settings(
+        database_url=PG_URL,
+        data_dir=data_dir,
+        shizzle_embedded_orchestrator=False,
+        shizzle_admin_proxy_secret=SECRET,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield sf, jobs, job, client
+
+
+async def test_simultaneous_admin_retries_have_exactly_one_winner(retry_env):
+    _, jobs, job, client = retry_env
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS),
+        client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS),
+    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.pending and current.attempt == 1
+    assert sum(
+        event.event == "admin_retry_started" for event in await jobs.list_events(job.id)
+    ) == 1
+
+
+async def test_restore_and_retry_racing_restore_converges_on_postgres(
+    retry_env, monkeypatch
+):
+    _, jobs, job, client = retry_env
+    await jobs.set_job_dismissed(job.id, dismissed=True)
+
+    from shizzle_server.api import admin as admin_module
+
+    started = asyncio.Event()
+    resume = asyncio.Event()
+    original_stop = admin_module._stop_runpod_for_restart
+
+    async def pause_after_snapshot_and_preflight(*args, **kwargs):
+        started.set()
+        await resume.wait()
+        return await original_stop(*args, **kwargs)
+
+    monkeypatch.setattr(
+        admin_module, "_stop_runpod_for_restart", pause_after_snapshot_and_preflight
+    )
+    retry_task = asyncio.create_task(
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS)
+    )
+    await started.wait()
+    try:
+        restored = await client.post(
+            f"/api/admin/jobs/{job.id}/restore", headers=HEADERS
+        )
+    finally:
+        resume.set()
+    retried = await retry_task
+    assert restored.status_code == 200, restored.text
+    assert retried.status_code == 200, retried.text
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.pending and current.dismissed_at is None
+    events = await jobs.list_events(job.id)
+    assert sum(event.event == "admin_restored" for event in events) == 1
+    assert sum(event.event == "admin_retry_started" for event in events) == 1
+
+
+async def test_dismissed_url_restore_retries_have_one_postgres_winner(retry_env):
+    sf, jobs, job, client = retry_env
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.source_type = SourceType.url
+        row.source_ref = "https://youtu.be/dQw4w9WgXcQ"
+    await jobs.set_job_dismissed(job.id, dismissed=True)
+
+    responses = await asyncio.gather(
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+        client.post(f"/api/admin/jobs/{job.id}/retry?restore=true", headers=HEADERS),
+    )
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    accepted = next(response for response in responses if response.status_code == 200)
+    assert accepted.json()["action"] == "resubmitted"
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.dismissed_at is not None
+    events = await jobs.list_events(job.id)
+    assert sum(event.event == "admin_resubmitted" for event in events) == 1
+
+
+async def test_retry_racing_an_orchestrator_pass_is_refused(retry_env):
+    sf, jobs, job, client = retry_env
+    # A failed terminal write can still have an in-flight orchestrator owner.
+    # Its live lease and row lock must prevent the admin transition.
+    async with sf() as session, session.begin():
+        row = await session.get(Job, job.id, with_for_update=True)
+        row.lease_owner = "orchestrator-pass"
+        from datetime import timedelta
+
+        from shizzle_server.db.models import utcnow
+
+        row.lease_expires_at = utcnow() + timedelta(seconds=60)
+        response = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+        assert response.status_code == 409
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.attempt == 0
+
+
+async def test_retry_with_resolved_reservation_racing_orchestrator_is_refused(
+    pg_engine, data_dir
+):
+    """A proven dispatch rejection does not bypass the job/lease fence."""
+    from datetime import timedelta
+
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.models import utcnow
+    from shizzle_server.db.repository import JobRepository
+    from shizzle_server.errors import ErrorCode
+
+    sf = create_session_factory(pg_engine)
+    jobs = JobRepository(sf)
+    job = await jobs.create_job(
+        source_type=SourceType.upload, source_ref="source.mp4"
+    )
+    workdir = data_dir / job.id.hex
+    workdir.mkdir(parents=True)
+    (workdir / "source.mp4").write_bytes(b"retry source")
+    claimed = await jobs.claim_next(worker_id="dispatch", lease_seconds=60)
+    assert claimed is not None
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await jobs.advance(
+            job.id, worker_id="dispatch", from_stage=from_stage, to_stage=to_stage
+        )
+    key = f"{job.id.hex}:0"
+    assert await jobs.reserve_dispatch(
+        job.id, worker_id="dispatch", idempotency_key=key
+    )
+    await jobs.fail_job(
+        job.id,
+        worker_id="dispatch",
+        error_code=ErrorCode.RUNPOD_DISPATCH_FAILED,
+        error_detail="RunPod returned HTTP 409",
+        provider_accepted=False,
+    )
+    settings = Settings(
+        database_url=PG_URL,
+        data_dir=data_dir,
+        shizzle_embedded_orchestrator=False,
+        shizzle_admin_proxy_secret=SECRET,
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client, sf() as session, session.begin():
+        row = await session.get(Job, job.id, with_for_update=True)
+        row.lease_owner = "orchestrator-pass"
+        row.lease_expires_at = utcnow() + timedelta(seconds=60)
+        response = await client.post(
+            f"/api/admin/jobs/{job.id}/retry", headers=HEADERS
+        )
+        assert response.status_code == 409
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.failed and current.attempt == 0
+    assert not any(
+        event.event == "admin_retry_started" for event in await jobs.list_events(job.id)
+    )
+
+
+async def test_dismiss_cleanup_lock_fences_retry(retry_env):
+    _, jobs, job, client = retry_env
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    # Pause the repository callback while the row lock is held; the competing
+    # API retry must lose before any filesystem cleanup can become unsafe.
+    async def fenced_cleanup():
+        started.set()
+        await resume.wait()
+
+    dismissing = asyncio.create_task(
+        jobs.set_job_dismissed(job.id, dismissed=True, cleanup=fenced_cleanup)
+    )
+    await started.wait()
+    refused = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert refused.status_code == 409
+    resume.set()
+    await dismissing
+    assert (await jobs.get_job(job.id)).dismissed_at is not None
+
+
+async def test_cancelled_dismissal_finishes_cleanup_before_retry(
+    retry_env, data_dir, monkeypatch
+):
+    _, jobs, job, client = retry_env
+    import threading
+
+    from shizzle_server.api import admin as admin_module
+
+    started = threading.Event()
+    resume = threading.Event()
+    real_rmtree = admin_module.shutil.rmtree
+
+    def paused_rmtree(path):
+        started.set()
+        resume.wait()
+        real_rmtree(path)
+
+    monkeypatch.setattr(admin_module.shutil, "rmtree", paused_rmtree)
+    dismissing = asyncio.create_task(
+        client.post(f"/api/admin/jobs/{job.id}/dismiss", headers=HEADERS)
+    )
+    await asyncio.to_thread(started.wait)
+    dismissing.cancel()
+    # Let the first cancellation reach the repository while the filesystem
+    # worker is still paused, then prove a second cancellation is also safe.
+    await asyncio.sleep(0.05)
+    assert not resume.is_set()
+    dismissing.cancel()  # repeated cancellation must stay away from the operation
+    retried = await client.post(f"/api/admin/jobs/{job.id}/retry", headers=HEADERS)
+    assert retried.status_code == 409
+    resume.set()
+    with pytest.raises(asyncio.CancelledError):
+        await dismissing
+    assert (await jobs.get_job(job.id)).dismissed_at is not None
+    assert not (data_dir / job.id.hex).exists()
+
+
+async def test_capacity_count_cannot_miss_a_concurrent_confirmation(pg_engine, monkeypatch):
+    """G3: job and event state come from one statement snapshot.
+
+    On the old multi-query path, confirmation commits after the Job was
+    cached but before its events are read. The new event makes the
+    reservation look resolved while the cached row still has no provider id.
+    """
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.models import JobStage, SourceType
+    from shizzle_server.db.repository import JobRepository, _count_runpod_work
+
+    sf = create_session_factory(pg_engine)
+    repo = JobRepository(sf)
+    job = await repo.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    assert (await repo.claim_next(worker_id="w", lease_seconds=600)).id == job.id
+    for from_stage, to_stage in (
+        (JobStage.pending, JobStage.downloading),
+        (JobStage.downloading, JobStage.dispatched),
+    ):
+        await repo.advance(job.id, worker_id="w", from_stage=from_stage, to_stage=to_stage)
+    key = f"{job.id.hex}:0"
+    assert await repo.reserve_dispatch(job.id, worker_id="w", idempotency_key=key)
+
+    async with sf() as session:
+        original_execute = session.execute
+        calls = 0
+
+        async def confirm_between_reads(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await repo.confirm_dispatch(job.id, idempotency_key=key, runpod_job_id="rp-live")
+            return await original_execute(*args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", confirm_between_reads)
+        assert await _count_runpod_work(session) == 1
+
+
+async def test_concurrent_first_runtime_setting_writes_are_atomic(pg_engine):
+    """Two admin tabs writing a missing key both finish without a 500."""
+    from shizzle_server.db import create_session_factory
+    from shizzle_server.db.repository import RuntimeSettingsRepository
+    from shizzle_server.orchestrator.runtime import RUNPOD_MAX_CONCURRENT_KEY
+
+    sf = create_session_factory(pg_engine)
+    first = RuntimeSettingsRepository(sf)
+    second = RuntimeSettingsRepository(sf)
+    await asyncio.gather(
+        first.set_value(RUNPOD_MAX_CONCURRENT_KEY, 1),
+        second.set_value(RUNPOD_MAX_CONCURRENT_KEY, 2),
+    )
+    rows = await first.get_all()
+    assert set(rows) == {RUNPOD_MAX_CONCURRENT_KEY}
+    assert rows[RUNPOD_MAX_CONCURRENT_KEY].value in (1, 2)

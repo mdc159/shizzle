@@ -45,7 +45,12 @@ def cloud_settings(settings):
     # race against the orchestrator on a slow runner; the two expiry tests
     # that need a short ack window set it themselves.
     settings.node_ack_seconds = 5.0
-    settings.node_stall_seconds = 0.3
+    # Headroom, not a tight race: the orchestrator must mirror a node's report
+    # on its NEXT pass, and under full-suite load a pass (claim + handler +
+    # aiosqlite thread hops) can take hundreds of milliseconds. A stall
+    # window comparable to pass latency expires HEALTHY assignments — the
+    # tests that prove stall expiry set a short window themselves.
+    settings.node_stall_seconds = 5.0
     settings.node_separate_wait_seconds = 0.3
     settings.node_download_wait_seconds = 0.5
     return settings
@@ -390,11 +395,13 @@ async def test_rejected_source_receipt_is_a_retryable_checksum_failure(
     assert "receipt rejected" in retry.detail["error_detail"]
     assert (await job_repo.get_job(job.id)).input_checksum is None
     # The rejected assignment is closed (not left "completed" to be re-verified
-    # forever) and the node is free again.
+    # forever) and the node is no longer held by IT. Under load the orchestrator
+    # may already have handed the node the next attempt's fresh assignment —
+    # that is legitimate retry behavior, not a leak of this assignment.
     rejected = await node_repo.get_assignment(first.id)
     assert rejected.status == NodeAssignmentStatus.failed
     assert rejected.detail["rejected_reason"].startswith("source.mp4 is 9 bytes")
-    assert (await node_repo.get(MAC)).busy_assignment_id is None
+    assert (await node_repo.get(MAC)).busy_assignment_id != first.id
 
 
 async def test_source_receipt_is_checked_against_the_objects_stored_checksum(
@@ -449,13 +456,25 @@ async def test_upload_job_prefers_an_online_separation_node(
 ):
     _stub_cloud_intake(monkeypatch)
     _stub_package_ready(monkeypatch, True)
+    # The scripted node completes by direct repository call; under a loaded
+    # full-suite run the wall clock between assignment creation and that call
+    # can exceed the default ack window, which would expire the assignment out
+    # from under the script (not the behavior under test).
+    cloud_settings.node_ack_seconds = 60.0
     await _register(node_repo)
     fake = FakeRunPodClient([])
     orch, task = await _run(cloud_settings, fake)
     try:
         sep = await _wait_assignment(node_repo, upload_job.id, NodeAssignmentKind.separate)
         assert sep.payload["track_id"] == str(track_id_for_job(upload_job.id))
-        assert await node_repo.complete(sep.id, node_id=MAC, detail={})
+        # A1: the S3 marker is the truth and the report is only a hint — with
+        # package_ready stubbed True the orchestrator may legitimately complete
+        # this assignment via the marker before our scripted report lands.
+        # Either completion path is fine; the job must reach ready either way.
+        if not await node_repo.complete(sep.id, node_id=MAC, detail={}):
+            marker_completed = await node_repo.get_assignment(sep.id)
+            assert marker_completed.status == NodeAssignmentStatus.completed
+            assert marker_completed.detail == {"completed_by": "s3-marker"}
         ready = await wait_for_status(job_repo, upload_job.id, JobStage.ready, timeout=10)
     finally:
         await _stop(orch, task)
@@ -537,6 +556,9 @@ async def test_stalled_node_separation_is_expired_and_redispatched_to_another_no
 ):
     _stub_cloud_intake(monkeypatch)
     _stub_package_ready(monkeypatch, False)
+    # This test proves stall expiry: it needs a window SHORTER than the
+    # scripted silence, so it sets its own (the fixture default is load-safe).
+    cloud_settings.node_stall_seconds = 0.3
     await _register(node_repo)
     await _register(node_repo, "dell-9530", device="cuda")
     fake = FakeRunPodClient([])
@@ -654,16 +676,22 @@ async def test_completed_report_without_a_marker_closes_the_assignment(
 async def test_lost_download_report_completes_from_the_s3_marker(
     cloud_settings, job_repo, node_repo, monkeypatch
 ):
-    _stub_source_receipt(monkeypatch, sha256="e" * 64)
+    # The marker is absent until the node has acknowledged: with it present
+    # from creation, the orchestrator can complete the assignment from the
+    # S3 marker on its first pass — BEFORE this script's acknowledge lands —
+    # so the ack assert below would race (and lose on a loaded runner).
+    # Ack-then-flip is the same ordering the happy-path test uses.
+    receipt = _stub_source_receipt(monkeypatch, sha256="e" * 64, present=False)
     _stub_package_ready(monkeypatch, False)  # the separation that follows stays S3-free too
     await _register(node_repo)
     job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ")
     orch, task = await _run(cloud_settings)
     try:
         dl = await _wait_assignment(node_repo, job.id, NodeAssignmentKind.download)
-        # The node acknowledged, wrote source.json (stubbed present), and its
+        # The node acknowledged, wrote source.json (flipped below), and its
         # completion report never arrived: the marker still completes it.
         assert await node_repo.acknowledge(dl.id, node_id=MAC)
+        receipt["present"] = True
         job_after = await wait_for_status(job_repo, job.id, JobStage.dispatched, timeout=10)
     finally:
         await _stop(orch, task)

@@ -7,18 +7,24 @@ factory, so callers cannot half-commit orchestration state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql import Select
 
 from ..errors import ErrorCode
 from .models import (
+    ADMIN_RETRY_TRANSITION,
     ALLOWED_TRANSITIONS,
     NODE_ASSIGNMENT_OPEN,
     RUNNABLE_STAGES,
@@ -33,6 +39,7 @@ from .models import (
     OrchestratorHeartbeat,
     PlaybackEvent,
     PlaybackSession,
+    RuntimeSetting,
     SourceType,
     Track,
     TrackGenerationEvent,
@@ -61,6 +68,101 @@ PLAYBACK_INCIDENT_EVENTS = frozenset(
 _DISPATCH_STARTED_EVENT = "runpod_dispatch_started"
 _DISPATCH_CONFIRMED_EVENT = "runpod_dispatched"
 _LEGACY_DISPATCH_UNCONFIRMED_EVENT = "dispatch_unconfirmed"
+_ADMIN_RETRY_STARTED_EVENT = "admin_retry_started"
+
+# Advisory-lock key for the RunPod capacity gate (Postgres only): every
+# capacity-gated reservation takes this xact lock, so two orchestrator
+# instances can never both observe the same count and both dispatch into the
+# last slot. The lock dies with the transaction.
+_RUNPOD_CAPACITY_ADVISORY_KEY = 727501
+
+
+def _runpod_work_is_live(job: Job) -> bool:
+    """Whether a confirmed ``runpod_job_id`` still names live provider work.
+
+    A worker the orchestrator marked failed (B12: treated as absent, the
+    retry dispatches fresh) is a closed execution — counting it would make a
+    retry count itself forever. Node executor ids are never RunPod work.
+    """
+    if not job.runpod_job_id or job.runpod_job_id.startswith("node:"):
+        return False
+    return job.worker_phase != "failed"
+
+
+async def _count_runpod_work(session: AsyncSession) -> int:
+    """Jobs currently holding a RunPod reservation or confirmed RunPod job.
+
+    Semantics (G3) — unresolved reservations are inspected FIRST, because a
+    row can retain the artifacts of a closed execution (an old
+    ``runpod_job_id``, ``worker_phase='failed'``) while a retry's fresh
+    reservation is already outstanding:
+    - an unresolved reservation counts (it may be accepted at RunPod: a
+      submit timeout leaves it outstanding, B3) unless it is provably
+      node-bound — proof is a separation assignment carrying the
+      reservation's idempotency key (assign_separation creates it just
+      before reserving). A retained ``executor = node:<id>`` from an earlier
+      URL download is NOT proof: the download assignment lives under a
+      different key;
+    - otherwise the confirmed execution counts while its worker is not
+      marked failed — a failed worker is a closed execution whose retry
+      dispatches fresh (B12) and must not count itself.
+    """
+    # One statement is deliberate: on PostgreSQL READ COMMITTED, separate
+    # job/event queries can observe different commits. A confirmation landing
+    # between them used to hide live work from the capacity gate (G3). The
+    # joins also replace the old per-job event/assignment query scan.
+    res = await session.execute(
+        select(Job, JobEvent, NodeAssignment)
+        .outerjoin(
+            JobEvent,
+            and_(
+                JobEvent.job_id == Job.id,
+                JobEvent.event.in_(
+                    (
+                        _DISPATCH_STARTED_EVENT,
+                        _DISPATCH_CONFIRMED_EVENT,
+                        _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                        _ADMIN_RETRY_STARTED_EVENT,
+                    )
+                ),
+            ),
+        )
+        .outerjoin(
+            NodeAssignment,
+            and_(
+                NodeAssignment.job_id == Job.id,
+                NodeAssignment.kind == NodeAssignmentKind.separate,
+            ),
+        )
+        .where(Job.status == JobStage.dispatched)
+        .order_by(Job.id, JobEvent.id, NodeAssignment.id)
+    )
+    jobs: dict[uuid.UUID, Job] = {}
+    events: dict[uuid.UUID, dict[int, JobEvent]] = {}
+    assignment_keys: dict[uuid.UUID, set[str]] = {}
+    for job, event, assignment in res.all():
+        jobs[job.id] = job
+        if event is not None:
+            events.setdefault(job.id, {})[event.id] = event
+        if assignment is not None and assignment.idempotency_key is not None:
+            assignment_keys.setdefault(job.id, set()).add(assignment.idempotency_key)
+
+    count = 0
+    for job in jobs.values():
+        job_events = sorted(events.get(job.id, {}).values(), key=lambda event: event.id)
+        pending = pending_runpod_dispatch(job_events)
+        if pending is not None:
+            pending_detail = pending.detail if isinstance(pending.detail, dict) else {}
+            pending_key = pending_detail.get("idempotency_key")
+            if isinstance(pending_key, str) and pending_key in assignment_keys.get(job.id, set()):
+                # Node-bound reservation: not RunPod capacity, and the
+                # closed previous execution below must not count either.
+                continue
+            count += 1
+            continue
+        if _runpod_work_is_live(job):
+            count += 1
+    return count
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +176,27 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
     """
     pending: JobEvent | None = None
     pending_key: str | None = None
+    retry_attempt: int | None = None
     for event in events:
         detail = event.detail if isinstance(event.detail, dict) else {}
         event_key = detail.get("idempotency_key")
+        if event.event == "admin_retry_started":
+            # Only a fresh pending restart opens a new dispatch authority
+            # window. Publication recovery resumes the SAME reservation and
+            # must not erase its handoff evidence.
+            if detail.get("resume_stage") != JobStage.pending.value:
+                continue
+            pending = None
+            pending_key = None
+            new_attempt = detail.get("new_attempt")
+            retry_attempt = new_attempt if isinstance(new_attempt, int) else None
+            continue
+        attempt = detail.get("attempt")
+        if (
+            retry_attempt is not None and isinstance(attempt, int)
+            and attempt < retry_attempt
+        ):
+            continue
         if event.event == _LEGACY_DISPATCH_UNCONFIRMED_EVENT:
             pending = event
             pending_key = None
@@ -94,6 +214,26 @@ def pending_runpod_dispatch(events: Iterable[JobEvent]) -> JobEvent | None:
             pending = None
             pending_key = None
     return pending
+
+
+def _retry_reservation_is_resolved(
+    pending: JobEvent,
+    runpod_outcome: dict[str, Any],
+    historical: list[JobEvent],
+) -> bool:
+    """Bind API evidence to the exact reservation + failure under lock."""
+    latest_failure = next(
+        (event for event in reversed(historical) if event.event == "failed"),
+        None,
+    )
+    return (
+        runpod_outcome.get("status") == "resolved_reservation"
+        and runpod_outcome.get("reservation_event_id") == pending.id
+        and latest_failure is not None
+        and runpod_outcome.get("failure_event_id") == latest_failure.id
+        and runpod_outcome.get("reservation_resolution")
+        in {"provider_rejected", "no_receipt_after_deadline"}
+    )
 
 
 def track_id_for_job(job_id: uuid.UUID) -> uuid.UUID:
@@ -158,6 +298,13 @@ class InvalidTransition(Exception):
         self.target = target
 
 
+def _has_live_lease(job: Job | None, now: datetime) -> bool:
+    if job is None:
+        return False
+    expires = _aware(job.lease_expires_at)
+    return expires is not None and expires > now
+
+
 def _lease_is_owned(job: Job, worker_id: str, now: datetime) -> bool:
     """B2 ownership test: the caller must be the recorded owner of an
     unexpired lease (None or past expiry fails, mirroring record_dispatch)."""
@@ -220,6 +367,12 @@ def recoverable_publication_failure(job: Job, events: list[JobEvent]) -> bool:
     stage = (failure.detail or {}).get("stage")
     if stage == "publishing" and job.error_code == ErrorCode.PUBLISH_FAILED.value:
         return True
+    if stage == "verifying":
+        # Admin retry may resume a selected package after verification failed;
+        # provider completion and immutable receipts are checked by the caller.
+        # A publication code on a newer verifying failure is inconsistent
+        # provenance, not a reason to bypass the existing publication guard.
+        return job.error_code != ErrorCode.PUBLISH_FAILED.value
     recoveries = [event for event in events if event.event == "publication_recovery_started"
                   and event.id < failure.id]
     if not recoveries or stage not in {"verifying", "publishing"}:
@@ -273,18 +426,92 @@ class JobRepository:
         async with self._sf() as session:
             return await session.get(Job, job_id)
 
+    async def get_retry_snapshot(
+        self, job_id: uuid.UUID
+    ) -> tuple[Job | None, list[JobEvent]]:
+        """Read retry state and its event authority at one locked instant.
+
+        Dismissal/resubmission preflight uses the latest dismissal event as a
+        fence. Reading it separately from the job could pair an old row with a
+        newer event and authorize stale source evidence. Every competing
+        terminal action takes this row lock, so the short snapshot is coherent.
+        """
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update={"skip_locked": True})
+            if job is None:
+                # A live competitor must produce retry's normal 409, not wait
+                # behind a test/request that is itself awaiting this response.
+                # Jobs are never hard-deleted, so the unlocked read safely
+                # distinguishes that case from an unknown id.
+                existing = await session.get(Job, job_id)
+                if existing is not None:
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+                return None, []
+            events = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            return job, events
+
     async def get_job_by_idempotency_key(self, key: str) -> Job | None:
         async with self._sf() as session:
             res = await session.execute(select(Job).where(Job.idempotency_key == key))
             return res.scalar_one_or_none()
 
-    async def list_jobs(self, *, limit: int = 50, offset: int = 0) -> tuple[list[Job], int]:
+    async def list_jobs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: JobStage | None = None,
+        dismissed: str | None = None,
+    ) -> tuple[list[Job], int]:
+        """Newest first with status and dismissed visibility filters."""
+        if dismissed not in (None, "include", "only"):
+            raise ValueError("dismissed must be include or only")
+
+        def filtered(statement: Select[Any]) -> Select[Any]:
+            if status is not None:
+                statement = statement.where(Job.status == status)
+            if dismissed == "only":
+                statement = statement.where(Job.dismissed_at.is_not(None))
+            elif dismissed != "include":
+                statement = statement.where(Job.dismissed_at.is_(None))
+            return statement
+
         async with self._sf() as session:
-            total = (await session.execute(select(func.count(Job.id)))).scalar_one()
-            res = await session.execute(
-                select(Job).order_by(Job.created_at.desc(), Job.id).limit(limit).offset(offset)
-            )
+            total = (await session.execute(filtered(select(func.count(Job.id))))).scalar_one()
+            query = filtered(select(Job)).order_by(Job.created_at.desc(), Job.id)
+            res = await session.execute(query.limit(limit).offset(offset))
             return list(res.scalars().all()), total
+
+    async def list_all_jobs(self) -> list[Job]:
+        """All jobs, including dismissed rows, for administrator duplicate review."""
+        async with self._sf() as session:
+            result = await session.execute(select(Job).order_by(Job.created_at, Job.id))
+            return list(result.scalars().all())
+
+    async def count_jobs_by_status(self) -> dict[JobStage, int]:
+        async with self._sf() as session:
+            res = await session.execute(
+                select(Job.status, func.count(Job.id))
+                .where(Job.dismissed_at.is_(None))
+                .group_by(Job.status)
+            )
+            return {row[0]: int(row[1]) for row in res.all()}
+
+    async def count_dismissed_jobs(self) -> int:
+        async with self._sf() as session:
+            return int((await session.execute(
+                select(func.count(Job.id)).where(Job.dismissed_at.is_not(None))
+            )).scalar_one())
+
+    async def count_runpod_dispatches(self) -> int:
+        """Jobs currently holding a RunPod reservation or confirmed RunPod job
+        (see ``_count_runpod_work`` for the exact semantics). Work already
+        dispatched is never cancelled to make room — this count only gates
+        FRESH dispatches."""
+        async with self._sf() as session:
+            return await _count_runpod_work(session)
 
     async def list_events(self, job_id: uuid.UUID) -> list[JobEvent]:
         async with self._sf() as session:
@@ -292,6 +519,24 @@ class JobRepository:
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )
             return list(res.scalars().all())
+
+    async def list_events_for_jobs(
+        self, job_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, list[JobEvent]]:
+        """Batch job histories for admin lists (one query, not one per row)."""
+        ids = list(dict.fromkeys(job_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(
+                select(JobEvent)
+                .where(JobEvent.job_id.in_(ids))
+                .order_by(JobEvent.job_id, JobEvent.id)
+            )
+            grouped: dict[uuid.UUID, list[JobEvent]] = {job_id: [] for job_id in ids}
+            for event in res.scalars():
+                grouped[event.job_id].append(event)
+            return grouped
 
     async def append_event(
         self,
@@ -402,13 +647,26 @@ class JobRepository:
             )
 
     async def reserve_dispatch(
-        self, job_id: uuid.UUID, *, worker_id: str, idempotency_key: str
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: str,
+        idempotency_key: str,
+        max_concurrent: int | None = None,
     ) -> bool:
         """Durably reserve one RunPod submission while the caller owns the lease.
 
         The reservation commits before the external API call. A reclaimed lease
         therefore sees the outstanding reservation and must reconcile it instead
         of submitting another paid worker.
+
+        With ``max_concurrent`` set (the admin RunPod cap, G3) the capacity
+        check is ATOMIC with the reservation: on Postgres every gated
+        reservation first takes the capacity advisory xact lock, so two
+        orchestrator instances racing for the last slot serialize — one
+        reserves, the other sees the committed count and returns False
+        (the caller parks). Node reservations pass no cap: they never consume
+        RunPod capacity.
         """
         now = utcnow()
         async with self._sf() as session, session.begin():
@@ -423,6 +681,22 @@ class JobRepository:
                 or lease_expires_at <= now
             ):
                 raise InvalidTransition(job_id, job.status, JobStage.dispatched)
+            if max_concurrent is not None:
+                bind = session.bind
+                if bind is not None and bind.dialect.name == "postgresql":
+                    await session.execute(
+                        text(
+                            "SELECT pg_advisory_xact_lock(:key)"
+                        ),
+                        {"key": _RUNPOD_CAPACITY_ADVISORY_KEY},
+                    )
+                if await _count_runpod_work(session) >= max_concurrent:
+                    return False
+            # Row/advisory lock waits can outlive the lease captured at entry.
+            # The row lock prevents reclaim during this transaction, but it
+            # must not authorize a paid submission after the lease expires.
+            if lease_expires_at <= utcnow():
+                raise InvalidTransition(job_id, job.status, JobStage.dispatched)
             dispatch_events = (
                 await session.execute(
                     select(JobEvent)
@@ -433,6 +707,7 @@ class JobRepository:
                                 _DISPATCH_STARTED_EVENT,
                                 _DISPATCH_CONFIRMED_EVENT,
                                 _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                                _ADMIN_RETRY_STARTED_EVENT,
                             )
                         ),
                     )
@@ -479,6 +754,7 @@ class JobRepository:
                                     _DISPATCH_STARTED_EVENT,
                                     _DISPATCH_CONFIRMED_EVENT,
                                     _LEGACY_DISPATCH_UNCONFIRMED_EVENT,
+                                    _ADMIN_RETRY_STARTED_EVENT,
                                 )
                             ),
                         )
@@ -582,6 +858,56 @@ class JobRepository:
             session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
             return True
 
+    async def record_publish_step(
+        self,
+        job_id: uuid.UUID,
+        *,
+        phase: str,
+        worker_id: str,
+    ) -> bool:
+        """Record one changed publication phase and its cheap timing event.
+
+        The phase and append-only ``publish_step`` event commit together under
+        the same lease fence as other worker progress. Repeating a step after
+        a crash is a no-op while it remains the durable current phase (B8/B11).
+        """
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            if job is None:
+                raise LookupError(f"job {job_id} does not exist")
+            now = utcnow()
+            if not _lease_is_owned(job, worker_id, now) or job.worker_phase == phase:
+                return False
+            job.worker_phase = phase
+            job.worker_heartbeat_at = now
+            job.updated_at = now
+            previous = await session.scalar(
+                select(JobEvent)
+                .where(JobEvent.job_id == job_id, JobEvent.event == "publish_step")
+                .order_by(JobEvent.id.desc())
+                .limit(1)
+            )
+            previous_detail = (
+                previous.detail if previous is not None and isinstance(previous.detail, dict) else {}
+            )
+            previous_step = previous_detail.get("step")
+            previous_seconds = (
+                round(max(0.0, (now - (_aware(previous.created_at) or now)).total_seconds()), 3)
+                if previous is not None
+                else 0.0
+            )
+            session.add(JobEvent(job_id=job_id, event="worker_progress", detail={"phase": phase}))
+            session.add(JobEvent(
+                job_id=job_id,
+                event="publish_step",
+                detail={
+                    "step": phase,
+                    "previous_step": previous_step,
+                    "previous_seconds": previous_seconds,
+                },
+            ))
+            return True
+
     async def set_input_checksum(
         self, job_id: uuid.UUID, *, worker_id: str, checksum: str
     ) -> None:
@@ -652,6 +978,11 @@ class JobRepository:
             job.next_retry_at = None
             job.error_code = None
             job.error_detail = None
+            if from_stage == JobStage.dispatched and to_stage == JobStage.verifying:
+                # Separation's last upload percentage is not verification
+                # progress. The verifier records its first real step next.
+                job.worker_phase = None
+                job.worker_heartbeat_at = None
             if runpod_job_id is not None:
                 job.runpod_job_id = runpod_job_id
             if output_checksums is not None:
@@ -729,6 +1060,7 @@ class JobRepository:
         error_code: ErrorCode,
         error_detail: str,
         worker_id: str,
+        provider_accepted: bool | None = None,
     ) -> Job:
         """Terminal failure from any non-terminal stage; idempotent on re-call.
 
@@ -746,38 +1078,415 @@ class JobRepository:
             if job.status == JobStage.ready:
                 raise InvalidTransition(job_id, job.status, JobStage.failed)
             from_stage = job.status
+            executor_closed = job.worker_phase == "failed"
             job.status = JobStage.failed
             job.error_code = error_code.value
             job.error_detail = error_detail
             job.lease_owner = None
             job.lease_expires_at = None
             job.next_retry_at = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
             job.updated_at = utcnow()
+            failure_detail: dict[str, Any] = {
+                "stage": from_stage.value,
+                "error_code": error_code.value,
+                "error_detail": error_detail[:500],
+                "worker": worker_id,
+            }
+            if provider_accepted is not None:
+                failure_detail["provider_accepted"] = provider_accepted
+                if from_stage == JobStage.dispatched:
+                    failure_detail["idempotency_key"] = f"{job.id.hex}:{job.attempt}"
+            if from_stage == JobStage.dispatched and job.runpod_job_id is not None:
+                # Terminal cards no longer display the executor phase. Preserve
+                # its closed/not-closed meaning as durable attempt evidence for
+                # admin retry instead of relying on the cleared UI field.
+                failure_detail["runpod_job_id"] = job.runpod_job_id
+                failure_detail["executor_closed"] = executor_closed
             session.add(
                 JobEvent(
                     job_id=job.id,
                     event="failed",
-                    detail={
-                        "stage": from_stage.value,
-                        "error_code": error_code.value,
-                        "error_detail": error_detail[:500],
-                        "worker": worker_id,
-                    },
+                    detail=failure_detail,
                 )
             )
+            return job
+
+    async def _expire_open_assignments(
+        self,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> list[str]:
+        assignments = list((await session.scalars(
+            select(NodeAssignment)
+            .where(
+                NodeAssignment.job_id == job_id,
+                NodeAssignment.status.in_(tuple(NODE_ASSIGNMENT_OPEN)),
+            )
+            .with_for_update()
+        )).all())
+        expired: list[str] = []
+        nodes = NodeRepository(self._sf)
+        for assignment in assignments:
+            assignment.status = NodeAssignmentStatus.expired
+            assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
+            assignment.updated_at = now
+            await nodes._free_node(session, assignment, now)
+            expired.append(str(assignment.id))
+        return expired
+
+    async def expire_terminal_assignments(
+        self, job_id: uuid.UUID, *, reason: str
+    ) -> list[str] | None:
+        """Expire open work before publication recovery, fenced by the job lock."""
+        async with self._sf() as session, session.begin():
+            job = await session.get(Job, job_id, with_for_update=True)
+            now = utcnow()
+            if (
+                job is None or job.status != JobStage.failed
+                or _has_live_lease(job, now)
+            ):
+                return None
+            return await self._expire_open_assignments(session, job_id, reason=reason, now=now)
+
+    async def admin_restart_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        reason: str,
+        runpod_outcome: dict[str, Any],
+        fallback_reason: str | None = None,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
+    ) -> Job:
+        """Atomically reopen a failed job at pending under ADMIN_RETRY_TRANSITION.
+
+        The attempt increases monotonically, so the next dispatch key is fresh
+        (B12). Open node work is expired in the same transaction; history is
+        append-only and ordinary advance() remains terminal-job fenced.
+        """
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            job = result.scalar_one_or_none()
+            now = utcnow()
+            if (
+                job is None or job.status != JobStage.failed
+                or (job.dismissed_at is not None and not restore)
+                or _has_live_lease(job, now)
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            previous_code = job.error_code
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job.id).order_by(JobEvent.id)
+            )).all())
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the fence is not restore-only. Source/package preflight
+                # ran before this lock against the caller's dismissal snapshot;
+                # a newer dismissal — restored or not — deleted those bytes, so
+                # the reopen refuses to act on stale evidence. A standalone
+                # restore adds no dismissal and is therefore safe to join.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            pending = pending_runpod_dispatch(historical)
+            if (
+                pending is None
+                and runpod_outcome.get("reservation_event_id") is not None
+            ) or (
+                pending is not None and not _retry_reservation_is_resolved(
+                    pending, runpod_outcome, historical
+                )
+            ):
+                # Missing provider id is not proof that an accepted request
+                # never existed. Only the exact preflighted reservation may
+                # be reopened, and the event id closes prefill/commit races.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            expired = await self._expire_open_assignments(
+                session, job_id, reason="expired by administrator retry", now=now
+            )
+            job.status = ADMIN_RETRY_TRANSITION[1]
+            job.attempt += 1
+            job.error_code = None
+            job.error_detail = None
+            job.next_retry_at = None
+            job.lease_owner = None
+            job.lease_expires_at = None
+            job.runpod_job_id = None
+            job.executor = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
+            job.output_checksums = None
+            job.stage_timings = None
+            job.updated_at = now
+            if restore and job.dismissed_at is not None:
+                job.dismissed_at = None
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
+            session.add(JobEvent(
+                job_id=job.id,
+                event="admin_retry_started",
+                detail={
+                    "previous_failure_code": previous_code,
+                    "resume_stage": JobStage.pending.value,
+                    "reason": reason,
+                    "fallback_reason": fallback_reason,
+                    "new_attempt": job.attempt,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
+                    "dispatch_key": f"{job.id.hex}:{job.attempt}",
+                    "expired_assignment_ids": expired,
+                    "runpod": runpod_outcome,
+                },
+            ))
+            return job
+
+    async def admin_resubmit_url_job(
+        self,
+        job_id: uuid.UUID,
+        *,
+        runpod_outcome: dict[str, Any],
+        fallback_reason: str | None = None,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
+    ) -> Job:
+        """Create a fresh URL job and dismiss its failed predecessor atomically."""
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            old = result.scalar_one_or_none()
+            now = utcnow()
+            if (
+                old is None or old.status != JobStage.failed
+                or old.source_type != SourceType.url
+                or (old.dismissed_at is not None and not restore)
+                or _has_live_lease(old, now)
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            if any(event.event == "admin_resubmitted" for event in historical):
+                # The predecessor stays failed+dismissed by design. Its
+                # immutable completion evidence, not that persistent state,
+                # decides whether another fresh URL job may be created.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the dismissal-generation fence applies to ordinary
+                # resubmissions exactly as to restores — an intervening
+                # dismissal invalidated the preflighted source evidence.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            pending = pending_runpod_dispatch(historical)
+            if (
+                pending is None
+                and runpod_outcome.get("reservation_event_id") is not None
+            ) or (
+                pending is not None and not _retry_reservation_is_resolved(
+                    pending, runpod_outcome, historical
+                )
+            ):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.pending)
+            expired = await self._expire_open_assignments(
+                session, job_id, reason="expired by administrator URL resubmission", now=now
+            )
+            new = Job(
+                id=uuid.uuid4(),
+                source_type=SourceType.url,
+                source_ref=old.source_ref,
+                title=old.title,
+                artist=old.artist,
+                status=JobStage.pending,
+                idempotency_key=uuid.uuid4().hex,
+                profile_version=old.profile_version,
+            )
+            session.add(new)
+            await session.flush()
+            if restore and old.dismissed_at is not None:
+                session.add(JobEvent(
+                    job_id=old.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
+            old.dismissed_at = now
+            old.updated_at = now
+            session.add(JobEvent(
+                job_id=old.id,
+                event="admin_resubmitted",
+                detail={
+                    "new_job_id": str(new.id),
+                    "previous_failure_code": old.error_code,
+                    "fallback_reason": fallback_reason,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
+                    "expired_assignment_ids": expired,
+                    "runpod": runpod_outcome,
+                },
+            ))
+            session.add(JobEvent(
+                job_id=old.id,
+                event="admin_dismissed",
+                detail={"expired_assignment_ids": expired, "resubmitted_as": str(new.id)},
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="created",
+                detail={"source_type": SourceType.url.value},
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="admin_retry_started",
+                detail={
+                    "previous_failure_code": old.error_code,
+                    "resume_stage": JobStage.pending.value,
+                    "reason": "resubmit URL as a fresh job",
+                    "new_attempt": new.attempt,
+                    "reservation_resolution": runpod_outcome.get("reservation_resolution"),
+                    "dispatch_key": f"{new.id.hex}:{new.attempt}",
+                },
+            ))
+            session.add(JobEvent(
+                job_id=new.id,
+                event="admin_resubmitted_from",
+                detail={"old_job_id": str(old.id)},
+            ))
+            return new
+
+    async def install_retry_source(
+        self,
+        job_id: uuid.UUID,
+        *,
+        src: Path,
+        dest: Path,
+        expected_dismissal_event_id: int | None = None,
+    ) -> bool:
+        """Promote verified retry-source bytes into the canonical workdir.
+
+        The S3 download and checksum ran in request-private scratch OUTSIDE
+        ``DATA_DIR/<job>`` (a concurrent dismissal removes exactly that
+        workdir, and a losing restoration must never unlink or half-write the
+        winner's file). Before anything appears at the canonical path the job
+        is revalidated under its row lock: still failed, unleased, and on the
+        dismissal generation the retry snapshotted (G7). The final retry
+        transaction repeats that fence; the lock is never held across the
+        S3 transfer itself.
+        """
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            job = result.scalar_one_or_none()
+            now = utcnow()
+            if job is None or job.status != JobStage.failed or _has_live_lease(job, now):
+                return False
+            historical = list((await session.scalars(
+                select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
+            )).all())
+            latest_dismissal = next(
+                (event for event in reversed(historical) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                return False
+            if not dest.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Same filesystem by construction (both under DATA_DIR), so
+                # the promotion of already-verified bytes is atomic.
+                src.replace(dest)
+            return dest.is_file()
+
+    async def set_job_dismissed(
+        self,
+        job_id: uuid.UUID,
+        *,
+        dismissed: bool,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
+        """Finish cleanup and dismissal even if the caller is cancelled."""
+        operation = asyncio.create_task(
+            self._set_job_dismissed_locked(job_id, dismissed=dismissed, cleanup=cleanup)
+        )
+        cancelled = False
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                # Every cancellation is kept away from the locked operation,
+                # not only the first. Keep waiting until cleanup + commit end.
+                cancelled = True
+        result = await operation
+        current = asyncio.current_task()
+        if cancelled or (current is not None and current.cancelling()):
+            raise asyncio.CancelledError
+        return result
+
+    async def _set_job_dismissed_locked(
+        self,
+        job_id: uuid.UUID,
+        *,
+        dismissed: bool,
+        cleanup: Callable[[], Awaitable[None]] | None = None,
+    ) -> Job:
+        """Dismiss/restore under one lock; cleanup precedes the commit."""
+        async with self._sf() as session, session.begin():
+            result = await session.execute(
+                select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
+            )
+            job = result.scalar_one_or_none()
+            now = utcnow()
+            if job is None or job.status != JobStage.failed:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            if dismissed and job.dismissed_at is not None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            if not dismissed and job.dismissed_at is None:
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            if dismissed and _has_live_lease(job, now):
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.failed)
+            if dismissed and cleanup is not None:
+                await cleanup()
+            expired: list[str] = []
+            if dismissed:
+                expired = await self._expire_open_assignments(
+                    session, job_id, reason="expired by administrator dismissal", now=now
+                )
+            job.dismissed_at = now if dismissed else None
+            job.updated_at = now
+            session.add(JobEvent(
+                job_id=job.id,
+                event="admin_dismissed" if dismissed else "admin_restored",
+                detail={"expired_assignment_ids": expired},
+            ))
             return job
 
     async def recover_publication(
         self,
         job_id: uuid.UUID,
         *,
-        expected_provider_id: str,
+        expected_provider_id: str | None,
         expected_checksum: str,
         expected_idempotency_key: str,
         expected_dispatch_key: str,
         recovery_id: uuid.UUID,
         worker_id: str,
         lease_seconds: float,
+        admin_retry: bool = False,
+        restore: bool = False,
+        expected_dismissal_event_id: int | None = None,
+        expected_reservation_id: int | None = None,
+        expected_failure_event_id: int | None = None,
+        reservation_resolution: str | None = None,
     ) -> Job:
         """Operator-only claim of a proven failed publication; never dispatch.
 
@@ -788,6 +1497,9 @@ class JobRepository:
         """
         if not worker_id or not 0 < lease_seconds <= 3600:
             raise ValueError("A bounded recovery lease and owner are required")
+        handoff_recovery = reservation_resolution == "handoff"
+        if reservation_resolution is not None and not handoff_recovery:
+            raise ValueError("Only handoff evidence can recover an unconfirmed reservation")
         async with self._sf() as session, session.begin():
             result = await session.execute(
                 select(Job).where(Job.id == job_id).with_for_update(skip_locked=True)
@@ -796,45 +1508,126 @@ class JobRepository:
             now = utcnow()
             if (
                 job is None or job.status != JobStage.failed
-                or not expected_provider_id or not expected_checksum
-                or not expected_idempotency_key
-                or job.runpod_job_id != expected_provider_id
+                or (not handoff_recovery and not expected_provider_id)
+                or not expected_checksum or not expected_idempotency_key
+                or (
+                    not handoff_recovery
+                    and job.runpod_job_id != expected_provider_id
+                )
+                or (
+                    handoff_recovery
+                    and (
+                        expected_reservation_id is None
+                        or expected_failure_event_id is None
+                    )
+                )
                 or job.input_checksum != expected_checksum
                 or job.idempotency_key != expected_idempotency_key
                 or job.track_id is not None
+                or (job.dismissed_at is not None and not restore)
                 or (job.lease_expires_at is not None and _aware(job.lease_expires_at) > now)
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             events = list((await session.scalars(
                 select(JobEvent).where(JobEvent.job_id == job_id).order_by(JobEvent.id)
             )).all())
-            if not recoverable_publication_failure(job, events) or any(
+            latest_dismissal = next(
+                (event for event in reversed(events) if event.event == "admin_dismissed"),
+                None,
+            )
+            if (latest_dismissal.id if latest_dismissal is not None else None) != expected_dismissal_event_id:
+                # G7: the fence is not restore-only. Recovery preflight (bytes,
+                # completion evidence) ran before this lock against the
+                # caller's dismissal snapshot; any newer dismissal deleted the
+                # workdir bytes this recovery would verify from, so refuse.
+                raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            failure = next(
+                (event for event in reversed(events) if event.event == "failed"),
+                None,
+            )
+            if failure is None or any(
                 event.event == "publication_recovery_started"
                 and (event.detail or {}).get("recovery_id") == str(recovery_id)
                 for event in events
             ):
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
-            failure = next(event for event in reversed(events) if event.event == "failed")
-            dispatch = await session.scalar(
-                select(JobEvent).where(JobEvent.job_id == job_id, JobEvent.event == "runpod_dispatched")
-                .order_by(JobEvent.id.desc()).limit(1)
-            )
-            if (
-                dispatch is None or not expected_dispatch_key
-                or (dispatch.detail or {}).get("idempotency_key") != expected_dispatch_key
-                or (dispatch.detail or {}).get("runpod_job_id") != expected_provider_id
-                or await session.get(Track, track_id_for_job(job.id)) is not None
-            ):
+            if handoff_recovery:
+                pending = pending_runpod_dispatch(events)
+                pending_detail = pending.detail if pending is not None else None
+                failure_detail = (
+                    failure.detail if isinstance(failure.detail, dict) else {}
+                )
+                prior_handoff_recovery = any(
+                    event.id < failure.id
+                    and event.event == "admin_retry_started"
+                    and isinstance(event.detail, dict)
+                    and event.detail.get("reservation_resolution") == "handoff"
+                    and event.detail.get("dispatch_key") == expected_dispatch_key
+                    for event in events
+                )
+                if (
+                    pending is None or not isinstance(pending_detail, dict)
+                    or pending.id != expected_reservation_id
+                    or failure.id != expected_failure_event_id
+                    or pending_detail.get("idempotency_key") != expected_dispatch_key
+                    or (
+                        failure_detail.get("stage") != JobStage.dispatched.value
+                        and not prior_handoff_recovery
+                    )
+                ):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            else:
+                if not recoverable_publication_failure(job, events):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+                dispatch = await session.scalar(
+                    select(JobEvent)
+                    .where(
+                        JobEvent.job_id == job_id,
+                        JobEvent.event == "runpod_dispatched",
+                    )
+                    .order_by(JobEvent.id.desc()).limit(1)
+                )
+                if (
+                    dispatch is None or not expected_dispatch_key
+                    or (dispatch.detail or {}).get("idempotency_key") != expected_dispatch_key
+                    or (dispatch.detail or {}).get("runpod_job_id") != expected_provider_id
+                ):
+                    raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
+            if await session.get(Track, track_id_for_job(job.id)) is not None:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.verifying)
             # Preserve the reservation/provider ID and attempt counter. A
             # crash after commit can only resume verification/publication.
+            previous_code = job.error_code
             job.status = JobStage.verifying
             job.lease_owner = worker_id
             job.lease_expires_at = now + timedelta(seconds=lease_seconds)
             job.next_retry_at = None
             job.error_code = None
             job.error_detail = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
+            if restore and job.dismissed_at is not None:
+                job.dismissed_at = None
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="admin_restored",
+                    detail={"expired_assignment_ids": [], "retry": True},
+                ))
+            if handoff_recovery and expected_provider_id and not job.runpod_job_id:
+                job.runpod_job_id = expected_provider_id
             job.updated_at = now
+            if handoff_recovery:
+                recovered_detail: dict[str, Any] = {
+                    "idempotency_key": expected_dispatch_key,
+                    "source": "handoff.json",
+                }
+                if expected_provider_id:
+                    recovered_detail["runpod_job_id"] = expected_provider_id
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="runpod_dispatch_recovered",
+                    detail=recovered_detail,
+                ))
             session.add(JobEvent(job_id=job.id, event="publication_recovery_started", detail={
                 "recovery_id": str(recovery_id), "worker": worker_id,
                 "provider_job_id": expected_provider_id,
@@ -843,6 +1636,19 @@ class JobRepository:
                 "previous_failure_event_id": failure.id,
                 "from": "failed", "to": "verifying",
             }))
+            if admin_retry:
+                session.add(JobEvent(
+                    job_id=job.id,
+                    event="admin_retry_started",
+                    detail={
+                        "previous_failure_code": previous_code,
+                        "resume_stage": JobStage.verifying.value,
+                        "reason": "reuse the selected separation package",
+                        "recovery_id": str(recovery_id),
+                        "reservation_resolution": reservation_resolution,
+                        "dispatch_key": expected_dispatch_key,
+                    },
+                ))
             return job
 
     # --- publishing ----------------------------------------------------------
@@ -996,6 +1802,8 @@ class JobRepository:
             job.error_detail = None
             job.lease_owner = None
             job.lease_expires_at = None
+            job.worker_phase = None
+            job.worker_heartbeat_at = None
             if duration_stage_s is not None:
                 timings = dict(job.stage_timings or {})
                 timings[JobStage.publishing.value] = round(duration_stage_s, 3)
@@ -1018,6 +1826,15 @@ class TrackRepository:
     async def get(self, track_id: uuid.UUID) -> Track | None:
         async with self._sf() as session:
             return await session.get(Track, track_id)
+
+    async def get_many(self, track_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, Track]:
+        """Batch track joins for administrator job rows."""
+        ids = list(dict.fromkeys(track_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(select(Track).where(Track.id.in_(ids)))
+            return {track.id: track for track in res.scalars()}
 
     async def list_tracks(self, *, include_deleted: bool = False) -> list[Track]:
         async with self._sf() as session:
@@ -1148,6 +1965,71 @@ class TrackRepository:
                 return False
             track.deleted_at = utcnow()
             return True
+
+    async def list_for_admin(
+        self, *, deleted: str | None = None
+    ) -> list[tuple[Track, uuid.UUID | None]]:
+        """Admin library rows with the originating job, if one exists."""
+        if deleted not in (None, "include", "only"):
+            raise ValueError("deleted must be include or only")
+        statement = select(Track, Job.id).outerjoin(Job, Job.track_id == Track.id)
+        if deleted == "only":
+            statement = statement.where(Track.deleted_at.is_not(None))
+        elif deleted != "include":
+            statement = statement.where(Track.deleted_at.is_(None))
+        async with self._sf() as session:
+            result = await session.execute(
+                statement.order_by(Track.created_at.desc(), Track.id)
+            )
+            return [(track, job_id) for track, job_id in result.all()]
+
+    async def set_deleted_for_admin(self, track_id: uuid.UUID, *, deleted: bool) -> Track:
+        """Soft remove/restore and commit the generation-ledger event together."""
+        async with self._sf() as session, session.begin():
+            track = await session.get(Track, track_id, with_for_update=True)
+            if track is None or (track.deleted_at is not None) == deleted:
+                raise LookupError("track is absent or already in the requested state")
+            track.deleted_at = utcnow() if deleted else None
+            session.add(TrackGenerationEvent(
+                track_id=track.id,
+                event="admin_removed" if deleted else "admin_restored",
+                from_generation=track.generation,
+                to_generation=track.generation,
+                detail={"s3_objects_deleted": False},
+            ))
+            return track
+
+    async def remove_nonkeepers_for_admin(
+        self, track_ids: Iterable[uuid.UUID], *, keeper_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """Lock and validate the keeper before soft-removing alternatives."""
+        ids = sorted(set(track_ids), key=str)
+        async with self._sf() as session, session.begin():
+            tracks = list((await session.scalars(
+                select(Track).where(Track.id.in_(ids)).order_by(Track.id).with_for_update()
+            )).all()) if ids else []
+            by_id = {track.id: track for track in tracks}
+            keeper = by_id.get(keeper_id)
+            if keeper is None or keeper.deleted_at is not None:
+                raise LookupError("keeper is missing or already removed")
+            keeper_job = await session.scalar(select(Job).where(Job.track_id == keeper_id))
+            if keeper_job is not None and keeper_job.status != JobStage.ready:
+                raise LookupError("keeper is no longer ready")
+            removed: list[uuid.UUID] = []
+            now = utcnow()
+            for track in tracks:
+                if track.id == keeper_id or track.deleted_at is not None:
+                    continue
+                track.deleted_at = now
+                session.add(TrackGenerationEvent(
+                    track_id=track.id,
+                    event="admin_removed",
+                    from_generation=track.generation,
+                    to_generation=track.generation,
+                    detail={"s3_objects_deleted": False, "keeper_id": str(keeper_id)},
+                ))
+                removed.append(track.id)
+            return removed
 
 
 class PlaybackTelemetryRepository:
@@ -1348,6 +2230,16 @@ class NodeRepository:
             node.updated_at = utcnow()
             return True
 
+    async def set_separation_disabled(self, node_id: str, disabled: bool) -> bool:
+        """Toggle only new stem separation; downloads remain eligible (G5)."""
+        async with self._sf() as session, session.begin():
+            node = await session.get(Node, node_id, with_for_update=True)
+            if node is None:
+                return False
+            node.separation_disabled_at = utcnow() if disabled else None
+            node.updated_at = utcnow()
+            return True
+
     async def available(
         self,
         kind: NodeAssignmentKind,
@@ -1375,7 +2267,14 @@ class NodeRepository:
         return [
             node
             for node in nodes
-            if isinstance(node.capabilities, dict) and bool(node.capabilities.get(kind.value))
+            if (
+                isinstance(node.capabilities, dict)
+                and bool(node.capabilities.get(kind.value))
+                and (
+                    kind != NodeAssignmentKind.separate
+                    or node.separation_disabled_at is None
+                )
+            )
         ]
 
     # --- assignments: orchestrator side -------------------------------------
@@ -1403,7 +2302,14 @@ class NodeRepository:
                 raise InvalidTransition(job_id, JobStage.failed, JobStage.downloading)
             _require_lease(job, worker_id, job.status, now)
             node = await session.get(Node, node_id, with_for_update=True)
-            if node is None or node.disabled_at is not None or node.busy_assignment_id is not None:
+            if (
+                node is None or node.disabled_at is not None
+                or node.busy_assignment_id is not None
+                or (
+                    kind == NodeAssignmentKind.separate
+                    and node.separation_disabled_at is not None
+                )
+            ):
                 return None
             assignment = NodeAssignment(
                 job_id=job_id,
@@ -1429,6 +2335,7 @@ class NodeRepository:
                         "node_id": node_id,
                         "kind": kind.value,
                         "idempotency_key": idempotency_key,
+                        "attempt": (assignment.payload or {}).get("attempt"),
                     },
                 )
             )
@@ -1457,6 +2364,24 @@ class NodeRepository:
             )
             return list(res.scalars().all())
 
+    async def list_for_jobs(
+        self, job_ids: Iterable[uuid.UUID]
+    ) -> dict[uuid.UUID, list[NodeAssignment]]:
+        """Batch assignment histories for administrator job rows."""
+        ids = list(dict.fromkeys(job_ids))
+        if not ids:
+            return {}
+        async with self._sf() as session:
+            res = await session.execute(
+                select(NodeAssignment)
+                .where(NodeAssignment.job_id.in_(ids))
+                .order_by(NodeAssignment.job_id, NodeAssignment.created_at, NodeAssignment.id)
+            )
+            grouped: dict[uuid.UUID, list[NodeAssignment]] = {job_id: [] for job_id in ids}
+            for assignment in res.scalars():
+                grouped[assignment.job_id].append(assignment)
+            return grouped
+
     async def expire(
         self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None
     ) -> bool:
@@ -1468,18 +2393,74 @@ class NodeRepository:
         """
         now = utcnow()
         async with self._sf() as session, session.begin():
-            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
-            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+            # Lock order is job -> assignment, matching dismissal and every
+            # retry transition (they expire assignments while holding the job
+            # lock). Locking the assignment first let a concurrent dismissal
+            # deadlock against this path on Postgres.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
                 return False
             if worker_id is not None:
                 job = await session.get(Job, assignment.job_id, with_for_update=True)
                 if job is None or not _lease_is_owned(job, worker_id, now):
                     return False
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+                return False
             assignment.status = NodeAssignmentStatus.expired
             assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
             assignment.updated_at = now
             await self._free_node(session, assignment, now)
             return True
+
+    async def release_terminal_assignment(
+        self, assignment_id: uuid.UUID, *, reason: str
+    ) -> NodeAssignment | None:
+        """Expire terminal-job work and write its admin audit atomically.
+
+        The job is re-checked under lock so a live-job race cannot turn the
+        administrator's release into an unfenced assignment expiry. Any audit
+        insert failure rolls back both the assignment and node-pointer changes.
+        """
+        now = utcnow()
+        async with self._sf() as session, session.begin():
+            # Job -> assignment lock order (see ``expire``): the terminal-job
+            # recheck still happens under the job lock, and the assignment is
+            # revalidated after its own lock is taken.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
+                return None
+            job = await session.get(Job, assignment.job_id, with_for_update=True)
+            if job is None or job.status not in TERMINAL_STAGES:
+                return None
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status not in NODE_ASSIGNMENT_OPEN:
+                return None
+            assignment.status = NodeAssignmentStatus.expired
+            assignment.detail = {**(assignment.detail or {}), "expired_reason": reason}
+            assignment.updated_at = now
+            await self._free_node(session, assignment, now)
+            session.add(
+                JobEvent(
+                    job_id=job.id,
+                    event="admin_assignment_released",
+                    detail={
+                        "assignment_id": str(assignment.id),
+                        "node_id": assignment.node_id,
+                        "kind": assignment.kind.value,
+                        "reason": reason,
+                    },
+                )
+            )
+            return assignment
 
     async def reject(
         self, assignment_id: uuid.UUID, *, reason: str, worker_id: str | None = None
@@ -1489,15 +2470,24 @@ class NodeRepository:
         node. Lease-fenced like ``expire`` when ``worker_id`` is given."""
         now = utcnow()
         async with self._sf() as session, session.begin():
-            assignment = await session.get(NodeAssignment, assignment_id, with_for_update=True)
-            if assignment is None or assignment.status in (
-                NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
-            ):
+            # Job -> assignment lock order (see ``expire``), fenced to the
+            # job's lease exactly as before.
+            assignment = await session.get(NodeAssignment, assignment_id)
+            if assignment is None:
                 return False
             if worker_id is not None:
                 job = await session.get(Job, assignment.job_id, with_for_update=True)
                 if job is None or not _lease_is_owned(job, worker_id, now):
                     return False
+            # Reload under the row lock with a fresh SELECT: the identity-map
+            # instance from the unlocked read must not mask the locked state.
+            assignment = await session.get(
+                NodeAssignment, assignment_id, with_for_update=True, populate_existing=True
+            )
+            if assignment is None or assignment.status in (
+                NodeAssignmentStatus.failed, NodeAssignmentStatus.expired
+            ):
+                return False
             assignment.status = NodeAssignmentStatus.failed
             assignment.detail = {**(assignment.detail or {}), "rejected_reason": reason}
             assignment.updated_at = now
@@ -1610,3 +2600,52 @@ class NodeRepository:
         if node is not None and node.busy_assignment_id == assignment.id:
             node.busy_assignment_id = None
             node.updated_at = now
+
+
+class RuntimeSettingsRepository:
+    """Operator runtime settings (admin page): DB overrides over env defaults.
+
+    The orchestrator reads the effective value at each routing decision, so
+    a change takes effect on the next pass without a restart. A missing row
+    falls back to the environment ``Settings`` value — behaviour is unchanged
+    until the owner changes something.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    async def get(self, key: str) -> RuntimeSetting | None:
+        async with self._sf() as session:
+            return await session.get(RuntimeSetting, key)
+
+    async def get_all(self) -> dict[str, RuntimeSetting]:
+        async with self._sf() as session:
+            res = await session.execute(select(RuntimeSetting))
+            return {row.key: row for row in res.scalars().all()}
+
+    async def set_value(self, key: str, value: Any) -> RuntimeSetting:
+        """Atomically upsert one setting, including concurrent first writes."""
+        async with self._sf() as session, session.begin():
+            bind = session.bind
+            dialect = bind.dialect.name if bind is not None else ""
+            now = utcnow()
+            values = {"key": key, "value": value, "updated_at": now}
+            if dialect == "postgresql":
+                pg_statement = postgresql_insert(RuntimeSetting).values(
+                    **values
+                ).on_conflict_do_update(
+                    index_elements=[RuntimeSetting.key],
+                    set_={"value": value, "updated_at": now},
+                ).returning(RuntimeSetting)
+                row: RuntimeSetting = (await session.execute(pg_statement)).scalar_one()
+            elif dialect == "sqlite":
+                sqlite_statement = sqlite_insert(RuntimeSetting).values(
+                    **values
+                ).on_conflict_do_update(
+                    index_elements=[RuntimeSetting.key],
+                    set_={"value": value, "updated_at": now},
+                ).returning(RuntimeSetting)
+                row = (await session.execute(sqlite_statement)).scalar_one()
+            else:
+                raise RuntimeError(f"unsupported runtime-settings dialect: {dialect}")
+            return row

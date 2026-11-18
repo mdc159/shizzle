@@ -91,6 +91,7 @@ class CircuitBreaker(Generic[T]):
         timeout_seconds: int = 60,
         success_threshold: int = 1,
         name: str = "default",
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """
         Initialize circuit breaker.
@@ -100,6 +101,13 @@ class CircuitBreaker(Generic[T]):
             timeout_seconds: Time before attempting recovery (half-open)
             success_threshold: Successes needed in half-open to close circuit
             name: Optional name for logging
+            clock: Source for the recovery-timeout interval. MONOTONIC by
+                purpose: measuring an interval with the wall clock is
+                undefined under an NTP/w32time step — a backward step holds
+                the circuit OPEN past its configured timeout (a forward step
+                recovers it early). Tests inject a fake clock so the
+                transitions are deterministic instead of sleeping past the
+                boundary.
         """
         self.config = CircuitBreakerConfig(
             failure_threshold=failure_threshold,
@@ -107,6 +115,7 @@ class CircuitBreaker(Generic[T]):
             success_threshold=success_threshold,
         )
         self.name = name
+        self._clock = clock
 
         self._failures = 0
         self._successes_in_half_open = 0
@@ -139,7 +148,7 @@ class CircuitBreaker(Generic[T]):
             return False
         if self._last_failure_time is None:
             return True
-        elapsed = time.time() - self._last_failure_time
+        elapsed = self._clock() - self._last_failure_time
         return elapsed > self.config.timeout_seconds
 
     def _before_call(self) -> bool:
@@ -228,7 +237,7 @@ class CircuitBreaker(Generic[T]):
         """Record a failure and potentially open the circuit."""
         with self._state_lock:
             self._failures += 1
-            self._last_failure_time = time.time()
+            self._last_failure_time = self._clock()
             self._successes_in_half_open = 0
 
             if self._failures >= self.config.failure_threshold:

@@ -9,7 +9,26 @@
  *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
-import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse, NodeInfo, NodeListResponse } from '@/types/karaoke';
+import type {
+  Track,
+  StemsManifest,
+  JobStatus,
+  JobEvent,
+  LibraryResponse,
+  NodeInfo,
+  NodeListResponse,
+  AdminJobsResponse,
+  AdminJobDetail,
+  AdminJobActionResponse,
+  AdminBulkResult,
+  AdminLibraryTrack,
+  AdminRetryResponse,
+  AdminTrackActionResponse,
+  AdminDuplicateGroup,
+  AdminDuplicateActionResult,
+  AdminNode,
+  AdminSettings,
+} from '@/types/karaoke';
 import { authFetch, setToken } from '@/lib/auth';
 
 interface AuthResult {
@@ -184,4 +203,157 @@ export async function loadManifest(trackId: string, signal?: AbortSignal): Promi
   }
 
   return response.json();
+}
+
+// --- Administrator surface (/admin; docs/INVARIANTS.md G) ----------------------
+// The admin API is reachable only through the owner's Tailscale-only reverse
+// proxy, which adds the X-Shizzle-Admin secret header server-side. The browser
+// never holds that secret: from the public listener these calls 404 and the
+// admin page says so plainly. No passcode token is required either way.
+
+export class AdminUnavailableError extends Error {
+  constructor() {
+    super('The admin API is not reachable from this network (404). It is only served on the owner\'s Tailscale network.');
+    this.name = 'AdminUnavailableError';
+  }
+}
+
+async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const detail = body !== null && typeof body === 'object' && 'detail' in body
+      ? (body as { detail?: unknown }).detail
+      : undefined;
+    if (response.status === 404 && (detail === undefined || detail === 'Not Found')) {
+      throw new AdminUnavailableError();
+    }
+    const message = typeof detail === 'string'
+      ? detail
+      : detail !== undefined
+        ? JSON.stringify(detail)
+        : response.statusText;
+    throw new Error(`Admin request failed: ${message}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function getAdminJobs(
+  status?: JobStatus['status'],
+  signal?: AbortSignal,
+  limit = 50,
+  offset = 0,
+  dismissed?: 'only' | 'include'
+): Promise<AdminJobsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (status) params.set('status', status);
+  if (dismissed) params.set('dismissed', dismissed);
+  return adminFetch<AdminJobsResponse>(`/api/admin/jobs?${params}`, { signal });
+}
+
+export async function getAdminJobDetail(
+  jobId: string,
+  verifyS3 = false,
+  signal?: AbortSignal
+): Promise<AdminJobDetail> {
+  const query = verifyS3 ? '?verify=s3' : '';
+  return adminFetch<AdminJobDetail>(`/api/admin/jobs/${encodeURIComponent(jobId)}${query}`, { signal });
+}
+
+export async function getAdminNodes(signal?: AbortSignal): Promise<{ nodes: AdminNode[] }> {
+  return adminFetch<{ nodes: AdminNode[] }>('/api/admin/nodes', { signal });
+}
+
+export async function setAdminNodeSeparationEnabled(nodeId: string, enabled: boolean): Promise<void> {
+  await adminFetch(
+    `/api/admin/nodes/${encodeURIComponent(nodeId)}/separation/${enabled ? 'enable' : 'disable'}`,
+    { method: 'POST' }
+  );
+}
+
+export async function getAdminSettings(signal?: AbortSignal): Promise<AdminSettings> {
+  return adminFetch<AdminSettings>('/api/admin/settings', { signal });
+}
+
+export async function putAdminSettings(update: {
+  nodeRouting?: string | null;
+  runpodMaxConcurrent?: number | null;
+}): Promise<AdminSettings> {
+  return adminFetch<AdminSettings>('/api/admin/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+}
+
+export async function releaseAdminAssignment(assignmentId: string): Promise<void> {
+  await adminFetch(`/api/admin/assignments/${encodeURIComponent(assignmentId)}/release`, {
+    method: 'POST',
+  });
+}
+
+// --- Failed-job and library actions ---------------------------------------------
+
+async function adminJobAction(jobId: string, action: 'retry' | 'dismiss' | 'restore', restore = false) {
+  // G7/G8: a dismissed job cannot be retried until restored. ?restore=true
+  // asks the server for the combined restore-then-retry transition.
+  const query = action === 'retry' && restore ? '?restore=true' : '';
+  return adminFetch<AdminRetryResponse | AdminJobActionResponse>(
+    `/api/admin/jobs/${encodeURIComponent(jobId)}/${action}${query}`,
+    { method: 'POST' }
+  );
+}
+
+export const retryAdminJob = (jobId: string, restore = false) =>
+  adminJobAction(jobId, 'retry', restore) as Promise<AdminRetryResponse>;
+export const dismissAdminJob = (jobId: string) =>
+  adminJobAction(jobId, 'dismiss') as Promise<AdminJobActionResponse>;
+export const restoreAdminJob = (jobId: string) =>
+  adminJobAction(jobId, 'restore') as Promise<AdminJobActionResponse>;
+
+export async function bulkAdminJobs(
+  action: 'retry' | 'dismiss',
+  jobIds: string[]
+): Promise<AdminBulkResult[]> {
+  return adminFetch<AdminBulkResult[]>('/api/admin/jobs/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, jobIds }),
+  });
+}
+
+export async function getAdminTracks(
+  deleted: 'only' | 'include' = 'include',
+  signal?: AbortSignal
+): Promise<{ tracks: AdminLibraryTrack[] }> {
+  return adminFetch<{ tracks: AdminLibraryTrack[] }>(`/api/admin/tracks?deleted=${deleted}`, { signal });
+}
+
+export async function getAdminDuplicates(
+  signal?: AbortSignal
+): Promise<{ groups: AdminDuplicateGroup[] }> {
+  return adminFetch<{ groups: AdminDuplicateGroup[] }>('/api/admin/duplicates', { signal });
+}
+
+export async function applyAdminDuplicateAction(update: {
+  action: 'keep' | 'dismiss_failed';
+  jobIds: string[];
+  trackIds: string[];
+  keeperTrackId?: string | null;
+}): Promise<AdminDuplicateActionResult[]> {
+  return adminFetch<AdminDuplicateActionResult[]>('/api/admin/duplicates/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+}
+
+export async function setAdminTrackDeleted(
+  trackId: string,
+  deleted: boolean
+): Promise<AdminTrackActionResponse> {
+  return adminFetch<AdminTrackActionResponse>(
+    `/api/admin/tracks/${encodeURIComponent(trackId)}/${deleted ? 'remove' : 'restore'}`,
+    { method: 'POST' }
+  );
 }
