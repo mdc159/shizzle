@@ -50,6 +50,17 @@ and sets the new template plus `workers_max` in one endpoint update. The prior
 template remains available for explicit rollback. After an ambiguous endpoint
 update, the new template is preserved pending reconciliation.
 
+`deploy-staging.yml` is a separate manual-dispatch path (any branch or
+commit) onto the staging stack that lives beside production on the same VPS;
+see §3b. Only the image and the player bundle come from the chosen ref; the
+privileged reusable image builder is pinned to reviewed default-branch
+commit `b6cf7129606bb0b903daa709ddf7a7dd3b409d46`, root-executed deploy
+assets come from the default branch, and staging deploys run under the
+`staging` GitHub environment, whose deployment-branch rule
+(default branch only) is a required operator setup step because a dispatch
+runs the dispatched ref's copy of the workflow file (§3b). It never touches
+the production project or the public site.
+
 ## 2. Secrets inventory
 
 | Name | Scope | Grants | Rotation |
@@ -58,10 +69,21 @@ update, the new template is preserved pending reconciliation.
 | `VPS_HOST` | Environment `production` | Hostname/IP the deploy targets | Update when the box moves |
 | `VPS_SSH_HOST_KEY` | Environment `production` | Pinned ed25519 host key so deploy-vps verifies the box (no `StrictHostKeyChecking=no`) | Regenerate with `ssh-keyscan -t ed25519 <host>`; update after any host key change |
 | `RUNPOD_API_KEY` | Repo | RunPod API access for `runpod-repoint.yml` (create templates and update endpoints); image publishing uses `GITHUB_TOKEN` | Rotate in the RunPod console, update the repo secret |
+| `VPS_STAGING_HOST` | Environment `staging` | Hostname/IP the staging deploy (`deploy-staging.yml`) targets; normally the same VPS as production | Update when the box moves |
+| `VPS_STAGING_SSH_KEY` | Environment `staging` | SSH private key for the staging deploy (today root on the shared production host — the same trust level as `VPS_SSH_KEY`, not a lesser one; a dedicated restricted identity is future hardening, see §3b) | Rotate like `VPS_SSH_KEY`, keeping the authorized_keys entry in sync |
+| `VPS_STAGING_SSH_HOST_KEY` | Environment `staging` | Pinned ed25519 host key for the staging deploy (same value as `VPS_SSH_HOST_KEY` unless a separate account/host is introduced) | Regenerate with `ssh-keyscan -t ed25519 <host>` |
 
 Runtime secrets (passcode, `POSTGRES_*`, `AWS_*`, CloudFront private key) are
 NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
-under `/opt/shizzle/prod` per invariant E3. The orchestrator defaults to
+under `/opt/shizzle/prod` per invariant E3. That includes
+`SHIZZLE_ADMIN_PROXY_SECRET` (the value Caddy injects as `X-Shizzle-Admin` on
+the tailnet-only admin listeners and the api compares on `/api/admin/*`): it
+lives in `/opt/shizzle/prod/.env` and `/opt/shizzle/staging/.env`, never in a
+workflow, and it is fail-closed — with it unset, every admin route answers
+404 on every listener. Both Caddyfiles run `persist_config off` so the
+substituted secret is never written to the autosaved config under `/config`;
+if a production `autosave.json` predates that setting, remove it once (see
+the VPS runbook's admin-listener section). The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
 its service-liveness heartbeat keeps /api/health green, and new jobs fail
@@ -148,6 +170,152 @@ copy instead of pulling the digest-pinned image. Set
 `SHIZZLE_API_IMAGE=shizzle-api:local-build`; the overlay points both api and
 orchestrator at that one build. It is a fallback, not the
 normal path — deploys never ship source to the box.
+
+## 3b. Staging stack and staging deploys
+
+Staging is a full copy of the site running **on the same VPS**, beside
+production, so the owner can click through a change before it merges. Layout:
+`/opt/shizzle/staging` (own `.env` from `deploy/vps/.env.staging.example`, own
+`secrets/cloudfront_private_key.pem`, own `player/`, own named volumes under
+the `shizzle-staging` Compose project). Every staging container carries CPU
+and memory limits so it cannot starve production, and the only published port
+is `127.0.0.1:18080:80` (plain HTTP Caddy). Reachability is tailnet-only via
+two host-side `tailscale serve` frontings (§3c).
+
+**Deploying:** run the `deploy-staging` workflow (Actions → deploy-staging →
+Run workflow) with a branch or commit SHA — this is how a pull-request branch
+gets onto staging before merge. Job split and what it means for trust:
+
+- `resolve` turns the ref into a full SHA; `build-image` reuses
+  `mdc159/shizzle/.github/workflows/api-image.yml` pinned to full commit
+  `b6cf7129606bb0b903daa709ddf7a7dd3b409d46` from the reviewed default
+  branch for the digest-pinned image. A local `./.github/workflows/...` call
+  would instead execute the dispatched ref's editable workflow with
+  `packages: write` before the protected `deploy` job. Updating the builder
+  requires an intentional pin bump. `build-player` builds the player **from
+  the chosen ref** in its own job that holds no VPS credentials and uploads
+  the bundle as an artifact.
+- `deploy` checks out the **default branch** — never the chosen ref — and
+  ships `deploy-staging.sh`, `compose.staging.yml`, `Caddyfile.staging` and
+  the player artifact over SSH (pinned host key), then runs the transaction
+  on the box: pull, `config -q`, `up -d --wait postgres`,
+  `alembic upgrade head`, recreate api/orchestrator/caddy, health check on
+  `127.0.0.1:18080/api/health`. So the only things a feature branch controls
+  are its image contents and its player bundle; the root-executed deploy
+  assets come from the reviewed default branch, and a change to
+  `deploy-staging.sh`, `compose.staging.yml` or `Caddyfile.staging` reaches
+  staging only after it is merged.
+- `deploy` uses the GitHub environment **`staging`**, which holds the
+  `VPS_STAGING_HOST/SSH_KEY/SSH_HOST_KEY` secrets. REQUIRED (not optional):
+  that environment's deployment-branch rule must allow the **default branch
+  only** — a manual dispatch executes the *dispatched ref's copy* of the
+  workflow file, so without the rule a feature branch could rewrite the
+  deploy job and still read the environment's secrets. The workflow's own
+  dispatch-ref guard (it fails unless `github.ref` is the default branch)
+  is a convenience that points the operator at the right usage; the
+  environment rule is the control. Exact commands are in the VPS runbook's
+  staging checklist. A required reviewer on the environment is the optional
+  stronger setting. The workflow is not callable from `ci.yml`, and its
+  script always refuses `/opt/shizzle/prod` (and anything under it) and the
+  `shizzle` project, overridable by nothing.
+
+**The boundary that does NOT exist, stated plainly:** the chosen ref's image
+still executes on the production VPS host (inside the staging project, with
+CPU/memory limits but ordinary Docker isolation), and the staging SSH
+identity is **root** on the same box that runs production. Reusing the
+production key material is therefore exactly the same trust level as a
+production deploy, not a lesser one — it is documented here as a known gap,
+not a safety claim. The supported hardening path is a dedicated, restricted
+staging SSH identity (and ideally a staging-only Docker context such as a
+rootless daemon) so a compromised deploy cannot read `/opt/shizzle/prod/.env`
+or touch production volumes; that is future work, and until it exists a
+malicious chosen ref running as the staging image can reach the host's
+Docker socket-adjacent surface like any container on that box.
+
+**What the workflow itself can never guarantee:** a `workflow_dispatch` run
+executes the dispatched ref's copy of the workflow file, so any check living
+in `deploy-staging.yml` (including the dispatch-ref guard) is editable by
+the very ref being deployed. That is why the `staging` environment's
+deployment-branch rule is a required setup step rather than a suggestion:
+it is the only component the dispatched ref cannot rewrite.
+
+The first run against a fresh directory (`.env` plus `incoming/` assets)
+bootstraps the database — prior `compose.staging.yml`/`Caddyfile`/`player`
+can be absent on that first run only, and a failed first deploy stops the
+started services and returns the directory to its fresh state.
+
+**Rollback:** staging rollback is deliberately simpler. A failure before any
+active-file mutation leaves the current files and running bind mounts
+untouched. Once mutation begins, rollback restores the prior
+`.env`/compose/Caddyfile/player and recreates the previous image so Caddy
+rebinds the restored player; a fully activated failed release is first
+stopped while its own config is still active, and a failed first deploy
+returns a fresh directory to its fresh state. Stop, restore and restart
+failures are surfaced, not swallowed. A failed restore
+or restart retains `.staging-rollback.tar.gz`, and either that archive or its
+`.tmp` counterpart blocks the next run so no interrupted recovery is
+overwritten. The database is never downgraded. An old image may therefore
+start against a newer schema on staging; that is acceptable there (redeploy
+the newer ref to repair) and is the main way staging rollback differs from
+the production transaction in §3.
+
+The health gate requires the normal green `/api/health` response **and** a
+row in `orchestrator_heartbeats` whose `worker_id` names the replacement
+orchestrator container. The endpoint's latest-row age check alone can stay
+green briefly on the previous instance's heartbeat and is not proof that the
+replacement survived.
+
+**Data and work isolation:**
+
+- Own Postgres (`shizzle-staging_pgdata`) and job data volume; uploads and
+  the library are completely separate from production.
+- Own media bucket (`S3_MEDIA_BUCKET` in the staging `.env`). Staging media
+  reaches the browser as file-scoped signed CloudFront URLs against a
+  *staging* distribution over that bucket (invariant E5) — the arrangement
+  that needs no application change. The staging Caddyfile consequently has
+  no same-origin `/cdn` proxy; with the CloudFront variables left empty the
+  staging site works but tracks cannot play.
+- Separation is real on RunPod: the dispatch payload names the staging bucket
+  (the worker's `job_input.bucket`), so the endpoint's IAM policy must allow
+  that bucket, or staging needs its own endpoint. Staging uploads therefore
+  separate normally when `RUNPOD_API_KEY`/`RUNPOD_ENDPOINT_ID` are set in the
+  staging `.env`; with them unset the orchestrator still beats (valid
+  parked-cloud state) and new jobs fail closed at dispatch.
+- `SHIZZLE_NODE_TOKENS` stays empty on staging, so no worker node can ever
+  authenticate against it (E6) and the Mac mini and Dell keep serving only
+  production. Consequence: **URL jobs cannot complete on staging** — with
+  routing `prefer` they wait `NODE_DOWNLOAD_WAIT_SECONDS` (default 86400 s)
+  and fail `NO_NODE_AVAILABLE`. Making them work takes a node agent pointed
+  at the staging origin (`SHIZZLE_API_BASE=https://shizzle.tailfedd3b.ts.net:8443`,
+  a node id/token configured in the staging `.env` only, AWS credentials for
+  the staging bucket, and a separate `SHIZZLE_NODE_WORKDIR` if the same
+  machine must keep serving production with a second agent instance) — see
+  [docs/WORKER-NODES.md](WORKER-NODES.md).
+
+## 3c. Tailscale-only listeners
+
+The VPS already serves HTTPS 443 through `tailscale serve` for another
+service (proxy to `127.0.0.1:3773`); the staging and admin listeners use
+different ports so it is never disturbed. Real TLS matters because auth
+cookies are `Secure`. On the VPS host (once, manually):
+
+```sh
+# Staging site: https://shizzle.tailfedd3b.ts.net:8443
+tailscale serve --bg --https=8443 http://127.0.0.1:18080
+# Admin listener for production (and its /admin page): https://shizzle.tailfedd3b.ts.net:8444
+tailscale serve --bg --https=8444 http://127.0.0.1:18081
+```
+
+To undo either fronting (staging maintenance, rollback to no-admin):
+
+```sh
+tailscale serve --https=8443 off
+tailscale serve --https=8444 off
+```
+
+Both loopback ports are published by Compose with an explicit `127.0.0.1`
+host IP (`compose.staging.yml`, `compose.prod.yml`), so nothing is reachable
+off-box except through the tailnet TLS terminators.
 
 ## 4. Reviewer alignment
 
@@ -326,6 +494,15 @@ Current checked-in limits:
   model availability, not successful GPU separation or runtime egress policy.
 - RunPod repoint tests mock the API, so live template/endpoint API behavior
   requires a separate authorized validation.
+- `deploy/vps/tests/test_staging_stack.sh` (staging transaction and rollback
+  fault injection, replacement-heartbeat gate, compose publication/limits,
+  reserved-character PostgreSQL authentication, Caddy admin routing) runs in
+  the `library` job beside
+  the release-transaction suite. Its stubbed parts run anywhere; its
+  Docker-gated parts (compose config JSON, `caddy validate`, live
+  admin-routing probes over stub upstreams and a disposable PostgreSQL
+  authentication check) execute only where a Docker daemon answers, which
+  includes the CI runners.
 - The worker-image workflow lacks a concurrency group and uses version-tagged
   Actions, unlike the SHA-pinned application image/deploy workflows.
 - See [INVARIANTS.md](INVARIANTS.md) for explicitly unguarded contracts.
@@ -352,3 +529,11 @@ Set up these external dependencies before the first automated deployment:
 6. Configure and independently verify the RunPod endpoint using
    [deploy/runpod/README.md](../deploy/runpod/README.md). Image publication and
    endpoint activation are separate operations.
+7. Bring up staging when wanted: create the staging S3 bucket + CloudFront
+   distribution and key group (file-scoped signed URLs, E5), prepare
+   `/opt/shizzle/staging` from `deploy/vps/.env.staging.example`, create the
+   `staging` GitHub environment, **set its deployment-branch rule to the
+   default branch only** (required — see §3b), add the three `VPS_STAGING_*`
+   environment secrets there, run the two `tailscale serve` commands in §3c,
+   then dispatch `deploy-staging`. The full ordered checklist lives in
+   [deploy/vps/README.md](../deploy/vps/README.md#staging-stack).

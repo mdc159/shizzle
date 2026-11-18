@@ -1,0 +1,48 @@
+# Shizzle staging Caddyfile (VPS: /opt/shizzle/staging/Caddyfile).
+#
+# Plain HTTP inside the container, published ONLY as 127.0.0.1:18080:80 by
+# compose.staging.yml. The host fronts it with
+#   tailscale serve --bg --https=8443 http://127.0.0.1:18080
+# giving https://shizzle.tailfedd3b.ts.net:8443 with real TLS (auth cookies
+# are Secure) and tailnet-only reachability. Do not open a public port.
+#
+# Admin: this single listener is already tailnet-only, so /api/admin/* is NOT
+# blocked here; the X-Shizzle-Admin header is injected upstream (the value
+# lives in /opt/shizzle/staging/.env, invariant E3) and the /admin page is
+# served like any other SPA route.
+#
+# Media: staging manifests carry file-scoped signed CloudFront URLs against
+# the staging distribution (invariant E5), fetched directly by the browser —
+# no same-origin /cdn proxy exists on staging. The /cdn cookie fallback only
+# applies when CloudFront is unconfigured, and staging without its own
+# distribution simply has no playable media.
+
+# Global options: never persist the loaded config (including the env-
+# substituted admin secret) to /config/caddy/autosave.json — secrets stay in
+# the environment only (E3).
+{
+	persist_config off
+}
+
+:80 {
+	encode zstd gzip
+
+	# API + WebSocket relay. The admin secret header rides along.
+	handle /api/* {
+		reverse_proxy api:8001 {
+			header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}
+		}
+	}
+	handle /ws/* {
+		reverse_proxy api:8001 {
+			header_up X-Shizzle-Admin {$SHIZZLE_ADMIN_PROXY_SECRET:}
+		}
+	}
+
+	# Static UI (SPA fallback to index.html), including /admin.
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+}

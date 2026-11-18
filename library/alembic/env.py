@@ -16,7 +16,10 @@ config = context.config
 
 _db_url = os.environ.get("DATABASE_URL")
 if _db_url:
-    config.set_main_option("sqlalchemy.url", _db_url)
+    # ConfigParser treats percent signs as interpolation, while DATABASE_URL
+    # uses them for URL-encoded credentials. Escape only at this boundary;
+    # get_main_option() restores the original URL for SQLAlchemy.
+    config.set_main_option("sqlalchemy.url", _db_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
