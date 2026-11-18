@@ -676,16 +676,22 @@ async def test_completed_report_without_a_marker_closes_the_assignment(
 async def test_lost_download_report_completes_from_the_s3_marker(
     cloud_settings, job_repo, node_repo, monkeypatch
 ):
-    _stub_source_receipt(monkeypatch, sha256="e" * 64)
+    # The marker is absent until the node has acknowledged: with it present
+    # from creation, the orchestrator can complete the assignment from the
+    # S3 marker on its first pass — BEFORE this script's acknowledge lands —
+    # so the ack assert below would race (and lose on a loaded runner).
+    # Ack-then-flip is the same ordering the happy-path test uses.
+    receipt = _stub_source_receipt(monkeypatch, sha256="e" * 64, present=False)
     _stub_package_ready(monkeypatch, False)  # the separation that follows stays S3-free too
     await _register(node_repo)
     job = await job_repo.create_job(source_type=SourceType.url, source_ref="https://youtu.be/dQw4w9WgXcQ")
     orch, task = await _run(cloud_settings)
     try:
         dl = await _wait_assignment(node_repo, job.id, NodeAssignmentKind.download)
-        # The node acknowledged, wrote source.json (stubbed present), and its
+        # The node acknowledged, wrote source.json (flipped below), and its
         # completion report never arrived: the marker still completes it.
         assert await node_repo.acknowledge(dl.id, node_id=MAC)
+        receipt["present"] = True
         job_after = await wait_for_status(job_repo, job.id, JobStage.dispatched, timeout=10)
     finally:
         await _stop(orch, task)
