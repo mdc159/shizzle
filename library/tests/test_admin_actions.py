@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import struct
 import uuid
 from datetime import timedelta
@@ -286,6 +287,15 @@ async def test_retry_restarts_with_fresh_attempt_and_expires_open_assignments(
     assert event.detail["runpod"]["status"] == "cancelled"
 
 
+# Publication recovery verifies the real lossless package (stem probes via
+# ffprobe and re-encodes via ffmpeg), so these two need the binaries — the
+# same skip the other ffmpeg-dependent suites use (test_lossless_intake,
+# test_library_migration). CI's library runner has no ffmpeg: they skip
+# there with this reason instead of failing, and still run in full wherever
+# the tools exist.
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg required"
+)
 async def test_retry_refuses_missing_upload_source_but_uses_s3_fallback(
     admin_client, monkeypatch
 ):
@@ -1011,6 +1021,9 @@ async def test_missing_source_precedes_reservation_storage_check(
     assert "Dismiss is available" in response.json()["detail"]
 
 
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="ffmpeg required"
+)
 async def test_unconfirmed_valid_handoff_recovers_and_selects_exact_prefix(
     admin_client, monkeypatch
 ):

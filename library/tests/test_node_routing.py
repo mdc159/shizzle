@@ -45,7 +45,12 @@ def cloud_settings(settings):
     # race against the orchestrator on a slow runner; the two expiry tests
     # that need a short ack window set it themselves.
     settings.node_ack_seconds = 5.0
-    settings.node_stall_seconds = 0.3
+    # Headroom, not a tight race: the orchestrator must mirror a node's report
+    # on its NEXT pass, and under full-suite load a pass (claim + handler +
+    # aiosqlite thread hops) can take hundreds of milliseconds. A stall
+    # window comparable to pass latency expires HEALTHY assignments — the
+    # tests that prove stall expiry set a short window themselves.
+    settings.node_stall_seconds = 5.0
     settings.node_separate_wait_seconds = 0.3
     settings.node_download_wait_seconds = 0.5
     return settings
@@ -551,6 +556,9 @@ async def test_stalled_node_separation_is_expired_and_redispatched_to_another_no
 ):
     _stub_cloud_intake(monkeypatch)
     _stub_package_ready(monkeypatch, False)
+    # This test proves stall expiry: it needs a window SHORTER than the
+    # scripted silence, so it sets its own (the fixture default is load-safe).
+    cloud_settings.node_stall_seconds = 0.3
     await _register(node_repo)
     await _register(node_repo, "dell-9530", device="cuda")
     fake = FakeRunPodClient([])

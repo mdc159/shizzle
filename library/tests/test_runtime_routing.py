@@ -58,7 +58,10 @@ def cloud_settings(settings):
     settings.node_poll_seconds = 0.05
     settings.node_online_seconds = 45.0
     settings.node_ack_seconds = 5.0
-    settings.node_stall_seconds = 0.3
+    # Mirrors test_node_routing.cloud_settings: headroom over orchestrator
+    # pass latency so a healthy assignment is never spuriously expired under
+    # suite load; expiry tests set a short window themselves.
+    settings.node_stall_seconds = 5.0
     settings.node_separate_wait_seconds = 0.3
     settings.node_download_wait_seconds = 0.5
     return settings
