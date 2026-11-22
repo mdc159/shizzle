@@ -433,7 +433,7 @@ def _receipt_for_existing_object(
     try:
         body = s3.get_object(Bucket=bucket, Key=key)["Body"]
     except Exception as exc:
-        if not _is_missing_key(exc):
+        if not _confirmed_absent(s3, bucket, key, exc):
             raise  # a transient or permission failure is not a vanished object
         raise DownloadError(
             "SOURCE_RACE", "source.mp4 was there a moment ago and is gone; retry later"
@@ -466,11 +466,37 @@ def _is_missing_key(exc: Exception) -> bool:
     return code in ("404", "NoSuchKey", "NotFound")
 
 
+def _confirmed_absent(s3: Any, bucket: str, key: str, exc: Exception) -> bool:
+    """True when ``key`` is proven absent, whatever the node's IAM policy.
+
+    S3 answers a read of a missing key with 404 only when the caller holds
+    s3:ListBucket for that request. The node's ListBucket is limited by an
+    ``s3:prefix`` condition and a GET/HEAD carries no prefix, so a missing key
+    may answer 403 instead. On 403 the absence is confirmed with a listing
+    limited to exactly this key, which the condition allows; a key that exists
+    (or a listing that is itself refused) keeps the 403 a real error.
+    """
+    if _is_missing_key(exc):
+        return True
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code", ""))
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    if status != 403 and code not in ("AccessDenied", "403", "Forbidden"):
+        return False
+    try:
+        listing = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+    except Exception:  # the listing is refused too: not proof of absence
+        return False
+    return not any(item.get("Key") == key for item in listing.get("Contents", []))
+
+
 def _read_json(s3: Any, bucket: str, key: str) -> dict[str, Any] | None:
     try:
         body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     except Exception as exc:  # NoSuchKey and friends
-        if _is_missing_key(exc):
+        if _confirmed_absent(s3, bucket, key, exc):
             return None
         raise
     try:

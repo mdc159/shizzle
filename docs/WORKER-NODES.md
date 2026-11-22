@@ -262,9 +262,13 @@ spends money only when no node answers within two minutes.
 }
 ```
 
-HEAD is authorized by `s3:GetObject`; `s3:ListBucket` on those prefixes
-makes a missing key answer 404 rather than 403, which the "is it there yet"
-checks rely on. Accepted risk: the policy covers every job's source and
+HEAD is authorized by `s3:GetObject`. A GET or HEAD carries no `s3:prefix`,
+so under this prefix-conditioned `s3:ListBucket` a missing key may answer
+403 rather than 404. The node and the separation handler therefore never
+read 403 as "missing" on its own: they confirm absence with a listing
+limited to exactly that key, which the condition allows, and a 403 for a key
+that exists (or a refused listing) stays an error. The policy needs no
+bucket-wide `s3:ListBucket`. Accepted risk: the policy covers every job's source and
 attempt prefix, not only the current assignment's. The nodes are the owner's
 machines; conditional writes (first writer wins) stop a stale node from
 replacing an accepted `source.mp4`, `source.json`, `dispatch.json` or

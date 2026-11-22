@@ -75,6 +75,29 @@ def _is_not_found(err: ClientError) -> bool:
     return status == 404 or code in ("NoSuchKey", "404", "NotFound")
 
 
+def _confirmed_absent(s3, bucket: str, key: str, err: ClientError) -> bool:  # noqa: ANN001
+    """True when ``key`` is proven absent, whatever the caller's IAM policy.
+
+    S3 answers a read of a missing key with 404 only when the caller holds
+    s3:ListBucket for that request. A worker node's ListBucket is limited by
+    an ``s3:prefix`` condition, and a GET/HEAD carries no prefix, so a missing
+    key may answer 403 instead. On 403 the absence is confirmed with a listing
+    limited to exactly this key, which the prefix condition allows; a key that
+    exists (or a listing that is itself refused) keeps the 403 a real error.
+    """
+    if _is_not_found(err):
+        return True
+    status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    code = err.response.get("Error", {}).get("Code", "")
+    if status != 403 and code not in ("AccessDenied", "403", "Forbidden"):
+        return False
+    try:
+        listing = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+    except Exception:  # the listing is refused too: not proof of absence
+        return False
+    return not any(item.get("Key") == key for item in listing.get("Contents", []))
+
+
 def _is_precondition_failed(err: ClientError) -> bool:
     """True only for a conditional-write loss: code PreconditionFailed, HTTP 412."""
     response = err.response
@@ -249,7 +272,7 @@ def handler(job: dict, *, progress: Callable[[str], None] | None = None) -> dict
     try:
         stored = json.loads(s3.get_object(Bucket=bucket, Key=handoff_key)["Body"].read())
     except ClientError as err:
-        if not _is_not_found(err):
+        if not _confirmed_absent(s3, bucket, handoff_key, err):
             raise
     else:
         heartbeat("dispatch: attempt already complete")

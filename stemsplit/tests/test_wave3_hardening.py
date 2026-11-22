@@ -634,3 +634,61 @@ def test_transfer_callback_is_thread_safe_and_monotonic():
     assert pcts[-1] == 100
     # Every emitted percentage is a 5% bucket in the documented range.
     assert all(0 <= p <= 100 and p % 5 == 0 for p in pcts)
+
+
+class _PrefixScopedS3(_FakeS3):
+    """S3 as a worker node sees it: s3:ListBucket only under an s3:prefix
+    condition, so a read of a missing key answers 403, not 404, and only a
+    listing scoped to a prefix is allowed."""
+
+    def __init__(self, *, listing_allowed: bool = True) -> None:
+        super().__init__()
+        self.listing_allowed = listing_allowed
+        self.listings: list[str] = []
+
+    def get_object(self, *, Bucket, Key) -> dict:  # noqa: ANN001, N803
+        if Key not in self.objects:
+            raise _client_error("AccessDenied", 403)
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+    def list_objects_v2(self, *, Bucket, Prefix, MaxKeys) -> dict:  # noqa: ANN001, ARG002, N803
+        self.listings.append(Prefix)
+        if not self.listing_allowed:
+            raise _client_error("AccessDenied", 403)
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))[:MaxKeys]
+        return {"Contents": [{"Key": k} for k in keys]} if keys else {}
+
+
+def test_handler_runs_when_a_missing_handoff_answers_403(monkeypatch):
+    """A node's prefix-conditioned ListBucket makes a missing handoff.json
+    answer 403; the replay guard confirms absence with an exact-key listing
+    and the separation proceeds."""
+    fake_s3 = _PrefixScopedS3()
+    _patch_handler_env(monkeypatch, fake_s3)
+    result = handler(_dispatch_job())
+    assert result["status"] == "COMPLETED"
+    handoff_key = f"{_attempt_prefix_for()}/handoff.json"
+    assert fake_s3.listings == [handoff_key]
+    assert fake_s3.mutations[-1] == ("put_object", handoff_key)
+
+
+def test_handler_403_with_listing_refused_stays_an_error(monkeypatch):
+    """Without the scoped listing a 403 proves nothing: the handler raises
+    rather than treating a permission failure as a missing object."""
+    fake_s3 = _PrefixScopedS3(listing_allowed=False)
+    _patch_handler_env(monkeypatch, fake_s3)
+    with pytest.raises(ClientError, match="AccessDenied"):
+        handler(_dispatch_job())
+    assert fake_s3.mutations == []
+
+
+def test_confirmed_absent_requires_an_exact_key_match():
+    """A longer key sharing the prefix (handoff.json.bak) is not the key."""
+    fake_s3 = _PrefixScopedS3()
+    fake_s3.store("p/handoff.json.bak", b"{}")
+    err = _client_error("AccessDenied", 403)
+    assert lossless_handler._confirmed_absent(fake_s3, "b", "p/handoff.json", err) is True
+    fake_s3.store("p/handoff.json", b"{}")
+    assert lossless_handler._confirmed_absent(fake_s3, "b", "p/handoff.json", err) is False
+    other = _client_error("SlowDown", 503)
+    assert lossless_handler._confirmed_absent(fake_s3, "b", "p/missing.json", other) is False
