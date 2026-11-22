@@ -267,8 +267,12 @@ The node needs only the source prefix and the separation attempt prefix:
 ```
 
 HEAD requests are authorized by `s3:GetObject` (there is no `s3:HeadObject`
-action). `s3:ListBucket` on those prefixes makes a missing key answer 404
-rather than 403, which the worker's "is it there yet" checks rely on.
+action). A GET or HEAD carries no `s3:prefix`, so under this
+prefix-conditioned `s3:ListBucket` a missing key may answer 403 instead of
+404. The agent and the separation handler confirm absence on a 403 with a
+listing limited to exactly that key, which the condition allows; a 403 for a
+key that exists, or a refused listing, stays an error. Do not widen
+`s3:ListBucket` to the whole bucket for this.
 
 This policy covers every job's source and attempt prefix, not only the
 current assignment's: accepted for the owner's own machines. Writes are

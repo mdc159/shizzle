@@ -293,3 +293,65 @@ def test_upload_size_mismatch_is_a_structured_failure(tmp_path):
     # No receipt for an object that failed its size check (A12: receipt LAST).
     assert "sources/t/source.json" not in s3.objects
     assert [o for o in s3.order if "source.json" in o] == []
+
+
+class _PrefixScoped(_FakeS3):
+    """S3 as the node's IAM user sees it under a prefix-conditioned
+    s3:ListBucket: a missing key answers 403, and only scoped listings work."""
+
+    def __init__(self, *, listing_allowed: bool = True) -> None:
+        super().__init__()
+        self.listing_allowed = listing_allowed
+        self.listings: list[str] = []
+
+    def get_object(self, *, Bucket, Key):  # noqa: N803
+        if Key not in self.objects:
+            exc = RuntimeError("403")
+            exc.response = {"Error": {"Code": "AccessDenied"},  # type: ignore[attr-defined]
+                            "ResponseMetadata": {"HTTPStatusCode": 403}}
+            raise exc
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+    def list_objects_v2(self, *, Bucket, Prefix, MaxKeys):  # noqa: N803, ARG002
+        self.listings.append(Prefix)
+        if not self.listing_allowed:
+            exc = RuntimeError("403")
+            exc.response = {"Error": {"Code": "AccessDenied"},  # type: ignore[attr-defined]
+                            "ResponseMetadata": {"HTTPStatusCode": 403}}
+            raise exc
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))[:MaxKeys]
+        return {"Contents": [{"Key": k} for k in keys]} if keys else {}
+
+
+def test_upload_proceeds_when_a_missing_receipt_answers_403(tmp_path):
+    """The first read of source.json gets 403 under the node's policy; an
+    exact-key listing proves it absent and the upload runs as usual."""
+    s3 = _PrefixScoped()
+    source = _source(tmp_path)
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
+    landed = upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+    assert landed is receipt
+    assert s3.listings == ["sources/t/source.json"]
+    assert s3.order == [
+        "put:sources/t/source.mp4:video/mp4:*",
+        "put:sources/t/source.json:application/json:*",
+    ]
+
+
+def test_a_403_that_the_listing_cannot_explain_stays_an_error(tmp_path):
+    s3 = _PrefixScoped(listing_allowed=False)
+    source = _source(tmp_path)
+    receipt = {"track_id": "t", "object_key": "sources/t/source.mp4", "sha256": source.sha256}
+    with pytest.raises(RuntimeError, match="403"):
+        upload_source(s3, bucket="b", source=source, receipt=receipt, progress=lambda _m: None)
+    assert s3.order == []
+
+
+def test_existing_receipt_reads_none_under_a_403_policy_and_never_mistakes_a_neighbour():
+    from shizzle_node.download import existing_receipt
+
+    s3 = _PrefixScoped()
+    s3.objects["sources/t/source.json.bak"] = b"{}"
+    assert existing_receipt(s3, bucket="b", track_id="t") is None
+    s3.objects["sources/t/source.json"] = json.dumps({"sha256": "a" * 64}).encode()
+    assert existing_receipt(s3, bucket="b", track_id="t") == {"sha256": "a" * 64}
