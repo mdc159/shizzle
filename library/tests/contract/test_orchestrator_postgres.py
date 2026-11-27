@@ -14,7 +14,7 @@ from datetime import UTC, timedelta
 import pytest
 from sqlalchemy import text
 
-from shizzle_server.db.models import JobStage, SourceType, utcnow
+from shizzle_server.db.models import Job, JobEvent, JobStage, SourceType, utcnow
 from shizzle_server.db.repository import (
     InvalidTransition,
     PublishRefusedError,
@@ -25,6 +25,39 @@ from shizzle_server.errors import ErrorCode
 from .conftest import make_upload_job, wait_for
 
 pytestmark = [pytest.mark.postgres, pytest.mark.integration]
+
+
+async def test_two_publication_recoveries_only_one_claims(pg_repos):
+    jobs, _, _ = pg_repos
+    job = await jobs.create_job(source_type=SourceType.upload, source_ref="source.mp4")
+    async with jobs._sf() as session, session.begin():
+        row = await session.get(Job, job.id)
+        row.status = JobStage.failed
+        row.error_code = "PUBLISH_FAILED"
+        row.runpod_job_id = "completed-provider"
+        row.input_checksum = "a" * 64
+        session.add(JobEvent(job_id=job.id, event="runpod_dispatched", detail={
+            "runpod_job_id": "completed-provider", "idempotency_key": "dispatch-key",
+        }))
+        session.add(JobEvent(job_id=job.id, event="failed", detail={"stage": "publishing"}))
+
+    async def claim(owner):
+        return await jobs.recover_publication(
+            job.id, expected_provider_id="completed-provider", expected_checksum="a" * 64,
+            expected_idempotency_key=job.idempotency_key, recovery_id=uuid.uuid4(),
+            expected_dispatch_key="dispatch-key",
+            worker_id=owner, lease_seconds=120,
+        )
+
+    outcomes = await asyncio.gather(claim("recovery-a"), claim("recovery-b"), return_exceptions=True)
+    assert sum(isinstance(value, Job) for value in outcomes) == 1
+    assert sum(isinstance(value, InvalidTransition) for value in outcomes) == 1
+    current = await jobs.get_job(job.id)
+    assert current.status == JobStage.verifying
+    assert current.runpod_job_id == "completed-provider"
+    assert current.idempotency_key == job.idempotency_key
+    events = await jobs.list_events(job.id)
+    assert sum(event.event == "publication_recovery_started" for event in events) == 1
 
 
 def _effects_for(data_dir, job_hex: str) -> list[str]:

@@ -64,6 +64,7 @@ export function metricsDetail(metrics: PlaybackMetrics): Record<string, unknown>
     video: metrics.video,
     stems: metrics.stems,
     limiter: metrics.limiter,
+    videoSeeks: metrics.videoSeeks,
     interStemSkewMs,
     maxStemVideoOffsetMs,
   };

@@ -1,6 +1,5 @@
-import { useState } from 'react';
 import { PasscodeGate } from '@/components/auth/PasscodeGate';
-import { hasToken } from '@/lib/auth';
+import { useAuthGate } from '@/hooks/useAuthGate';
 import { useRemoteSync } from '@/hooks/useRemoteSync';
 import { MixerSurface } from '@/components/mixer/MixerSurface';
 import { useMixerReset } from '@/hooks/useMixerReset';
@@ -74,11 +73,11 @@ const RemoteControls: React.FC = () => {
 };
 
 export const RemoteMixerPage: React.FC = () => {
-  const [authed, setAuthed] = useState<boolean>(() => hasToken());
+  const [authed, setAuthedTrue] = useAuthGate();
 
   return (
     <div className="relative h-full w-full bg-black text-white antialiased">
-      {authed ? <RemoteControls /> : <PasscodeGate onAuthed={() => setAuthed(true)} />}
+      {authed ? <RemoteControls /> : <PasscodeGate onAuthed={setAuthedTrue} />}
       <Toaster theme="dark" position="bottom-left" />
     </div>
   );

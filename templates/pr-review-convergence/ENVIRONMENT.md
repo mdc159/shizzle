@@ -44,9 +44,7 @@ SDK-based tools.
 
 - `gh auth login` or an existing host GitHub CLI session provides GitHub access.
   The controller does not upload the GitHub token to E2B.
-- `GREPTILE_API_KEY` is optional host-only API/MCP access. GitHub PR review also
-  requires the Greptile GitHub App and repository indexing; an API key alone is
-  not that installation.
+- Greptile is retired; no Greptile credentials or installation are required.
 - CodeRabbit and Cubic GitHub App reviews require no key in this package.
 - Production, cloud-provider, database, signing, package-registry, and customer
   credentials stay outside the sandbox. Tests needing them require a separately
@@ -54,9 +52,9 @@ SDK-based tools.
 
 The controller clones public repositories over credential-free HTTPS, pins the
 exact PR head, and returns writer work as a verified Git bundle. A private
-repository will fail to clone by design. Supporting it requires a reviewed host
-bundle/upload flow or a short-lived read-only credential strategy; neither is
-silently inferred by this package.
+repository will fail to clone by default. The controller supports an explicit
+host-bundle adapter via `--source-bundle` and `--source-repo-root`; no GitHub
+credential enters the sandbox. Short-lived credential cloning is not implemented.
 
 ## E2B execution surface
 
@@ -81,7 +79,7 @@ Before committing the package:
 
 ```powershell
 git check-ignore .sandbox/e2b/probe
-rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)=" .
+rg -l "(E2B_API_KEY|GREPTILE_API_KEY|GITHUB_TOKEN|GH_TOKEN)=" . # Include retired Greptile secrets in the leak scan.
 ```
 
 The first command should identify an ignore rule. The second should return no

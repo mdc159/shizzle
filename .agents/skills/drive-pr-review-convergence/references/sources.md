@@ -15,11 +15,9 @@ reviewer policy.
 The shipped scripts pin `e2b==2.35.0`; the versioned URL above documents the
 lifecycle shape but may not be the latest SDK reference.
 
-## Greptile
+## Greptile (retired)
 
-- Review anatomy and confidence score: <https://www.greptile.com/docs/code-review/first-pr-review>
-- Trigger behavior: <https://www.greptile.com/docs/code-review-bot/trigger-code-review>
-- `.greptile/` schema: <https://www.greptile.com/docs/code-review/greptile-config-reference>
+Greptile is retired; no credentials, triggers, or score checks are required.
 
 ## CodeRabbit
 

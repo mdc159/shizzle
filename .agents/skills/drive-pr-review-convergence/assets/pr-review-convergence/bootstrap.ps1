@@ -14,7 +14,6 @@ if ([string]::IsNullOrWhiteSpace($env:E2B_API_KEY)) {
 }
 
 Write-Output 'E2B_API_KEY: present (value not displayed)'
-Write-Output "GREPTILE_API_KEY: $(if (Test-Path Env:GREPTILE_API_KEY) { 'present' } else { 'not set; optional' })"
 $githubLogin = gh api user --jq .login
 if ($LASTEXITCODE -ne 0 -or -not $githubLogin) {
     throw 'GitHub CLI authentication failed. Run gh auth login.'

@@ -98,7 +98,8 @@ The authenticated `GET /api/tracks/{id}/manifest` returns file-scoped expiring
 CloudFront URLs (default 24 hours). CloudFront fronts private S3 with origin
 access control and Range/CORS support. The six AAC elements stream directly
 from the edge. After stem readiness, the browser fetches the audio-less video
-and uses one revocable Blob as the master timeline. Old Blobs are released
+and stages one revocable Blob; the stems' audible clocks are the master
+timeline (audio-master alignment). Old Blobs are released
 on track change. The size checks do not establish a strict streaming memory
 bound when response length is missing: the body is converted to a Blob before
 the post-download check.
@@ -117,7 +118,7 @@ maps symptoms to those checks.
 
 AAC delivery keeps six simultaneous streams practical; lossless float32 stays
 upstream for processing and re-derivation. The retained experiments compare AAC
-renditions and gain behavior, and explain why one staged video improves the
-master clock while audio remains streamed. Measurements and prior acceptance
+renditions and gain behavior, and explain why one staged video keeps video
+seeks reliable while audio remains streamed. Measurements and prior acceptance
 results live under [playback evidence](../../evidence/cloud-continuous-playback/evidence.md);
 they are dated test results, not current inventory or guarantees for every browser.

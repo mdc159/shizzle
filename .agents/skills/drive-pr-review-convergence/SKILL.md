@@ -1,6 +1,6 @@
 ---
 name: drive-pr-review-convergence
-description: Drive one GitHub pull request through a bounded, evidence-backed repair and automated-review convergence workflow using isolated E2B sandboxes. Use when asked to inspect whether a PR is truly ready, address human or bot review findings, coordinate Greptile, CodeRabbit, Cubic, and CI without infinite loops, provision one writer plus optional reader sandboxes, render a reusable PR goal, or produce a ready-to-merge report while stopping before merge.
+description: Drive one GitHub pull request through a bounded, evidence-backed repair and automated-review convergence workflow using isolated E2B sandboxes. Use when asked to inspect whether a PR is truly ready, address human or bot review findings, coordinate independent review, CodeRabbit, Cubic, and CI without infinite loops, provision one writer plus optional reader sandboxes, render a reusable PR goal, or produce a ready-to-merge report while stopping before merge.
 ---
 
 # Drive PR Review Convergence
@@ -10,6 +10,8 @@ scripts and assets shipped here; do not reconstruct the controller or goal from
 memory.
 
 ## Guardrails
+
+Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply.
 
 - Target one PR and one exact remote head SHA at a time.
 - Keep exactly one writer. Use `audit-*` and `test-*` readers only for genuinely
@@ -50,8 +52,8 @@ the result, stop for the smallest necessary user decision.
 Run `scripts/render_pr_review_goal.py` with explicit repeated arguments for
 checks, reviewers, setup commands, and validation commands. Default to:
 
-- primary reviewer `greptile`;
-- minimum primary score `4` with the stricter finding rules below;
+- primary reviewer `independent` (the workflow's own whole-diff review);
+- minimum primary score `0` (no provider score required);
 - maximum repair batches `2`;
 - quiet interval `1` minute.
 
@@ -112,14 +114,11 @@ Reply and resolve only when findings are fixed or disproved with evidence.
 
 After local/E2B validation and required CI:
 
-1. trigger the primary reviewer once on the final candidate;
-2. never wait for CodeRabbit/Cubic quota;
-3. target Greptile 5/5;
-4. accept 4/5 only with zero reproduced P0/P1, every P2 dispositioned, and no
-   explicit do-not-merge recommendation;
-5. reject 3/5 or lower;
-6. use one remaining repair batch only for reproduced blockers; and
-7. stop blocked if the budget is exhausted.
+1. complete the independent whole-diff review against the final candidate;
+2. consume available CodeRabbit/Cubic findings without waiting for quota;
+3. require zero reproduced P0/P1, no required human finding, and an evidence-backed disposition for every finding;
+4. use a remaining repair batch only for reproduced blockers; and
+5. stop blocked if the repair budget is exhausted with a blocker.
 
 Once clean, capture two unchanged observations one quiet interval apart. A head
 change, required-check change, primary-review event, or reproduced blocker

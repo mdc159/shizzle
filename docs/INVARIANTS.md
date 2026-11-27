@@ -2,7 +2,7 @@
 
 This file is the single source of review truth for the shizzle repo. Consumers:
 humans doing code review, the AI reviewers (CodeRabbit ingests this file via its
-knowledge base; Greptile and cubic receive mirrored rules — see
+knowledge base; cubic receives mirrored rules — see
 [docs/AUTOMATION.md](AUTOMATION.md)), and fleet builder agents that must not
 regress these properties while refactoring.
 
@@ -111,7 +111,10 @@ interface — no AAC encode, no video, no delivery manifest.
 
 **Invariant:** The worker image MUST bake the htdemucs_6s weights at build
 time: the Dockerfile's `RUN --network=none` model-load check fails the build
-if any weight would need a network download.
+if any weight would need a network download. That check loads the model
+through the handler's own import path (`demucs.api.Separator`), so a demucs
+version missing that module also fails the build, and the image runs with
+`HF_HUB_OFFLINE=1`.
 - Where: `stemsplit/Dockerfile.lossless`
 - Enforced by the image build itself (the offline weights check fails the
   build if any weight is missing). Violation smell: removing the
@@ -141,6 +144,34 @@ progress MUST be monotonic.
 - Guarded by: `stemsplit/tests/test_wave3_hardening.py::test_transfer_callback_is_thread_safe_and_monotonic`
 - Violation smell: touching callback state without holding its lock.
 
+### A12 — a node-downloaded source is complete only with source.json
+
+A worker node (docs/WORKER-NODES.md) uploads `sources/<track>/source.mp4` and
+then writes `sources/<track>/source.json` LAST. The orchestrator advances a
+URL job out of `downloading` only after reading that receipt and re-proving
+it: interface `shizzle-source-v1`, `object_key` equal to the pipeline's
+source key, `track_id` equal to the job's, a 64-hex sha256 that equals the
+object's stored S3 SHA-256 checksum (the node uploads with
+`ChecksumSHA256`, so S3 verified those bytes on the way in), a positive
+`bytes` that equals the object's `ContentLength`, a positive finite
+`duration_seconds`, and duration and size within the upload limits. A
+receipt that fails any of these after the node reported the download
+complete closes that assignment as failed so the retry assigns afresh; while
+the assignment is still open a failing marker is simply not yet proof, and the
+orchestrator keeps polling until the node reports or the stall window expires
+it. The node's completion report is a hint, never the proof:
+the marker completes an open assignment even when the report was lost, and
+the node writes both objects with `If-None-Match: *`, so a stale node that
+was reassigned away can never overwrite a source the orchestrator accepted.
+Only a link to one YouTube video is ever handed to a node (checked at
+`POST /api/submit-url`, again in the orchestrator, and again by the agent).
+
+Guard: `library/tests/test_node_routing.py`
+(`test_rejected_source_receipt_is_a_retryable_checksum_failure`,
+`test_url_job_runs_download_then_separation_on_the_node_to_ready`);
+`node/tests/test_download.py`
+(`test_upload_writes_source_then_receipt_last_and_is_idempotent`).
+
 ## B. Orchestrator lease / dispatch
 
 ### B1 — claim uses FOR UPDATE SKIP LOCKED
@@ -168,6 +199,24 @@ non-worker callers append unfenced. `owns_lease` exposes the owner-plus-
 expiry predicate for callers that gate remote effects (e.g. cancelling the
 RunPod job) rather than writes. `confirm_dispatch` stays
 lease-independent by design (B4).
+
+Operator publication recovery is a separate, explicit claim, never a normal
+`advance` from a terminal state. `recover_publication` locks the exact failed
+job with `FOR UPDATE SKIP LOCKED`, requires its latest failure to be at
+publication with `PUBLISH_FAILED`, checks the expected provider/input/reservation
+identity, refuses a live lease or published track, and grants a bounded lease
+at `verifying`. It preserves the provider ID, reservation and attempt counter
+and appends recovery provenance. The operator command first verifies provider
+completion, package bytes and source identity. A crash can only resume
+verification/publication, never dispatch. Ordinary terminal transitions stay
+forbidden.
+Reusing a recovery UUID is refused and every operator process gets a fresh
+lease-owner nonce. Later verification/publication failures retain that checked
+recovery provenance, permitting another explicit recovery after its cause is
+fixed without resetting the dispatch attempt counter. An already-published
+generation can activate only when its immutable manifest equals the rebuilt
+candidate; mismatches fail closed for reconciliation.
+- Recovery guards: `library/tests/test_publication_recovery.py`
 - Where: `library/src/shizzle_server/db/repository.py`
 - Guarded by: `library/tests/test_repository.py::test_record_dispatch_requires_dispatched_stage_and_lease_owner`, `library/tests/test_repository.py::test_record_dispatch_rejects_expired_or_missing_lease`, `library/tests/test_repository.py::test_stale_worker_cannot_fail_retry_or_advance_after_reclaim`, `library/tests/test_repository.py::test_stale_worker_cannot_append_events_after_reclaim`, `library/tests/test_orchestrator_unit.py::test_renew_and_release_lease_ownership`, `library/tests/test_orchestrator_unit.py::test_stage_error_yields_when_lease_was_lost`, `library/tests/contract/test_orchestrator_postgres.py::test_stale_worker_cannot_write_after_lease_reclaim`
 - Violation smell: any repository mutation that trusts a job_id + worker_id
@@ -238,11 +287,15 @@ appending an event; stages signal it purely via `ctx.park_seconds`.
 ### B10 — unresolvable dispatch identity fails closed
 
 **Invariant:** An unresolvable dispatch identity MUST fail closed after
-`queue_timeout + worker_stall` — explicit operator recovery, never silent
-redispatch.
+`max(queue_timeout, cold_start) + worker_stall` — explicit operator recovery,
+never silent redispatch. The window includes `cold_start` (not just
+`queue_timeout`) because the queue-timeout watchdog (B13) itself waits that
+long before failing a job whose worker is still initializing.
 - Where: `library/src/shizzle_server/orchestrator/stages.py`
 - Indirect coverage via the reservation tests (`test_dispatch_reservation_blocks_duplicate_and_survives_lease_turnover`, `test_dispatch_timeout_reservation_prevents_redispatch`).
-- Violation smell: any automatic retry after a dispatch identity is lost.
+- Violation smell: any automatic retry after a dispatch identity is lost, or a
+  fail-closed window shorter than the queue-timeout watchdog can legitimately
+  wait.
 
 ### B11 — stage handlers idempotent under crash-rerun
 
@@ -267,6 +320,98 @@ worker failed. The marker location comes from the confirmed dispatch key
 - Guarded by: `library/tests/test_orchestrator_unit.py::test_cloud_dispatched_runpod_failed_redispatches_fresh`, `library/tests/test_orchestrator_unit.py::test_superseded_completion_requires_handoff`
 - Violation smell: reusing the old idempotency key after a RunPod-side
   failure.
+
+### B13 — queue timeout defers to cold start before cancelling
+
+**Invariant:** When `IN_QUEUE` age exceeds `runpod_queue_timeout_seconds`, the
+handler MUST consult RunPod endpoint health before cancelling. If workers are
+reported `initializing` and the queue age is still within
+`runpod_cold_start_seconds`, the job MUST keep waiting instead of being
+cancelled and redispatched under a new key onto the same endpoint. Once queue
+age exceeds `runpod_cold_start_seconds`, or the health check itself fails
+(carries no signal either way), the existing cancel behavior applies
+unchanged. A cold-start extension records one `runpod_cold_start_extended`
+event per RunPod job id (deduped per dispatch attempt, not per poll) — see B6
+for the dedup pattern this follows. This check runs before the B2 lease-owner
+gate, same as the existing queue-timeout cancel.
+- Where: `library/src/shizzle_server/orchestrator/stages.py`, `library/src/shizzle_server/orchestrator/runpod_client.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_cold_start_extends_queue_wait_when_workers_initializing`, `library/tests/test_orchestrator_unit.py::test_cold_start_budget_exhausted_still_cancels`, `library/tests/test_orchestrator_unit.py::test_health_check_failure_falls_back_to_existing_cancel_behavior`, `library/tests/lib/test_runpod_client.py::test_health_returns_worker_and_job_counts`
+- Violation smell: cancelling a queued job without checking health first, or
+  granting an unbounded extension when workers never leave `initializing`.
+
+### B14 — running-stall heartbeat is established on the queued-to-running transition
+
+**Invariant:** The first `IN_PROGRESS` observation after `worker_phase` is
+`"dispatched"` or `"queued"` MUST establish a fresh running heartbeat (via
+`record_worker_progress`) and skip the running-stall check for that one
+observation, rather than comparing the running-stall timeout against the
+queue-phase heartbeat age. A subsequent stall — no progress for longer than
+`runpod_worker_stall_seconds` measured from that fresh heartbeat — MUST still
+cancel and fail the job. The heartbeat is a durable DB column, so this holds
+across orchestrator restarts (issue #20).
+- Where: `library/src/shizzle_server/orchestrator/stages.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_queued_to_running_transition_does_not_trip_running_stall`, `library/tests/test_orchestrator_unit.py::test_actual_running_stall_after_transition_still_times_out`
+- Violation smell: computing `stalled_for` from `worker_heartbeat_at` before
+  the queued-to-running transition has had a chance to refresh it.
+
+### B15 — service liveness heartbeat is independent of job processing
+
+**Invariant:** The orchestrator's service-liveness heartbeat (the row
+`/api/health` reads for `orchestratorAlive`, which gates VPS deploy health
+checks) MUST be written on its own schedule, never as a side effect that a
+long job stage can delay. It runs on a task separate from the claim/process
+loop and from the per-job lease renewer, is cancelled cleanly on shutdown,
+and a write failure (e.g. DB unreachable) is logged rather than swallowed —
+the row is left stale so the age check correctly reports the process as not
+alive. This is distinct from job-level worker-phase heartbeats, which write
+only on phase change (B8).
+- Where: `library/src/shizzle_server/orchestrator/loop.py`
+- Guarded by: `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stays_fresh_through_a_long_healthy_stage`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_stops_when_loop_stops`, `library/tests/test_orchestrator_unit.py::test_service_heartbeat_db_failure_is_logged_and_does_not_crash_loop`
+- Violation smell: writing the service heartbeat only from inside the
+  claim-and-process loop, so a busy healthy stage (source transfer, package
+  verification, AAC/video derivation) starves it past the liveness threshold
+  (issue #21).
+
+### B16 — node assignments are fenced like dispatches
+
+An assignment is created only by the orchestrator while it owns the job's
+unexpired lease, inside one transaction that also marks the node busy and
+records `jobs.executor`. Only the node named on an assignment can
+acknowledge, report progress on, complete or fail it; a terminal report or an
+orchestrator expiry frees the node. A node separation reuses the dispatch
+reservation and confirmation with executor id `node:<assignment>` in
+`jobs.runpod_job_id`, so B3/B4/B10/B12 apply unchanged. A silent node
+(no acknowledgement within `NODE_ACK_SECONDS`, no progress within
+`NODE_STALL_SECONDS`) is expired and the job redispatches under a fresh key.
+A node's heartbeat that names the assignment it holds counts as progress
+(a long ffmpeg or demucs run prints nothing), so an assignment is also
+expired once it is older than `NODE_ASSIGNMENT_MAX_SECONDS` regardless of
+heartbeats: a wedged run on a live node is reclaimed, never parked forever.
+
+Guard: `library/tests/test_nodes_api.py`
+(`test_create_assignment_requires_the_job_lease`,
+`test_only_the_named_node_can_report`);
+`library/tests/test_node_routing.py`
+(`test_unacknowledged_download_expires_and_is_reassigned`,
+`test_stalled_node_separation_is_expired_and_redispatched_to_another_node`).
+
+### B17 — RunPod is the fallback, not the default
+
+With `SHIZZLE_NODE_ROUTING=prefer`, an online separation node is chosen
+before RunPod; a registered node that is offline earns
+`NODE_SEPARATE_WAIT_SECONDS` before the orchestrator records
+`fallback_runpod` and dispatches to RunPod. With `only`, RunPod is never
+called. With no separation node ever registered, RunPod is used at once
+(when RunPod is configured; an unconfigured RunPod parks the job as before). URL downloads
+have no RunPod fallback: RunPod cannot download, so the job waits up to
+`NODE_DOWNLOAD_WAIT_SECONDS` and then fails `NO_NODE_AVAILABLE`.
+
+Guard: `library/tests/test_node_routing.py`
+(`test_upload_job_prefers_an_online_separation_node`,
+`test_separation_falls_back_to_runpod_after_the_wait_window`,
+`test_routing_only_never_dispatches_to_runpod`,
+`test_no_registered_node_dispatches_to_runpod_immediately`,
+`test_url_job_waits_then_fails_without_any_download_node`).
 
 ## C. Publication immutability
 
@@ -345,6 +490,21 @@ require the explicit opt-in `SHIZZLE_ALLOW_TEST_PIPELINE` (default off), and
 - Violation smell: a `local/` or otherwise non-S3 prefix reaching the tracks
   table (the 2026-08-19 phantom), or `SHIZZLE_PIPELINE=test` selected
   without the opt-in flag.
+
+### C8 — drop-box imports register only after validation
+
+**Invariant:** A drop-box import MUST register a track only after the dropped
+bytes pass sha256 verification and the full delivery-profile audit and the
+Publisher's staged verification; an existing generation MUST be treated as a
+completed retry only when its published manifest hash equals the dropped
+manifest's hash, otherwise refused without touching the row; a rejected drop
+MUST leave no row and no generation manifest.
+- Where: `library/src/shizzle_server/publish/browser_import.py`, `docs/contributing-completed-media.md`
+- Guarded by: `library/tests/test_browser_import.py::test_sha_mismatch_rejected_no_generation_no_row`, `library/tests/test_browser_import.py::test_audit_error_rejected_no_generation_no_row`, `library/tests/test_browser_import.py::test_happy_path_publishes_and_registers`, `library/tests/test_browser_import.py::test_rerun_after_crash_between_publish_and_register`, `library/tests/test_browser_import.py::test_same_content_rerun_is_already_published_row_untouched`, `library/tests/test_browser_import.py::test_different_content_conflict_refused_row_untouched`, `library/tests/test_browser_import.py::test_soft_deleted_row_rejected_never_resurrected`, `library/tests/contract/test_browser_import_postgres.py::test_ingest_cannot_resurrect_soft_deleted_track`, `library/tests/contract/test_browser_import_postgres.py::test_advanced_generation_with_different_manifest_is_rejected_unchanged`
+- Violation smell: writing the tracks row before the downloaded bytes are
+  re-hashed and audited, re-copying or overwriting an existing generation
+  whose manifest hash differs from the drop, or a rejection that leaves a
+  row or generation objects behind.
 
 ## D. Delivery-profile gates
 
@@ -460,13 +620,28 @@ MUST be under `tracks/`.
 - Violation smell: a wildcard `tracks/*` cookie where a file-scoped URL
   suffices, or signing a key outside `tracks/`.
 
+### E6 — node tokens are node-scoped
+
+A node authenticates every `/api/nodes/{id}/...` call with its own bearer
+token from `SHIZZLE_NODE_TOKENS`; the token must be the one configured for
+the `{id}` in the path (another node's valid token is a 401), it is compared
+in constant time, an unknown node, missing token and wrong token all answer
+401, an assignment accepts reports only from the node it names (409 for any
+other), and a node token opens no passcode-gated route. Tokens live only in the environment;
+the `nodes` row never stores one. The assignment payload is the only place
+a job's `source_ref` URL is delivered (E2 still holds for the public job API).
+
+Guard: `library/tests/test_nodes_api.py`
+(`test_heartbeat_requires_the_nodes_own_token`,
+`test_node_token_does_not_open_passcode_routes`).
+
 ## F. Migration / DB conventions
 
 ### F1 — single linear migration chain
 
 **Invariant:** Migrations MUST form a single linear chain with numeric prefix ==
 revision id, explicit `down_revision`, and a paired real downgrade.
-- Where: `library/alembic/versions/` — revisions 0001 through 0006
+- Where: `library/alembic/versions/` — revisions 0001 through 0007
 - Violation smell: a branch, a filename/revision mismatch, or a no-op
   downgrade.
 

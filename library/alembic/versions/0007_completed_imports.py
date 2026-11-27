@@ -4,8 +4,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0006_completed_imports"
-down_revision = "0005_job_artist"
+revision = "0007_completed_imports"
+down_revision = "0006_worker_nodes"
 branch_labels = None
 depends_on = None
 
@@ -26,6 +26,13 @@ def upgrade() -> None:
         sa.Column("next_retry_at", sa.DateTime(timezone=True)),
         sa.Column("error_code", sa.String(64)),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    )
+    op.create_index(
+        "ix_completed_imports_claim",
+        "completed_imports",
+        ["created_at", "next_retry_at", "lease_expires_at"],
+        postgresql_where=sa.text("status IN ('validating', 'publishing')"),
+        sqlite_where=sa.text("status IN ('validating', 'publishing')"),
     )
     op.create_table(
         "completed_import_events",

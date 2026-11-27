@@ -24,13 +24,11 @@
 - A thread is resolved only after its concern is fixed or disproved with
   concise evidence.
 - Findings are repaired in coherent batches, not one comment per commit.
-- The primary reviewer is the only automated reviewer whose final-candidate
-  completion gates readiness. Advisory reviewers are opportunistic inputs.
+- The default primary reviewer is `independent`: the workflow's own final-candidate
+  whole-diff review. Advisory reviewers are opportunistic inputs.
 - A rate-limited or unavailable advisory reviewer is recorded and skipped; the
   loop never waits for its quota to refill.
-- When Greptile is primary, 5/5 is the target. A 4/5 may pass only with no
-  reproduced P0/P1; 3/5 or lower cannot pass. The score is never used without
-  inspecting the findings and explicit merge recommendation.
+- Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply.
 - At most `{{MAX_ITERATIONS}}` repair batches may be pushed. Remaining P0/P1
   findings then produce a blocked human-adjudication outcome; P2 findings may
   be dispositioned to a follow-up ledger.

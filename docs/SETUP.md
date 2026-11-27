@@ -91,8 +91,8 @@ Worker settings and its image identity are documented in
    Compose expects an existing external Caddy certificate volume.
 3. Configure GitHub credentials, environment approval, SSH host trust and registry
    access following [Automation](AUTOMATION.md). Build the UI and digest-pinned
-   API image through the supported release workflow. Apply schema migration
-   `0005_job_artist` through the explicit deploy transaction.
+   API image through the supported release workflow. Apply schema migrations
+   (through `0006_worker_nodes`) through the explicit deploy transaction.
 4. Publish the lossless GPU image using `worker-image.yml`, configure/repoint the
    RunPod template, and verify endpoint configuration. Repointing intentionally
    parks the pool; enabling workers is a separate operational action.
@@ -111,9 +111,27 @@ directory for inspection. Do not substitute `up` for the release transaction:
 it does not take a rollback snapshot or migrate the database. API and orchestrator
 must use the same image and shared data volume.
 
+## Ingesting a dropped package
+
+A producer that finished a complete `shizzle-browser-v1` package can drop it
+under `imports/{source_ref}/` (see
+[contributing completed media](contributing-completed-media.md)). Ingest it on
+the VPS — the api image has ffmpeg/ffprobe and the same `.env` as the
+orchestrator:
+
+```bash
+cd /opt/shizzle/prod && docker compose -f compose.prod.yml exec api python -m shizzle_server.publish.browser_import --source-ref <ref>
+```
+
+The command validates, publishes immutably, and registers the track with no
+re-separation or re-encode; `--dry-run` validates only. Exit codes: 0 ok,
+2 rejected, 3 not ready.
+
 ## Supported boundaries
 
-URL acquisition remains unavailable. `local` mode requires FFmpeg/Demucs and
+URL acquisition runs only on worker nodes; set `SHIZZLE_NODE_TOKENS` in the
+production `.env` and start a node ([`node/README.md`](../node/README.md)).
+`local` mode requires FFmpeg/Demucs and
 retains reference processing; `test` additionally requires
 `SHIZZLE_ALLOW_TEST_PIPELINE=1` and produces no media. Neither provides accepted
 cloud publication under C7. The [VM harness](../deploy/vps/vm-test/README.md)

@@ -76,6 +76,8 @@ export interface JobStatus {
   stageTimings?: Record<string, number>;
   workerPhase?: string;
   workerHeartbeatAt?: string;
+  /** Who holds the current attempt: "runpod" or "node:<node-id>" (docs/WORKER-NODES.md). */
+  executor?: string | null;
   trackId?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -85,5 +87,22 @@ export interface JobEvent {
   event: string;
   detail?: Record<string, unknown>;
   createdAt: string;
+}
+
+/** A worker node as listed by GET /api/nodes (docs/WORKER-NODES.md). */
+export interface NodeInfo {
+  id: string;
+  displayName: string;
+  online: boolean;
+  disabled: boolean;
+  capabilities: Record<string, unknown>;
+  agentVersion?: string | null;
+  lastSeenAt?: string | null;
+  busyAssignmentId?: string | null;
+}
+
+export interface NodeListResponse {
+  nodes: NodeInfo[];
+  onlineSeconds: number;
 }
 

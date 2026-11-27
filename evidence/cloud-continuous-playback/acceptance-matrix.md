@@ -1,6 +1,9 @@
 # Completed cloud playback acceptance
 
-Status: complete.
+Status: complete (2026-08-05 acceptance record).
+
+The inventory and results below describe [that run](evidence.md), not current
+production state; see [HANDOFF](../../docs/HANDOFF.md).
 
 This is the concise result for the finished browser-delivery portion. Detailed
 troubleshooting evidence remains in `evidence.md`,

@@ -9,7 +9,7 @@
  *   (local profile). The player resolves both via resolveMediaUrl().
  */
 
-import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse } from '@/types/karaoke';
+import type { Track, StemsManifest, JobStatus, JobEvent, LibraryResponse, NodeInfo, NodeListResponse } from '@/types/karaoke';
 import { authFetch, setToken } from '@/lib/auth';
 
 interface AuthResult {
@@ -76,10 +76,62 @@ export async function uploadFile(file: File, metadata?: SourceMetadata): Promise
 }
 
 /**
+ * Submit a video URL for download and stem separation by a worker node
+ * (docs/WORKER-NODES.md). Title/artist are optional: the node fills them
+ * from the video's metadata when omitted.
+ */
+export async function submitUrl(
+  url: string,
+  metadata?: SourceMetadata
+): Promise<{ jobId: string; maxWaitSeconds?: number }> {
+  const body: Record<string, string> = { url: url.trim() };
+  const title = metadata?.title?.trim();
+  const artist = metadata?.artist?.trim();
+  if (title) body.title = title;
+  if (artist) body.artist = artist;
+
+  const response = await authFetch('/api/submit-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === 'string') detail = payload.detail;
+      // A 422 carries a list of field errors; surface the first one.
+      else if (Array.isArray(payload?.detail) && payload.detail.length > 0) {
+        const first = payload.detail[0];
+        const field = Array.isArray(first?.loc) ? first.loc[first.loc.length - 1] : undefined;
+        if (typeof first?.msg === 'string') detail = field ? `${field}: ${first.msg}` : first.msg;
+      }
+    } catch {
+      // keep statusText
+    }
+    throw new Error(`Submit failed: ${detail}`);
+  }
+
+  return response.json();
+}
+
+/** Fetch the worker-node registry for the pipeline dashboard. */
+export async function getNodes(signal?: AbortSignal): Promise<NodeInfo[]> {
+  const response = await authFetch('/api/nodes', { signal });
+  if (!response.ok) throw new Error(`Failed to fetch nodes: ${response.statusText}`);
+  const data: Partial<NodeListResponse> = await response.json();
+  // A malformed body is a failure, not an empty registry: the panel records
+  // it as "node status unavailable" rather than showing "no nodes".
+  if (!Array.isArray(data.nodes)) throw new Error('Failed to fetch nodes: unexpected response');
+  return data.nodes;
+}
+
+/**
  * Fetch library of completed tracks.
  */
-export async function getLibrary(): Promise<Track[]> {
-  const response = await authFetch('/api/library');
+export async function getLibrary(signal?: AbortSignal): Promise<Track[]> {
+  const response = await authFetch('/api/library', { signal });
 
   if (!response.ok) {
     throw new Error(`Failed to fetch library: ${response.statusText}`);
@@ -124,8 +176,8 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
  * fetchable URLs (same-origin `/cdn` for cloud tracks, relative for local).
  * @param trackId - Track id (slug).
  */
-export async function loadManifest(trackId: string): Promise<StemsManifest> {
-  const response = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/manifest`);
+export async function loadManifest(trackId: string, signal?: AbortSignal): Promise<StemsManifest> {
+  const response = await authFetch(`/api/tracks/${encodeURIComponent(trackId)}/manifest`, { signal });
 
   if (!response.ok) {
     throw new Error(`Failed to load manifest: ${response.statusText}`);

@@ -11,17 +11,16 @@ import base64
 import contextlib
 import hashlib
 import json
-import math
-import re
 import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from threading import Event
 from typing import Any, TypeVar
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,8 +29,16 @@ from ..db.models import CompletedImport, CompletedImportEvent, Track, utcnow
 from ..db.repository import track_id_for_import, track_location_problem
 from ..settings import Settings
 from .audio_quality import build_six_stem_mix_filter, parse_mix_quality
-from .delivery_profile import CANONICAL_STEM_IDS, STEM_INTER_DURATION_TOLERANCE_SEC
-from .lossless_intake import TRACK_BUDGET_BPS, IntakeError, audit_candidate, stage
+from .browser_import import (
+    ImportRejected,
+    expected_media_files,
+    validate_downloaded_bytes,
+    validate_import_manifest,
+    verify_landed_generation,
+)
+from .delivery_profile import CANONICAL_STEM_IDS
+from .lossless_intake import TRACK_BUDGET_BPS, stage
+from .media_audit import MediaAuditError, _run, audit_stop
 from .publisher import Publisher, generation_prefix, manifest_key
 
 T = TypeVar("T")
@@ -53,53 +60,18 @@ def validate_manifest(manifest: dict[str, Any]) -> str:
         encoded = canonical(manifest)
         if len(encoded) > MAX_MANIFEST_BYTES:
             raise ValueError()
-        if manifest["version"] != 3 or manifest["delivery_profile"] != "shizzle-browser-v1":
+        if not isinstance(manifest, dict) or validate_import_manifest(
+            manifest, max_duration_seconds=1800
+        ):
             raise ValueError()
-        duration = manifest["duration"]
+        if len(manifest["title"]) > 1024 or len(manifest.get("artist") or "") > 1024:
+            raise ValueError()
         if (
-            isinstance(duration, bool)
-            or not isinstance(duration, (int, float))
-            or not 0 < duration <= 1800
+            sum(size for size, _ in expected_media_files(manifest).values())
+            * 8
+            / manifest["duration"]
+            > TRACK_BUDGET_BPS
         ):
-            raise ValueError()
-        for key in ("title", "artist"):
-            if not isinstance(manifest[key], str) or not 0 < len(manifest[key]) <= 1024:
-                raise ValueError()
-        stems = manifest["stems"]
-        if len(stems) != 6 or {s["id"] for s in stems} != set(CANONICAL_STEM_IDS):
-            raise ValueError()
-        gains = [s["default_gain_db"] for s in stems]
-        if (
-            any(
-                isinstance(g, bool)
-                or not isinstance(g, (int, float))
-                or not math.isfinite(g)
-                or g > 0
-                for g in gains
-            )
-            or len(set(gains)) != 1
-        ):
-            raise ValueError()
-        if manifest["video"] != "video.mp4" or any(
-            s["file"] != f"stems/{s['id']}.m4a" for s in stems
-        ):
-            raise ValueError()
-        objects = manifest["integrity"]["objects"]
-        if len(objects) != 7 or {o["file"] for o in objects} != set(FILES):
-            raise ValueError()
-        for obj in objects:
-            size = obj["bytes"]
-            cap = (128 if obj["file"] == "video.mp4" else 64) * 1024**2
-            if (
-                type(size) is not int
-                or not 0 < size <= cap
-                or not re.fullmatch(r"[0-9a-f]{64}", obj["sha256"])
-            ):
-                raise ValueError()
-        if sum(o["bytes"] for o in objects) * 8 / duration > TRACK_BUDGET_BPS:
-            raise ValueError()
-        timeline = manifest["timeline"]
-        if timeline["start_ms"] != 0 or abs(timeline["duration_ms"] / 1000 - duration) > 0.001:
             raise ValueError()
         return hashlib.sha256(encoded).hexdigest()
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -120,8 +92,9 @@ def event(session: AsyncSession, item: CompletedImport, status: str) -> None:
 
 
 class ImportRepository:
-    def __init__(self, sf: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, sf: async_sessionmaker[AsyncSession], max_attempts: int = 3) -> None:
         self.sf = sf
+        self.max_attempts = max(1, max_attempts)
 
     async def create(self, manifest: dict[str, Any]) -> CompletedImport:
         digest = validate_manifest(manifest)
@@ -160,7 +133,7 @@ class ImportRepository:
             item = await session.scalar(
                 select(CompletedImport)
                 .where(
-                    CompletedImport.status.in_(["validating", "publishing"]),
+                    text("completed_imports.status IN ('validating', 'publishing')"),
                     or_(
                         CompletedImport.lease_expires_at.is_(None),
                         CompletedImport.lease_expires_at < now,
@@ -200,12 +173,15 @@ class ImportRepository:
             item.error_code = code
             item.lease_owner = None
             item.lease_expires_at = None
-            if retry:
+            if retry and item.attempt < self.max_attempts:
                 item.next_retry_at = utcnow() + timedelta(
                     seconds=min(300, 2 ** min(item.attempt, 8))
                 )
                 session.add(CompletedImportEvent(import_id=item.id, event="retry_scheduled"))
             else:
+                item.next_retry_at = None
+                if retry:
+                    item.error_code = "PUBLICATION_RETRIES_EXHAUSTED"
                 event(session, item, "failed")
 
 
@@ -283,14 +259,9 @@ def download_candidate(item: CompletedImport, s3: Any, bucket: str, directory: P
 
 def validate_candidate(item: CompletedImport, directory: Path) -> dict[str, Any]:
     try:
-        audits = audit_candidate(directory, item.manifest["duration"])
-        durations = [
-            float(a["probe"]["streams"][0]["duration"])
-            for a in audits
-            if a["artifact"].startswith("stems/")
-        ]
-        if max(durations) - min(durations) > STEM_INTER_DURATION_TOLERANCE_SEC:
-            raise InvalidCandidate("TIMELINE_FAILED")
+        audits = validate_downloaded_bytes(
+            directory, item.manifest, expected_media_files(item.manifest)
+        )
         stems = {s["id"]: s for s in item.manifest["stems"]}
         command = ["ffmpeg", "-nostdin", "-hide_banner", "-nostats"]
         for role in CANONICAL_STEM_IDS:
@@ -306,12 +277,19 @@ def validate_candidate(item: CompletedImport, directory: Path) -> dict[str, Any]
             "null",
             "-",
         ]
-        measured = subprocess.run(command, capture_output=True, text=True, timeout=1800, check=True)
+        measured = _run(command, timeout=1800)
+        measured.check_returncode()
         quality = parse_mix_quality(measured.stderr)
         if not quality.passed_pre_limiter:
             raise InvalidCandidate("AUDIO_QUALITY_FAILED")
         return {"objects": audits, "default_mix": quality.as_dict()}
-    except (IntakeError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+    except (
+        ImportRejected,
+        MediaAuditError,
+        ValueError,
+        KeyError,
+        subprocess.CalledProcessError,
+    ) as exc:
         if isinstance(exc, InvalidCandidate):
             raise
         raise InvalidCandidate("MEDIA_VALIDATION_FAILED") from None
@@ -328,18 +306,29 @@ def publish_candidate(item: CompletedImport, directory: Path, s3: Any, bucket: s
             body.close()
         if canonical(existing) != canonical(item.manifest):
             raise InvalidCandidate("PUBLISHED_GENERATION_CONFLICT")
-        return
-    reported = stage(s3, bucket, tid, 1, directory, item.manifest)
-    publisher.publish(tid, 1, reported)
+    else:
+        reported = stage(s3, bucket, tid, 1, directory, item.manifest)
+        publisher.publish(tid, 1, reported)
+    try:
+        verify_landed_generation(publisher, tid, 1, expected_media_files(item.manifest))
+    except ImportRejected as exc:
+        raise InvalidCandidate("GENERATION_UNVERIFIED") from exc
 
 
-async def blocking(function: Callable[..., T], *args: Any) -> T:
+async def blocking(function: Callable[..., T], *args: Any, interrupt_audit: bool = False) -> T:
     # Cancellation must not release a publication lock or delete a workspace
     # while its underlying thread can still write media.
-    work = asyncio.create_task(asyncio.to_thread(function, *args))
+    stop = Event() if interrupt_audit else None
+    token = audit_stop.set(stop)
+    try:
+        work = asyncio.create_task(asyncio.to_thread(function, *args))
+    finally:
+        audit_stop.reset(token)
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
+        if stop is not None:
+            stop.set()
         with contextlib.suppress(Exception):
             await work
         raise
@@ -362,7 +351,15 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
         with tempfile.TemporaryDirectory(prefix="completed-", dir=settings.data_dir) as temporary:
             directory = Path(temporary)
             await blocking(download_candidate, item, s3, settings.s3_media_bucket, directory)
-            validation = await blocking(validate_candidate, item, directory)
+            validation = await blocking(validate_candidate, item, directory, interrupt_audit=True)
+            # Commit progress so status readers can see it during S3 promotion.
+            async with repo.sf() as session, session.begin():
+                current = await session.get(CompletedImport, item.id, with_for_update=True)
+                if current is None or current.lease_owner != owner or current.status == "ready":
+                    return True
+                current.validation = validation
+                if current.status != "publishing":
+                    event(session, current, "publishing")
             # Hold the row lock over S3 promotion and DB registration. A stale
             # claimant cannot promote concurrently even if its lease expired.
             async with repo.sf() as session, session.begin():
@@ -378,8 +375,6 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
                     or track.manifest_key != manifest_key(tid, 1)
                 ):
                     raise InvalidCandidate("TRACK_CONFLICT")
-                current.validation = validation
-                event(session, current, "publishing")
                 await blocking(publish_candidate, current, directory, s3, settings.s3_media_bucket)
                 prefix = generation_prefix(tid, 1).rstrip("/")
                 key = manifest_key(tid, 1)
@@ -391,7 +386,7 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
                         Track(
                             id=tid,
                             title=manifest["title"],
-                            artist=manifest["artist"],
+                            artist=manifest.get("artist") or "",
                             duration_seconds=manifest["duration"],
                             generation=1,
                             s3_prefix=prefix,
@@ -401,6 +396,7 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
                     )
                 event(session, current, "ready")
                 current.error_code = None
+                current.next_retry_at = None
                 current.lease_owner = None
                 current.lease_expires_at = None
     except InvalidCandidate as exc:

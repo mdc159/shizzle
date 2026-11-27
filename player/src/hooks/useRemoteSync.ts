@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@/stores/useStore';
+import { silentReauth } from '@/lib/auth';
 import type { StemId } from '@/types/karaoke';
 
 const STEMS: StemId[] = ['vocals', 'drums', 'bass', 'guitar', 'piano', 'shizzle'];
@@ -44,6 +45,9 @@ type RemoteMessage = Command | StateSnapshot | SyncRequest;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 8000;
 const PUBLISH_THROTTLE_MS = 60;
+/** Close code the server uses when the device-token cookie is missing/bad
+ * (see library/src/shizzle_server/api/remote.py). */
+const WS_AUTH_CLOSE_CODE = 4401;
 
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -232,14 +236,36 @@ export function useRemoteSync(role: 'player' | 'remote') {
         }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         synced = false;
         setConnected(false);
         socketRef.current = null;
-        if (!disposed) {
-          reconnectTimer = window.setTimeout(connect, reconnectDelay);
-          reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        if (disposed) return;
+
+        if (event.code === WS_AUTH_CLOSE_CODE) {
+          // The device-token cookie the upgrade carried is dead (expired, or
+          // revoked by a passcode rotation / AUTH_VERSION bump — invariant
+          // E4). Reconnecting immediately would just hammer the socket with
+          // the same dead cookie. Try one silent re-auth first — deduped
+          // with any in-flight attempt from authFetch — so a fresh cookie is
+          // set before the next attempt; if the server actually rejects it
+          // (a real passcode is configured), the next protected API call's
+          // own 401 handling surfaces the gate.
+          silentReauth()
+            .catch(() => 'error' as const)
+            .then((result) => {
+              if (disposed) return;
+              // Fresh cookie: reconnect promptly. Otherwise back off fully.
+              reconnectTimer = window.setTimeout(
+                connect,
+                result === 'ok' ? RECONNECT_BASE_MS : RECONNECT_MAX_MS,
+              );
+            });
+          return;
         }
+
+        reconnectTimer = window.setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
       };
       socket.onerror = () => socket?.close();
     };

@@ -1,6 +1,11 @@
 # Browser contract
 
-Status: accepted.
+Status: accepted (2026-08-05 historical contract).
+
+This records the contract used by [that acceptance run](evidence.md), not the
+current sync engine. The audio-master redesign now aligns stems with DelayNodes
+and moves the silent video to their audible position; see
+[playback troubleshooting](../../docs/playback-troubleshooting.md).
 
 Shizzle exposes one standards-based browser contract defined by required web
 capabilities rather than client hardware or vendor-specific media routes.

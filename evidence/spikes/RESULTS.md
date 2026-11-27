@@ -34,9 +34,10 @@ Current project status and next work are in `../../README.md` and
 
 ## Current boundary
 
-The 27-track playback library and `shizzle-browser-v1` delivery path are
-finished. The active work is URL/upload acquisition and dependable cloud GPU
-separation into the exact `lossless-stem-v1` package defined in
-[`../../interfaces/lossless-stem-v1/spec.md`](../../interfaces/lossless-stem-v1/spec.md).
+The 27-track acceptance run is recorded in
+[`../cloud-continuous-playback/evidence.md`](../cloud-continuous-playback/evidence.md)
+(2026-08-05), not a claim about current production inventory. Upload and cloud
+GPU separation are implemented; URL acquisition remains a stub. See
+[`../../docs/HANDOFF.md`](../../docs/HANDOFF.md) for current work.
 Experiments in this directory are consulted only when diagnosing a matching
 issue.

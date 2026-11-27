@@ -56,21 +56,6 @@ def _seed_package(s3, stem_sizes: dict[str, int], *, with_handoff: bool = True) 
 
 
 @pytest.fixture
-def fake_aws_credentials(monkeypatch):
-    """Keep this machine's real AWS creds + R2 endpoint override away from moto."""
-    for var, value in {
-        "AWS_ACCESS_KEY_ID": "testing" * 5,
-        "AWS_SECRET_ACCESS_KEY": "testing" * 6,
-        "AWS_SESSION_TOKEN": "testing",
-        "AWS_DEFAULT_REGION": "us-east-1",
-        "AWS_REGION": "us-east-1",
-    }.items():
-        monkeypatch.setenv(var, value)
-    for var in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_PROFILE"):
-        monkeypatch.delenv(var, raising=False)
-
-
-@pytest.fixture
 def s3(fake_aws_credentials):
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
@@ -216,6 +201,12 @@ def test_derive_video_caps_and_probes_synthetic_fixture(tmp_path: Path):
         text=True,
     ).stdout.strip())
     assert abs(actual - 0.75) <= 0.05
+    # Duration-only checks missed an invalid avg_frame_rate in a real cloud
+    # acceptance run. Exercise the publication gate on the encoded artifact.
+    from shizzle_server.publish.media_audit import audit_video_file
+
+    audit = audit_video_file(out, artifact="video.mp4", expected_duration=0.75)
+    assert audit["passed"], audit["issues"]
 
 
 def _write_verification_package(root: Path, *, sample_count: int = 10) -> dict:

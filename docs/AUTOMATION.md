@@ -1,7 +1,8 @@
 # Shizzle Automation
 
 The review-and-deploy automation package: CI gates, image publishing, gated
-VPS deploys, and how the three AI reviewers stay aligned on
+VPS deploys, and how the advisory AI reviewers (CodeRabbit, cubic) and the
+convergence workflow's own review stay aligned on
 [INVARIANTS.md](INVARIANTS.md). This document describes the checked-in workflows under `.github/workflows/`.
 GitHub branch rules, environment reviewers, secrets, and live endpoint settings
 are configured outside these files and must be verified when bootstrapping.
@@ -63,12 +64,26 @@ NOT GitHub secrets — they live only in the gitignored `.env` and mounted files
 under `/opt/shizzle/prod` per invariant E3. The orchestrator defaults to
 `SHIZZLE_PIPELINE=cloud`; with `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` unset
 the stack runs in the valid parked-cloud state — the orchestrator starts and
-its heartbeat keeps /api/health green, and new jobs fail closed at dispatch
-with `RUNPOD_DISPATCH_FAILED`. A job already dispatched to RunPod when
+its service-liveness heartbeat keeps /api/health green, and new jobs fail
+closed at dispatch with `RUNPOD_DISPATCH_FAILED`. That heartbeat runs on its
+own schedule independent of job processing (B15), so a healthy but long job
+stage (source transfer, package verification, AAC/video derivation) cannot
+starve it and falsely trip the deploy health gate below. A job already
+dispatched to RunPod when
 credentials disappear parks instead: its polls fail retryable and the stall
 watchdog does not fire while the client is unconfigured, so the live remote
 job reconciles on the first poll after credentials return. Set both
 variables in the production `.env` when the RunPod path is connected.
+
+The queue-timeout watchdog (`RUNPOD_QUEUE_TIMEOUT_SECONDS`, default 900s)
+checks RunPod endpoint health before cancelling a job stuck `IN_QUEUE`: a
+worker that is allocated and still pulling its image reports `initializing`,
+and the wait extends up to `RUNPOD_COLD_START_SECONDS` (default 1800s)
+instead of cancelling and redispatching a fresh worker onto the same endpoint
+(invariant B13, hardened after the 2026-09-24 production cold-start
+incident). The running-stall watchdog (`RUNPOD_WORKER_STALL_SECONDS`, default
+300s) is measured from a heartbeat established on the queued-to-running
+transition, never from queue age (invariant B14).
 
 ## 3. Deploy procedure
 
@@ -88,7 +103,14 @@ variables in the production `.env` when the RunPod path is connected.
 2. Job `deploy` pauses at the GitHub Environment `production` gate until
    mdc159 approves. The workflow rechecks that `master` still names the same
    reviewed SHA after approval; if `master` advanced while approval was pending,
-   the stale run exits cleanly without shipping.
+   the stale run exits cleanly without shipping. While a run waits at the gate
+   it still occupies the `ci-refs/heads/master` concurrency group (master runs
+   are never cancelled in progress), so GitHub holds at most one further run
+   pending behind it and replaces that pending run whenever a newer master
+   merge arrives. To ship the newest merge: cancel the run waiting at the gate
+   (`gh run cancel <id>`), let the pending run start, and approve that one; it
+   carries every earlier merge. Approving the older waiting run first spends an
+   approval on a deploy that will stale-skip.
 3. After approval, the deploy SSHes to the VPS (using the pinned host key),
    records the prior files and database revision, sets
    `SHIZZLE_API_IMAGE=<tag>@<digest>`, validates the staged Compose config,
@@ -129,18 +151,14 @@ normal path — deploys never ship source to the box.
 
 ## 4. Reviewer alignment
 
-All three reviewers consume the same source of truth:
+Active reviewers consume the same source of truth:
 [INVARIANTS.md](INVARIANTS.md).
 
 - **CodeRabbit** — configured by [`.coderabbit.yaml`](../.coderabbit.yaml):
   `path_instructions` mirror the invariant series per area, and the
   `knowledge_base.code_guidelines` block makes CodeRabbit ingest
   `docs/INVARIANTS.md` directly, so reviews cite invariant IDs ("violates B3").
-- **Greptile** — the primary whole-diff validator. `.greptile/config.json`
-  limits it to logic/syntax findings, points it at repository context, and
-  disables review-on-every-push. `.greptile/files.json` supplies this document
-  and `INVARIANTS.md` as canonical context. Trigger the final review manually
-  only after a coherent candidate passes CI and failure-path validation.
+- **Greptile (retired)**: Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply.
 - **cubic** — configured through its dashboard custom rules. The seven paste
   texts below are the standalone versions of the same path instructions; the
   owner pastes each into the dashboard.
@@ -152,11 +170,10 @@ All three reviewers consume the same source of truth:
   for quota or require a final-head CodeRabbit run.
 - Cubic is advisory. Consume available P0/P1 findings, but do not wait for its
   completion or restart the loop for P2 polish.
-- Greptile is primary. After batching all validated intake findings and passing
-  required CI, manually trigger one final whole-diff review. Target confidence
-  5/5. Confidence 4/5 is acceptable only when there are no reproduced P0/P1
-  findings and every P2 has an explicit disposition. A score of 3/5 or lower,
-  or Greptile's explicit do-not-merge recommendation, is not ready.
+- The workflow performs an independent whole-diff review of the final candidate
+  after required CI. No Greptile review, score, or approval gates readiness.
+  Require zero reproduced P0/P1 findings, no required human finding, and
+  evidence-backed dispositions for every finding.
 - Allow at most two repair batches. If a reproduced P0/P1 remains after the
   confirmation review, stop for human adjudication instead of greplooping.
 - Reviewer findings are deduplicated into one ledger and fixed in batches. The
@@ -197,7 +214,12 @@ swallows (B7). Park frees the lease without consuming an attempt or appending
 an event (B9). Every unresolvable error path fails closed (B5, B10) and every
 stage handler must be idempotent under crash-rerun (B11). Heartbeats are
 written only on phase change (B8); a RunPod job already marked failed
-dispatches fresh under a new idempotency key (B12).
+dispatches fresh under a new idempotency key (B12). A queue timeout consults
+endpoint health and waits out a cold start (initializing workers) up to the
+cold-start budget before cancelling (B13), and the queued-to-running
+transition establishes a fresh running heartbeat before any stall check (B14).
+The service liveness heartbeat runs on its own task, independent of job
+processing, and a failed write leaves it stale rather than faking it (B15).
 ```
 
 <!-- Mirrored copy: duplicates the library/src/shizzle_server/db/repository.py
@@ -283,14 +305,20 @@ The `library` CI job runs both shell failure-path suites with stubbed Docker,
 registry, and RunPod calls. The required `postgres-contract` job uses a real
 Postgres service, applies Alembic migrations, exercises concurrency/crash
 contracts, and downgrades the head migration by one revision before upgrading
-again. The `player` job builds, lints, and runs only the mocked
-`e2e/library-scroll.spec.ts` browser test. These checks do not replace the
+again. The `player` job builds, lints, and runs only the mocked browser specs
+listed in its Playwright test step in
+[ci.yml](../.github/workflows/ci.yml). These checks do not replace the
 [real playback tests](playback-troubleshooting.md) or prove live deployment
 rollback against a real Docker stack.
 
 Current checked-in limits:
 
 - `mypy src` in the library job is informational (`continue-on-error: true`).
+- CI jobs run on the pinned `ubuntu-24.04` image and `stemsplit` pins its
+  interpreter to 3.11 (the worker image's Python). The `ubuntu-latest` label
+  moved to 26.04 / Python 3.14 on 2026-11-05 and broke both the stemsplit
+  tests (numpy 1.26.4 built from source) and the Playwright install;
+  retiring the pin needs both checked again.
 - Player `knip` is configured but not run in CI.
 - The player check installs Chromium from the Playwright browser CDN on each
   run; that dependency can block CI during an outage.

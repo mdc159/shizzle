@@ -287,3 +287,46 @@ test('visible library refreshes metadata without fetching media or clearing sear
   await page.clock.fastForward(60_001);
   expect(catalogRequests).toBe(2);
 });
+
+test('reopening fetches a fresh catalog and background failure stays quiet', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.clock.install();
+  await page.addInitScript(() => localStorage.setItem('shizzle_token', 'e2e-token'));
+  await page.route('**/api/media/session', route => route.fulfill({ json: { cloudfront: false } }));
+  let requests = 0;
+  let releaseOldRequest: () => void = () => {};
+  const oldRequest = new Promise<void>(resolve => { releaseOldRequest = resolve; });
+  await page.route('**/api/library', async route => {
+    requests += 1;
+    if (requests === 1) {
+      await oldRequest;
+      await route.abort().catch(() => {});
+      return;
+    }
+    if (requests > 2) {
+      await route.fulfill({ status: 503 });
+      return;
+    }
+    await route.fulfill({ json: { tracks: tracks.slice(0, 2), total: 2 } });
+  });
+
+  try {
+    await page.goto('/');
+    const library = page.getByRole('button', { name: 'Library', exact: true });
+    await library.click();
+    await expect.poll(() => requests).toBe(1);
+    await page.keyboard.press('Escape');
+    await library.click();
+    await expect(page.getByTestId('library-track-row')).toHaveCount(2);
+
+    const failedPoll = page.waitForResponse(response =>
+      response.url().endsWith('/api/library') && response.status() === 503
+    );
+    await page.clock.fastForward(30_001);
+    await failedPoll;
+    await expect(page.getByTestId('library-track-row')).toHaveCount(2);
+    await expect(page.getByText(/Failed to fetch library/)).toHaveCount(0);
+  } finally {
+    releaseOldRequest();
+  }
+});

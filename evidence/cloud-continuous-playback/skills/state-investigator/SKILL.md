@@ -5,6 +5,10 @@ description: Read-only investigation of Shizzle's current cloud playback impleme
 
 # Cloud Playback State Investigator
 
+Historical role from the 2026-08-05 [orchestration receipt](../../orchestration-receipt.md).
+The source order and numbered goal references below belong to that run; use
+[HANDOFF](../../../../docs/HANDOFF.md) for current state, not this archived role.
+
 ## Role
 
 Establish the repository's actual implementation and evidence state against `evidence/cloud-continuous-playback/goal.md`, then identify the smallest safe next vertical slice.

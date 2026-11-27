@@ -89,6 +89,24 @@ reviews:
         number or locally redefined tolerance (D1-D4). delivery_profile.py must
         stay a pure policy module with no boto3/ffmpeg/db imports (D7); at most
         one common attenuation, never per-stem and never a boost (D3).
+    - path: "library/src/shizzle_server/publish/browser_import.py"
+      instructions: >
+        Drop-box ingest for completed shizzle-browser-v1 packages (issue #45).
+        Enforce C1-C8 and E3 from docs/INVARIANTS.md: the dropped manifest is
+        never trusted - every media object is downloaded and re-hashed against
+        integrity.objects before anything is copied (A4), then run through the
+        full delivery-profile audit with preserve_existing_lossy=True (the VPS
+        never re-encodes dropped bytes, so sparse-stem audio-bitrate-low is a
+        warning, not a rejection - issue #22); staging copies are server-side
+        only with the manifest copied last (C2); publish no-ops on an existing
+        generation manifest (C1) and an existing generation is a completed
+        retry ONLY when its published manifest hash equals the dropped
+        manifest's hash - anything else is TRACK_CONFLICT, never an overwrite
+        or a row mutation (C8); the tracks row is written only after every
+        gate passes (C6/C8) and can never resurrect a soft-deleted row (C5).
+        source_ref must match ^(youtube|sha256)-[A-Za-z0-9_-]{6,128}$ before
+        any S3 call. Credentials, bucket listings, and full S3 keys never
+        appear in output or logs (E3).
     - path: "library/alembic/**"
       instructions: >
         Database migrations. Enforce the F series from docs/INVARIANTS.md: a

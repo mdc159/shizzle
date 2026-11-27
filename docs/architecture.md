@@ -9,20 +9,28 @@ Known deviations and bugs are tracked in [Review](REVIEW.md).
 | Component | Implementation | Responsibility |
 |---|---|---|
 | API | `library/src/shizzle_server/api/` | Uploads, passcode/token authentication, jobs, library, manifests with signed media URLs, telemetry, WebSocket relay |
-| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats |
-| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, submits/polls RunPod, reconciles dispatch receipts, verifies and publishes |
-| GPU worker | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source, extracts audio, separates with htdemucs_6s, writes lossless package and progress |
+| Durable state | `library/src/shizzle_server/db/` | Postgres jobs, stage/event ledger, leases, tracks, active-generation pointer, heartbeats, nodes and node assignments |
+| Orchestrator | `library/src/shizzle_server/orchestrator/` | Claims work, transfers sources, assigns downloads and separations to worker nodes, submits/polls RunPod as fallback, reconciles dispatch receipts, verifies and publishes |
+| GPU separation | `stemsplit/lossless_handler.py`, `lossless_worker.py` | Downloads source from S3, extracts audio, separates with htdemucs_6s, writes lossless package and progress; run by a worker node or the RunPod image |
+| Worker nodes | `node/` (`shizzle-node`) on the Mac mini and the Dell 9530 | Poll the node API over HTTPS; download YouTube links with yt-dlp; run the separation above on their own GPU ([Worker nodes](WORKER-NODES.md)) |
 | Delivery policy | `library/src/shizzle_server/publish/` | Verifies lossless bytes, derives AAC/video, measures common attenuation, audits, stages and promotes |
 | Media storage | Private S3 | Sources, per-dispatch packages, staged and published generations |
 | Edge delivery | CloudFront | Signed access to published objects, Range support, CORS |
-| Browser | `player/src/` | Video-clock playback, six-stem mixing, health sensing, remote and dashboard pages |
+| Browser | `player/src/` | Audio-master-aligned playback, six-stem mixing, health sensing, remote and dashboard pages |
 
-The [README system diagram](../README.md#system-diagram) maps these boundaries.
+The [README system diagram](../README.md#where-everything-runs) maps these boundaries.
 `ingest/` is documentation, not a deployed process. The app origin is Caddy on
 the VPS; CloudFront is the media origin. Same-origin `/cdn` proxy delivery is a
 retained fallback, not the normal seven-object media path.
 
 ## Upload to publication
+
+This lane shows RunPod as the executor. When a worker node takes the
+separation, the node polls `/api/nodes/*` for its assignment instead of
+RunPod delivering a job, and writes the same `dispatch.json`, stems and
+`handoff.json` under the same attempt prefix; the orchestrator's
+reconciliation and everything from verification on are identical. Routing
+and the URL download lane are in [Worker nodes](WORKER-NODES.md).
 
 ```mermaid
 sequenceDiagram
@@ -82,21 +90,59 @@ also start before submission confirmation reaches Postgres. Completion is detect
 S3 reconciliation, not an inbound callback. The receipt can recover an accepted
 job whose submission response or database confirmation was lost.
 
+## Drop-box import
+
+A producer that has already finished a complete `shizzle-browser-v1`
+package (six AAC stems, silent video, v3 manifest — for example the Mac
+pipeline) drops it under `imports/{source_ref}/` and the VPS ingests it with
+no re-separation, no source download and no re-encode. Client contract:
+[contributing completed media](contributing-completed-media.md).
+
+```mermaid
+sequenceDiagram
+    participant M as Producer (Mac)
+    participant S as Private S3
+    participant I as VPS ingest
+    participant D as Postgres
+    participant P as /api/library
+    M->>S: upload stems/ + video.mp4
+    M->>S: upload manifest.json LAST (drop complete)
+    I->>S: head imports/{ref}/manifest.json
+    Note over I: not ready until the manifest exists (A1/C2 rule)
+    I->>S: read manifest, list prefix, download seven media objects
+    Note over I: sha256 re-proof, delivery audit, spread/bitrate/stem gates (C8)
+    I->>S: server-side copy into tracks/{id}/{gen}/staging/, manifest last
+    I->>S: Publisher verify staging, promote to tracks/{id}/{gen}/ (C1-C3)
+    I->>D: upsert_imported row (deterministic uuid5 id, C4/C5)
+    I->>S: delete staging + dropped media, write imports/{ref}/result.json
+    P->>D: list/read the registered track
+```
+
+Sources: `publish/browser_import.py`, `publish/publisher.py`,
+`publish/media_audit.py`, `db/repository.py`, and
+`ops/drop_browser_package.py`.
+
+Reruns converge: staging copies are idempotent, publish no-ops on an existing
+generation manifest, and an existing generation counts as a completed retry
+only when its published manifest hash equals the dropped manifest's hash —
+otherwise the drop is refused as `TRACK_CONFLICT` without touching the row.
+
 ## Job state and recovery
 
 ```mermaid
 stateDiagram-v2
     [*] --> pending
     pending --> downloading
-    downloading --> dispatched: cloud upload saved to S3
-    dispatched --> dispatched: park while queued or running
+    downloading --> dispatched: source in S3 (upload copied, or node source.json)
+    downloading --> downloading: park while a node downloads or none is online
+    dispatched --> dispatched: park while queued or running on a node or RunPod
     dispatched --> verifying: complete package selected
     downloading --> splitting: local or test mode only
     splitting --> verifying: reference pipeline result
     verifying --> publishing: verification passed
     publishing --> ready: cloud publication transaction
     ready --> [*]
-    downloading --> failed: URL stub or terminal source error
+    downloading --> failed: NO_NODE_AVAILABLE, YTDLP_BLOCKED, or terminal source error
     dispatched --> failed: terminal error or retry budget exhausted
     splitting --> failed: terminal error or retry budget exhausted
     verifying --> failed: invalid package or retry budget exhausted
@@ -122,6 +168,7 @@ the [review findings](REVIEW.md) cover stale-owner and liveness defects.
 
 ```text
 sources/<track-id>/source.mp4
+sources/<track-id>/source.json        (node downloads only, written last)
 tracks/<track-id>/1/separation/attempts/<sha256-idempotency-key>/
   dispatch.json
   handoff.json
@@ -165,15 +212,16 @@ sequenceDiagram
     C->>S: Fetch video on cache miss
     Note over B: Create revocable video Blob
     B->>B: User Play starts video and six stem elements
-    Note over B: Measure each stem against video clock, correct drift and recover stalls
+    Note over B: Align stems with per-stem delays, move video to their audible position, recover stalls
     B->>A: Credential-free playback telemetry
 ```
 
 Six independent decoders feed per-stem gains, a master gain with fixed -3 dB
 headroom, a DynamicsCompressor, and post-compressor measurement. Sharing one
 AudioContext does not make their clocks identical. The engine measures each
-stem separately. The video is the master timeline; AAC remains streamed, while
-only one video Blob is retained and revoked on track change.
+stem separately. The stems are the audible master timeline (audio-master
+alignment); AAC remains streamed, while only one video Blob is retained and
+revoked on track change.
 
 `window.__shizzlePlaybackHealth.getMetrics()` exposes read-only health,
 per-stem skew/PCM, output PCM, limiter reduction and bounded incidents. The

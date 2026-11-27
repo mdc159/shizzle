@@ -8,7 +8,8 @@
 import type { StemId } from '@/types/karaoke';
 
 export interface StemMetrics {
-  /** Stem clock minus video clock, in ms. Null when no video is attached. */
+  /** Audible stem clock (element time minus the stem's alignment delay)
+   * minus video clock, in ms. Null when no video is attached. */
   skewMs: number | null;
   /** HTMLMediaElement.readyState (4 = HAVE_ENOUGH_DATA). */
   readyState: number;
@@ -17,8 +18,13 @@ export interface StemMetrics {
   /** Count of 'stalled' events since load. */
   stalledEvents: number;
   playbackRate: number;
-  /** Hard-seek corrections applied to this stem since load. */
+  /** Hard-seek corrections applied to this stem's element since load (user
+   *  seeks and recoveries; the while-playing alignment never seeks a stem). */
   hardSeeks: number;
+  /** Web Audio delay currently holding this stem back to line it up with
+   *  the latest-running stem; the audible position is the element clock
+   *  minus this delay. */
+  delayMs: number;
   /** User fader gain in linear terms; 0 when silenced by mute/solo. Excludes
    * the manifest trim — the rendered GainNode holds dbToLinear(trimDb) * this. */
   gainLinear: number;
@@ -46,10 +52,15 @@ export interface LimiterMetrics {
 
 export interface PlaybackMetrics {
   stems: Partial<Record<StemId, StemMetrics>>;
-  /** Sync-loop ticks that applied a playbackRate nudge (whole-mix, by design). */
+  /** Sync-loop ticks that applied a playbackRate nudge. The nudge tier is
+   *  gone — a playing stem is never rate-changed — so this stays 0; the
+   *  field is kept for telemetry-shape stability. */
   nudgeTicks: number;
   /** Times the stall policy bailed out and paused playback. */
   stallBailouts: number;
+  /** Alignment seeks of the silent video to the stems' audible position
+   *  since load — the while-playing correction. */
+  videoSeeks: number;
   /** User master gain in dB (headroom excluded). */
   masterGainDb: number;
   /** Fixed headroom applied under the user gain (AAC overshoot, spike 0.4). */

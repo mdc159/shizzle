@@ -11,12 +11,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.imports import router as imports_router
+from .api.nodes import router as nodes_router
 from .api.remote import router as remote_router
 from .api.routes import router
 from .db import create_engine, create_session_factory, init_db
 from .db.repository import (
     HeartbeatRepository,
     JobRepository,
+    NodeRepository,
     PlaybackTelemetryRepository,
     TrackRepository,
 )
@@ -44,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.track_repo = TrackRepository(session_factory)
         app.state.playback_telemetry_repo = PlaybackTelemetryRepository(session_factory)
         app.state.heartbeat_repo = HeartbeatRepository(session_factory)
+        app.state.node_repo = NodeRepository(session_factory)
 
         if settings.shizzle_pipeline == "local":
             missing = check_dependencies()
@@ -85,6 +88,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(imports_router)
     app.include_router(remote_router)
+    app.include_router(nodes_router)
     return app
 
 

@@ -1,8 +1,10 @@
 """Completed imports preserve bytes and converge without a source pipeline."""
 
+import asyncio
 import base64
 import copy
 import hashlib
+import sys
 from datetime import timedelta
 
 import boto3
@@ -154,13 +156,69 @@ async def test_publication_then_registration_failure_recovers(
 
     monkeypatch.setattr(completed, "publish_candidate", publish_then_die)
     await completed.process_one(repo, settings, "first")
-    assert (await repo.get(item.id)).status == "validating"
+    assert (await repo.get(item.id)).status == "publishing"
     monkeypatch.setattr(completed, "publish_candidate", original)
     async with session_factory() as session, session.begin():
         row = await session.get(CompletedImport, item.id)
         row.next_retry_at = utcnow() - timedelta(seconds=1)
     await completed.process_one(repo, settings, "second")
     assert (await repo.get(item.id)).status == "ready"
+
+
+async def test_publication_stops_after_retry_budget(
+    session_factory, settings, storage, manifest, monkeypatch
+):
+    repo = ImportRepository(session_factory, max_attempts=2)
+    item = await repo.create(manifest)
+    put_inputs(storage, settings, item)
+    await repo.finalize(item.id)
+    monkeypatch.setattr(completed, "validate_candidate", lambda *_args: None)
+
+    def transient_failure(*_args):
+        raise OSError("temporary storage failure")
+
+    monkeypatch.setattr(completed, "publish_candidate", transient_failure)
+    assert await completed.process_one(repo, settings, "worker")
+    row = await repo.get(item.id)
+    assert row.status == "publishing"
+    assert row.next_retry_at is not None
+    assert not await completed.process_one(repo, settings, "worker")
+    async with session_factory() as session, session.begin():
+        row = await session.get(CompletedImport, item.id)
+        row.next_retry_at = utcnow() - timedelta(seconds=1)
+
+    assert await completed.process_one(repo, settings, "worker")
+    row = await repo.get(item.id)
+    assert (row.status, row.attempt, row.error_code) == (
+        "failed",
+        2,
+        "PUBLICATION_RETRIES_EXHAUSTED",
+    )
+    assert row.next_retry_at is None
+    assert not await completed.process_one(repo, settings, "worker")
+
+
+async def test_cancelling_validation_stops_active_media_command(tmp_path):
+    marker = tmp_path / "started"
+    command = [
+        sys.executable,
+        "-c",
+        "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(60)",
+        str(marker),
+    ]
+
+    def validate():
+        completed._run(command, timeout=120)
+
+    task = asyncio.create_task(completed.blocking(validate, interrupt_audit=True))
+    try:
+        async with asyncio.timeout(5):
+            while not marker.exists():
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
 
 
 @pytest.mark.parametrize("deleted,generation", [(True, 1), (False, 2)])
@@ -236,13 +294,13 @@ def test_actual_completed_media_is_decoded_and_measured(tmp_path, manifest):
             "-f",
             "lavfi",
             "-i",
-            "anoisesrc=color=white:amplitude=0.02:sample_rate=44100:duration=3",
+            "anoisesrc=color=white:amplitude=0.02:sample_rate=48000:duration=3",
             "-ac",
             "2",
             "-c:a",
             "aac",
             "-b:a",
-            "256k",
+            "128k",
             "-movflags",
             "+faststart",
             str(audio),
@@ -281,6 +339,7 @@ def test_actual_completed_media_is_decoded_and_measured(tmp_path, manifest):
     )
     manifest["duration"] = 3
     manifest["timeline"]["duration_ms"] = 3000
+    manifest["timeline"]["sample_rate_hz"] = 48000
     for obj in manifest["integrity"]["objects"]:
         data = (tmp_path / obj["file"]).read_bytes()
         obj.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
@@ -294,7 +353,10 @@ def test_actual_completed_media_is_decoded_and_measured(tmp_path, manifest):
         assert hashlib.sha256((tmp_path / obj["file"]).read_bytes()).hexdigest() == obj["sha256"]
 
 
-async def test_catalog_metadata_overrides_stored_manifest(settings, manifest, monkeypatch):
+@pytest.mark.parametrize("catalog_artist", ["Corrected artist", ""])
+async def test_catalog_metadata_overrides_stored_manifest(
+    settings, manifest, monkeypatch, catalog_artist
+):
     from shizzle_server.api import media
     from shizzle_server.db import create_session_factory
     from shizzle_server.db.repository import track_id_for_import
@@ -309,7 +371,7 @@ async def test_catalog_metadata_overrides_stored_manifest(settings, manifest, mo
                 Track(
                     id=identifier,
                     title="Corrected title",
-                    artist="Corrected artist",
+                    artist=catalog_artist,
                     generation=1,
                     duration_seconds=10,
                     s3_prefix=f"tracks/{identifier}/1",
@@ -318,7 +380,9 @@ async def test_catalog_metadata_overrides_stored_manifest(settings, manifest, mo
             )
         async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client:
             result = (await client.get(f"/api/tracks/{identifier}/manifest")).json()
-            assert result["title"] == "Corrected title" and result["artist"] == "Corrected artist"
+            assert result["title"] == "Corrected title" and result["artist"] == (
+                catalog_artist or manifest["artist"]
+            )
             assert result["integrity"] == manifest["integrity"]
 
 

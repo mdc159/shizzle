@@ -32,7 +32,15 @@ Configure a serverless endpoint/template with:
 On the VPS, set `SHIZZLE_PIPELINE=cloud`, `RUNPOD_API_KEY`, and
 `RUNPOD_ENDPOINT_ID` in `/opt/shizzle/prod/.env`. Endpoint allocation is a
 separate setting: a zero worker maximum prevents cloud progress even when
-credentials are valid. The orchestrator also has queue/stall watchdogs.
+credentials are valid. The orchestrator also has queue/stall watchdogs
+(`RUNPOD_QUEUE_TIMEOUT_SECONDS`, `RUNPOD_WORKER_STALL_SECONDS`). A job stuck
+`IN_QUEUE` past the queue timeout is checked against RunPod endpoint health
+before being cancelled: if a worker is still `initializing` (allocated, still
+pulling the image), the wait extends up to `RUNPOD_COLD_START_SECONDS`
+(default 1800s) instead of cancelling and redispatching under a new key onto
+the same endpoint, which would just restart the same wait (invariant B13).
+The running-stall watchdog measures from a heartbeat established fresh on the
+queued-to-running transition, not from queue age (invariant B14).
 
 ## Conditional receipt writes
 

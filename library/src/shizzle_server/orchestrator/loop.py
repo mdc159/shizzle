@@ -20,7 +20,12 @@ import uuid
 
 from ..db import create_engine, create_session_factory, init_db
 from ..db.models import RUNNABLE_STAGES, Job, JobStage
-from ..db.repository import HeartbeatRepository, InvalidTransition, JobRepository
+from ..db.repository import (
+    HeartbeatRepository,
+    InvalidTransition,
+    JobRepository,
+    NodeRepository,
+)
 from ..errors import ErrorCode, StageError
 from ..settings import Settings, get_settings
 from .pipelines import build_pipeline
@@ -50,6 +55,7 @@ class Orchestrator:
         sf = create_session_factory(self.engine)
         self.jobs = JobRepository(sf)
         self.heartbeats = HeartbeatRepository(sf)
+        self.nodes = NodeRepository(sf)
         self.pipeline = build_pipeline(self.settings)
         self.runpod = (
             HttpRunPodClient(
@@ -85,7 +91,10 @@ class Orchestrator:
 
     async def _run_imports(self) -> None:
         from ..publish.completed import ImportRepository, process_one
-        repo = ImportRepository(create_session_factory(self.engine))
+
+        repo = ImportRepository(
+            create_session_factory(self.engine), self.settings.orchestrator_max_attempts
+        )
         while not self._stopping.is_set():
             if self.settings.shizzle_completed_imports_enabled:
                 try:
@@ -102,32 +111,57 @@ class Orchestrator:
             self.engine.dialect.name,
             type(self.pipeline).__name__,
         )
-        last_beat = 0.0
-        while not self._stopping.is_set():
-            try:
-                now = time.monotonic()
-                if now - last_beat >= min(
-                    self.settings.orchestrator_heartbeat_seconds,
-                    self.settings.orchestrator_poll_seconds * 5,
-                ):
-                    await self.heartbeats.beat(self.worker_id)
-                    last_beat = now
-
-                job = await self.jobs.claim_next(
-                    worker_id=self.worker_id,
-                    lease_seconds=self.settings.orchestrator_lease_seconds,
-                )
-                if job is None:
-                    await self._sleep(self.settings.orchestrator_poll_seconds)
-                    continue
-                await self.process_job(job)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # DB down, etc. — durable design: wait and retry, never crash the loop.
-                logger.exception("orchestrator loop iteration failed; backing off")
-                await self._sleep(max(2.0, self.settings.orchestrator_poll_seconds))
+        # The service liveness heartbeat (read by /api/health, gating VPS
+        # deploys) runs on its own task so a long-but-healthy job stage never
+        # starves it — see issue #21. It is independent of job-level
+        # progress heartbeats (B8: those write only on phase change). Beat
+        # once synchronously so liveness is established before the first
+        # claim attempt, then hand cadence to the background task.
+        await self._beat_service_heartbeat()
+        heartbeat_task = asyncio.create_task(self._service_heartbeat_forever())
+        try:
+            while not self._stopping.is_set():
+                try:
+                    job = await self.jobs.claim_next(
+                        worker_id=self.worker_id,
+                        lease_seconds=self.settings.orchestrator_lease_seconds,
+                    )
+                    if job is None:
+                        await self._sleep(self.settings.orchestrator_poll_seconds)
+                        continue
+                    await self.process_job(job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # DB down, etc. — durable design: wait and retry, never crash the loop.
+                    logger.exception("orchestrator loop iteration failed; backing off")
+                    await self._sleep(max(2.0, self.settings.orchestrator_poll_seconds))
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat_task
         logger.info("orchestrator %s stopped", self.worker_id)
+
+    async def _service_heartbeat_forever(self) -> None:
+        """Beat the service-liveness row on a fixed cadence, regardless of
+        whether the loop is idle, polling, or deep in a long job stage."""
+        while True:
+            await asyncio.sleep(self.settings.orchestrator_heartbeat_seconds)
+            await self._beat_service_heartbeat()
+
+    async def _beat_service_heartbeat(self) -> None:
+        """Write one service-liveness heartbeat.
+
+        A write failure (e.g. DB unreachable) is logged, not swallowed, and
+        the row is simply left stale — /api/health's age check then correctly
+        reports the process as not alive rather than us faking freshness.
+        """
+        try:
+            await self.heartbeats.beat(self.worker_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("orchestrator %s: service heartbeat write failed", self.worker_id)
 
     async def _sleep(self, seconds: float) -> None:
         with contextlib.suppress(TimeoutError):
@@ -148,6 +182,7 @@ class Orchestrator:
                     jobs=self.jobs,
                     runpod=self.runpod,
                     worker_id=self.worker_id,
+                    nodes=self.nodes,
                 )
                 from_stage = job.status
                 started = time.monotonic()

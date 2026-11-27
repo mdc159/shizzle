@@ -143,14 +143,14 @@ async def test_submit_url_bounds_title_and_artist_length(client):
     for field in ("title", "artist"):
         resp = await c.post(
             "/api/submit-url",
-            json={"url": "https://youtube.com/watch?v=x", field: "x" * 1025},
+            json={"url": "https://youtube.com/watch?v=dQw4w9WgXcQ", field: "x" * 1025},
         )
         assert resp.status_code == 422, field
 
 
 async def test_submit_url_creates_job(client):
     c, _ = client
-    resp = await c.post("/api/submit-url", json={"url": "https://youtube.com/watch?v=x"})
+    resp = await c.post("/api/submit-url", json={"url": "https://youtube.com/watch?v=dQw4w9WgXcQ"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["title"] is None
@@ -160,6 +160,11 @@ async def test_submit_url_creates_job(client):
     assert status["sourceType"] == "url"
 
     bad = await c.post("/api/submit-url", json={"url": "not a url"})
+    # Not YouTube: refused before a job exists (nodes never fetch arbitrary URLs).
+    for url in ("https://vimeo.com/12345", "http://169.254.169.254/latest/meta-data/",
+                "https://www.youtube.com/watch?v=x"):
+        refused = await c.post("/api/submit-url", json={"url": url})
+        assert refused.status_code == 400, url
     assert bad.status_code == 400
 
 
@@ -168,7 +173,7 @@ async def test_submit_url_parses_title_and_accepts_artist(client):
     resp = await c.post(
         "/api/submit-url",
         json={
-            "url": "https://youtube.com/watch?v=x",
+            "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
             "title": "AC DC - Let There Be Rock (Official Video)",
         },
     )
@@ -179,7 +184,7 @@ async def test_submit_url_parses_title_and_accepts_artist(client):
 
     resp = await c.post(
         "/api/submit-url",
-        json={"url": "https://youtube.com/watch?v=y", "title": "The Pot", "artist": "TOOL"},
+        json={"url": "https://youtube.com/watch?v=dQw4w9WgXcQ", "title": "The Pot", "artist": "TOOL"},
     )
     body = resp.json()
     assert body["title"] == "The Pot"
@@ -189,7 +194,7 @@ async def test_submit_url_parses_title_and_accepts_artist(client):
 async def test_job_history_pagination_newest_first(client):
     c, _ = client
     for i in range(3):
-        await c.post("/api/submit-url", json={"url": f"https://youtube.com/{i}"})
+        await c.post("/api/submit-url", json={"url": f"https://youtu.be/dQw4w9WgXc{i}"})
     resp = await c.get("/api/jobs", params={"limit": 2, "offset": 0})
     body = resp.json()
     assert body["total"] == 3
@@ -212,7 +217,7 @@ async def test_job_events_and_worker_fields(client):
     c, app = client
     job_id = (await c.post(
         "/api/submit-url",
-        json={"url": "https://example.com/song", "title": "Timeline"},
+        json={"url": "https://youtu.be/dQw4w9WgXcQ", "title": "Timeline"},
     )).json()["jobId"]
     parsed_id = uuid.UUID(job_id)
     claimed = await app.state.job_repo.claim_next(worker_id="api-test", lease_seconds=60)

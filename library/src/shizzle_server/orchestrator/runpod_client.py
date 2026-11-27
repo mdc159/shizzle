@@ -36,6 +36,16 @@ class RunPodClient(Protocol):
         """Cancel a RunPod job."""
         ...
 
+    async def health(self) -> dict[str, Any]:
+        """Fetch the endpoint's worker/job health counts.
+
+        Used only to distinguish a genuine queue stall from a cold start
+        (workers still initializing/pulling the image) before cancelling a
+        queued job. Callers must treat a raised error as "unknown" rather
+        than as evidence either way.
+        """
+        ...
+
 
 class NotConfiguredRunPodClient:
     """Parked-cloud stand-in used while cloud mode lacks RunPod settings.
@@ -70,6 +80,9 @@ class NotConfiguredRunPodClient:
         del runpod_job_id
         raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=False)
 
+    async def health(self) -> dict[str, Any]:
+        raise StageError(ErrorCode.RUNPOD_DISPATCH_FAILED, self._DETAIL, retryable=True)
+
 
 class HttpRunPodClient:
     """HTTP implementation of the RunPod serverless API."""
@@ -86,6 +99,11 @@ class HttpRunPodClient:
         self._transport = transport
         self._breaker: CircuitBreaker[httpx.Response] = CircuitBreaker(
             failure_threshold=5, timeout_seconds=60, name="runpod"
+        )
+        # /health is advisory (cold-start detection only); its failures must
+        # never open the breaker that guards dispatch, polling, and cancel.
+        self._health_breaker: CircuitBreaker[httpx.Response] = CircuitBreaker(
+            failure_threshold=5, timeout_seconds=60, name="runpod-health"
         )
 
     async def dispatch(
@@ -129,9 +147,30 @@ class HttpRunPodClient:
     async def cancel(self, runpod_job_id: str) -> None:
         await self._call(lambda: self._request("POST", f"/cancel/{runpod_job_id}"))
 
-    async def _call(self, factory: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+    async def health(self) -> dict[str, Any]:
+        response = await self._call(
+            lambda: self._request("GET", "/health"), breaker=self._health_breaker
+        )
         try:
-            response = await self._breaker.call_async(factory)
+            payload = response.json()
+        except ValueError as exc:
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED, "RunPod health response was not JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise StageError(
+                ErrorCode.RUNPOD_DISPATCH_FAILED, "RunPod health response was not an object"
+            )
+        return payload
+
+    async def _call(
+        self,
+        factory: Callable[[], Awaitable[httpx.Response]],
+        *,
+        breaker: CircuitBreaker[httpx.Response] | None = None,
+    ) -> httpx.Response:
+        try:
+            response = await (breaker or self._breaker).call_async(factory)
         except RuntimeError as exc:
             raise StageError(
                 ErrorCode.RUNPOD_DISPATCH_FAILED,

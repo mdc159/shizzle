@@ -68,7 +68,7 @@ flowchart TB
     CDN -->|Selected song| Cache
 ```
 
-## Proposed data flow implemented by this change
+## Data flow with the companion Mac PR
 
 ```mermaid
 flowchart TB
@@ -162,11 +162,15 @@ on the import record separately from unchanged producer provenance.
 A server-owned staging copy feeds the existing immutable publisher. Import-row
 locking fences stale claims during promotion and catalog registration. The
 manifest is written last; the catalog entry and ready event commit together.
-A crash after S3 publication recovers against the matching manifest. Conflicting
+A crash after S3 publication recovers against the matching manifest and verified
+published objects. Transient failures stop at the orchestrator's configured
+attempt limit. Conflicting
 or deleted tracks are not replaced/restored. No source acquisition, separation,
 conversion, per-stem normalization, or package repair occurs in this path.
 
-## Mac behavior
+## Mac behavior in the companion PR
+
+The uploader and retained downloads are delivered by [Mac PR #1](https://github.com/cbassist/m-shizzle/pull/1).
 
 New local jobs opt into automatic publication. While the app is open, its queue
 processes finished jobs independently of the separation lock; closing the import
@@ -196,13 +200,13 @@ fetching that media from CloudFront.
 
 Both library drawers refresh on opening, explicitly, and every 30 seconds while
 open (web polling also pauses in hidden browser documents). Refresh preserves
-search, selection, playback and mixer state. Catalog title/artist override the
-stored immutable manifest's descriptive metadata in playback responses.
+search, selection, playback and mixer state. Catalog title and any non-empty catalog artist override the stored manifest
+in playback responses.
 
 ## Rollout and acceptance
 
 1. Run library, stemsplit, player and PostgreSQL contract checks; exercise the
-   0006 migration downgrade/re-upgrade and native `--library-checks`.
+   0007 migration downgrade/re-upgrade and native `--library-checks`.
 2. Follow the repository PR convergence/review workflow and human-gated deployment
    in `AUTOMATION.md`. Deploy schema/API/worker before enabling contributions.
 3. Verify the server IAM policy permits intake `imports/*` reads/writes as well
@@ -220,15 +224,23 @@ listening, projector routing, or physical remote acceptance. Record these as
 pending until actually performed. To disable new contributions, turn off the
 flag in both services; existing library playback and saved Mac songs remain.
 Before schema downgrade, stop/drain the import worker through the deployment
-transaction. Uploaded media remains immutable and is not deleted by downgrade.
+transaction and back up the completed import and event tables. Downgrading
+drops both tables, including status, validation results, manifests, and event
+history. It leaves the published media in S3.
 
 Implementation evidence: [2026-09-07 checkpoint](https://github.com/cbassist/m-shizzle/blob/codex/mac-youtube-ingest/evidence/spikes/mac-native-playback/SHARED-LIBRARY-RESULTS.md).
 
-## Related upstream work
+## Relationship to the existing S3 drop-box
 
-[Shizzle PR #47](https://github.com/mdc159/shizzle/pull/47) independently adds a
-completed-package S3 drop-box importer and a VPS command. This contribution API
-and durable automatic worker are a different interface to the same publication
-need. The server proposal remains a draft until review reconciles identity,
-validation, storage-prefix ownership and reuse with #47. Neither proposal should
-be treated as the selected production interface merely because it passes tests.
+The [merged drop-box importer](https://github.com/mdc159/shizzle/pull/47)
+accepts operator-supplied source references. The authenticated API uses the
+canonical manifest digest, including media hashes, as its package identity.
+Both use the same track ID derivation with disjoint inputs: drop-box references
+start with `youtube-` or `sha256-`, while API references start with
+`completed:`. This keeps existing track IDs stable and allows distinct
+completed packages from one source. Importing the same package through both
+interfaces creates two entries; operators should submit through one interface.
+
+Drop-box intake owns `imports/<source-ref>/` and API intake owns
+`imports/<import-uuid>/input/`. Both reuse the completed-media profile checks,
+published-object verification and immutable publisher.

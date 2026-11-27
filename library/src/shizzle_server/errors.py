@@ -19,6 +19,10 @@ class ErrorCode(StrEnum):
     FFMPEG_FAILED = "FFMPEG_FAILED"
     PUBLISH_FAILED = "PUBLISH_FAILED"
     MAX_ATTEMPTS_EXCEEDED = "MAX_ATTEMPTS_EXCEEDED"
+    # Worker nodes (docs/WORKER-NODES.md): no download-capable node came
+    # online within the wait budget / a node reported or timed out an attempt.
+    NO_NODE_AVAILABLE = "NO_NODE_AVAILABLE"
+    NODE_FAILED = "NODE_FAILED"
     INTERNAL = "INTERNAL"
 
 

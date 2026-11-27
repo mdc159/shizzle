@@ -56,9 +56,9 @@ async def lookup(request: Request, identifier: uuid.UUID) -> CompletedImport:
 async def create_import(request: Request) -> dict[str, Any]:
     raw = bytearray()
     async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > MAX_MANIFEST_BYTES:
+        if len(raw) + len(chunk) > MAX_MANIFEST_BYTES:
             raise HTTPException(413, "Manifest exceeds the size limit")
+        raw.extend(chunk)
     try:
         manifest = json.loads(raw)
         item = await repository(request).create(manifest)

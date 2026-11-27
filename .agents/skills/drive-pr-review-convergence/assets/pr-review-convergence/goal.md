@@ -14,7 +14,7 @@ Repository contract:
 - Required checks: `{{REQUIRED_CHECKS}}`
 - Primary reviewer: `{{PRIMARY_REVIEWER}}`
 - Advisory reviewers: `{{ADVISORY_REVIEWERS}}`
-- Primary-review minimum score: `{{PRIMARY_REVIEWER_MIN_SCORE}}/5`
+- Primary-review minimum score (0 disables scoring): `{{PRIMARY_REVIEWER_MIN_SCORE}}/5`
 - Blocking reviewer severities: `P0`, `P1`
 - Validation commands: `{{VALIDATION_COMMANDS}}`
 - Maximum repair batches: `{{MAX_ITERATIONS}}`
@@ -35,8 +35,9 @@ for product, security-semantic, destructive, scope-expanding, or permission
 decisions.
 
 Collect reviewer findings before editing, deduplicate them, and make one
-coherent repair batch. Trigger the primary reviewer only after the candidate
-passes local and hosted checks. Advisory reviewers contribute findings when
+coherent repair batch. Complete the primary review only after the candidate
+passes local and hosted checks. The default `independent` reviewer means the
+workflow's own whole-diff review, not an external service. Greptile is retired for this project. Do not trigger it, request credentials, wait for its completion, or use its score/status as a readiness blocker. Independently validate any historical findings that still apply. Advisory reviewers contribute findings when
 available, but their completion and rate limits never gate readiness.
 
 Continue for at most `{{MAX_ITERATIONS}}` repair batches. Never merge, close,
@@ -51,9 +52,8 @@ and the smallest decision needed from the user.
 The exact latest head SHA has all required checks green; the primary reviewer
 has reviewed the final candidate; no reproduced P0/P1 or required human finding
 remains; every finding has an evidence-backed disposition; and the independent
-whole-diff review plus relevant failure matrix pass. When Greptile is primary,
-5/5 is the target; 4/5 is acceptable only with zero reproduced P0/P1 findings
-and all remaining P2 findings explicitly deferred. A score of 3/5 or lower is
-not ready. Two unchanged polls `{{QUIET_WINDOW_MINUTES}}` minutes apart close
+whole-diff review plus relevant failure matrix pass. Retired Greptile's score and
+completion do not gate readiness. If an explicitly selected alternative primary provider
+uses scoring, apply its configured minimum; 0 disables the score requirement. Two unchanged polls `{{QUIET_WINDOW_MINUTES}}` minutes apart close
 the gate. Report `READY TO MERGE` with residual risks, including unavailable
 advisory reviewers, then stop before merge.

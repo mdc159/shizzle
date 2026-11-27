@@ -57,22 +57,33 @@ export const LibraryDrawer: React.FC = () => {
 
   const isOpen = activeDrawer === 'library';
 
-  const fetching = useRef(false);
-  const fetchLibrary = useCallback(async () => {
-    if (fetching.current) return;
-    fetching.current = true;
-    setLoading(true);
-    setError(null);
+  const request = useRef<AbortController | null>(null);
+  const fetchLibrary = useCallback(async (background = false) => {
+    if (request.current) {
+      if (background) return;
+      request.current.abort();
+    }
+    const controller = new AbortController();
+    request.current = controller;
+    if (!background) {
+      setLoading(true);
+      setError(null);
+    }
     try {
-      const data = await getLibrary();
+      const data = await getLibrary(controller.signal);
+      if (controller.signal.aborted) return;
       setTracks(data);
+      setError(null);
     } catch (err) {
+      if (controller.signal.aborted || background) return;
       const message = err instanceof Error ? err.message : 'Failed to load library';
       setError(message);
       toast.error(message);
     } finally {
-      fetching.current = false;
-      setLoading(false);
+      if (request.current === controller) {
+        request.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -80,9 +91,13 @@ export const LibraryDrawer: React.FC = () => {
     if (!isOpen) return;
     void fetchLibrary();
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void fetchLibrary();
+      if (document.visibilityState === 'visible') void fetchLibrary(true);
     }, 30_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      request.current?.abort();
+      request.current = null;
+    };
   }, [isOpen, fetchLibrary]);
 
   const handleSelect = (track: Track) => {

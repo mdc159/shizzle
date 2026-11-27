@@ -1,6 +1,5 @@
-import { useState } from 'react';
 import { PasscodeGate } from '@/components/auth/PasscodeGate';
-import { hasToken } from '@/lib/auth';
+import { useAuthGate } from '@/hooks/useAuthGate';
 import { PipelinePanel } from '@/components/pipeline/PipelinePanel';
 import { Toaster } from 'sonner';
 
@@ -9,7 +8,7 @@ import { Toaster } from 'sonner';
  * in-player drawer shows, as its own page for a second screen or tablet.
  */
 export const DashboardPage: React.FC = () => {
-  const [authed, setAuthed] = useState<boolean>(() => hasToken());
+  const [authed, setAuthedTrue] = useAuthGate();
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-black text-white antialiased">
@@ -18,7 +17,7 @@ export const DashboardPage: React.FC = () => {
           <PipelinePanel active variant="page" />
         </main>
       ) : (
-        <PasscodeGate onAuthed={() => setAuthed(true)} />
+        <PasscodeGate onAuthed={setAuthedTrue} />
       )}
       <Toaster theme="dark" position="bottom-left" />
     </div>

@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -198,15 +199,32 @@ def _refresh_receipt(s3, bucket: str, receipt_key: str, receipt: dict, etag: str
         ) from err
 
 
-def handler(job: dict) -> dict:
-    """RunPod serverless handler: S3 source in, lossless-stem-v1 package in S3 out."""
-    import runpod
+def handler(job: dict, *, progress: Callable[[str], None] | None = None) -> dict:
+    """RunPod serverless handler: S3 source in, lossless-stem-v1 package in S3 out.
 
-    def heartbeat(msg: str) -> None:
-        with contextlib.suppress(Exception):
-            runpod.serverless.progress_update(job, msg)
+    ``progress`` lets a worker node (docs/WORKER-NODES.md) run this exact
+    function outside RunPod: phases go to the callback instead of the RunPod
+    progress channel, and ``job["id"]`` is the node's executor id
+    (``node:<assignment>``), which lands in the receipt like a RunPod id.
+    Nothing about the package or its writes changes.
+    """
+    if progress is None:
+        import runpod
+
+        def heartbeat(msg: str) -> None:
+            with contextlib.suppress(Exception):
+                runpod.serverless.progress_update(job, msg)
+    else:
+        report = progress
+
+        def heartbeat(msg: str) -> None:
+            with contextlib.suppress(Exception):
+                report(msg)
 
     params = job.get("input", {})
+    # Explicit device for nodes ("mps" on the Mac, "cuda" on the Dell); RunPod
+    # leaves it unset and the worker resolves cuda/cpu as before.
+    device = params.get("device") or os.getenv("SHIZZLE_DEVICE") or None
     runpod_job_id = str(job.get("id", "")).strip()
     track_id = params["track_id"]
     generation = int(params.get("generation", 1))
@@ -286,6 +304,7 @@ def handler(job: dict) -> dict:
             source, tmp_path,
             track_id=track_id, generation=generation,
             source_key=input_key, worker_image=WORKER_IMAGE,
+            device=device,
             heartbeat=heartbeat,
         )
         if _CONDITIONAL_DISPATCH:

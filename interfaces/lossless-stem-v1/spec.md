@@ -30,7 +30,9 @@ flowchart LR
 The GPU worker owns source extraction and lossless separation. It does not
 choose browser codecs, encode AAC/video, set playback gains, or publish the
 browser manifest. The VPS owns those delivery operations.
-Upload is supported; URL acquisition is still a stub.
+The worker is the RunPod image or a worker node running the same
+`lossless_handler.py`; both produce this package. Sources come from an
+upload or from a node's YouTube download.
 
 ## Package location and completion
 
