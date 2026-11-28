@@ -6,6 +6,7 @@ import copy
 import hashlib
 import sys
 from datetime import timedelta
+from threading import Event
 
 import boto3
 import pytest
@@ -217,6 +218,29 @@ async def test_cancelling_validation_stops_active_media_command(tmp_path):
                 await asyncio.sleep(0.01)
     finally:
         task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
+
+
+async def test_repeated_cancellation_drains_publication_thread():
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = Event()
+
+    def publish():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=5)
+
+    task = asyncio.create_task(completed.blocking(publish))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=3)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=3)
 

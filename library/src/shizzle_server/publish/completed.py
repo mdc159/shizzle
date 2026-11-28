@@ -11,6 +11,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import subprocess
 import tempfile
 import uuid
@@ -40,6 +41,8 @@ from .delivery_profile import CANONICAL_STEM_IDS
 from .lossless_intake import TRACK_BUDGET_BPS, stage
 from .media_audit import MediaAuditError, _run, audit_stop
 from .publisher import Publisher, generation_prefix, manifest_key
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -329,8 +332,15 @@ async def blocking(function: Callable[..., T], *args: Any, interrupt_audit: bool
     except asyncio.CancelledError:
         if stop is not None:
             stop.set()
-        with contextlib.suppress(Exception):
-            await work
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            work.result()
         raise
 
 
@@ -343,7 +353,10 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
     async def renew() -> None:
         while True:
             await asyncio.sleep(seconds / 3)
-            await repo.renew(item.id, owner, seconds)
+            try:
+                await repo.renew(item.id, owner, seconds)
+            except Exception:
+                logger.warning("Completed-media lease renewal failed for import %s", item.id)
 
     renewal = asyncio.create_task(renew())
     try:
@@ -406,6 +419,5 @@ async def process_one(repo: ImportRepository, settings: Settings, owner: str) ->
         await repo.failure(item.id, owner, "PUBLICATION_RETRY", True)
     finally:
         renewal.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await renewal
+        await asyncio.gather(renewal, return_exceptions=True)
     return True
