@@ -683,7 +683,7 @@ def _published_manifest_sha(
     return manifest_sha256(raw)
 
 
-def _verify_landed_generation(
+def verify_landed_generation(
     publisher: Publisher,
     track_id: uuid.UUID,
     generation: int,
@@ -924,7 +924,7 @@ def _ingest_steps(
                 # batch): a stem removed or altered after publication must
                 # surface as GENERATION_UNVERIFIED, not as success, and the
                 # replacement drop must stay in place for repair.
-                _verify_landed_generation(publisher, track_id, generation, expected)
+                verify_landed_generation(publisher, track_id, generation, expected)
                 if not dry_run:
                     _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
                 return write_result("already-published", generation=generation)
@@ -947,7 +947,7 @@ def _ingest_steps(
         # finished below without re-downloading or re-copying — the landed
         # generation is re-proven instead, R1).
         if database_url is None:
-            _verify_landed_generation(publisher, track_id, generation, expected)
+            verify_landed_generation(publisher, track_id, generation, expected)
             if not dry_run:
                 _cleanup_drop_media(s3, bucket, prefix, expected)  # R19 idempotent
             return write_result("already-published", generation=generation)
@@ -971,7 +971,7 @@ def _ingest_steps(
     if completed_retry:
         # R1: a crash between publish and register must not register a
         # generation it never proved — re-verify the landed objects (read-only).
-        retry_evidence = _verify_landed_generation(publisher, track_id, generation, expected)
+        retry_evidence = verify_landed_generation(publisher, track_id, generation, expected)
         if dry_run:
             # R24: --dry-run writes/cleans/registers nothing on ANY path.
             return write_result("would-register", generation=generation)
@@ -1063,7 +1063,7 @@ def _ingest_steps(
                 )
             # R14: a no-opped publish can still sit on top of media copied by
             # a concurrent ingest — prove the landed objects before registering.
-            _verify_landed_generation(publisher, track_id, generation, expected)
+            verify_landed_generation(publisher, track_id, generation, expected)
     except PublishError as exc:
         # Staged verification / promotion failed: the bytes changed under us
         # or violate the format guard — a rejection, not a crash. R18: clear

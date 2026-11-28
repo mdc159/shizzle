@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.imports import router as imports_router
 from .api.nodes import router as nodes_router
 from .api.remote import router as remote_router
 from .api.routes import router
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router)
+    app.include_router(imports_router)
     app.include_router(remote_router)
     app.include_router(nodes_router)
     return app

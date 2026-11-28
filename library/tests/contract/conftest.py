@@ -107,7 +107,7 @@ async def pg_engine(migrated_database):
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE job_events, jobs, tracks, orchestrator_heartbeats "
+                "TRUNCATE completed_import_events, completed_imports, job_events, jobs, tracks, orchestrator_heartbeats "
                 "RESTART IDENTITY CASCADE"
             )
         )

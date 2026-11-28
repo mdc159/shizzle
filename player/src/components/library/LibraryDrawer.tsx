@@ -57,26 +57,48 @@ export const LibraryDrawer: React.FC = () => {
 
   const isOpen = activeDrawer === 'library';
 
-  const fetchLibrary = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const request = useRef<AbortController | null>(null);
+  const fetchLibrary = useCallback(async (background = false) => {
+    if (request.current) {
+      if (background) return;
+      request.current.abort();
+    }
+    const controller = new AbortController();
+    request.current = controller;
+    if (!background) {
+      setLoading(true);
+      setError(null);
+    }
     try {
-      const data = await getLibrary();
+      const data = await getLibrary(controller.signal);
+      if (controller.signal.aborted) return;
       setTracks(data);
+      setError(null);
     } catch (err) {
+      if (controller.signal.aborted || background) return;
       const message = err instanceof Error ? err.message : 'Failed to load library';
       setError(message);
       toast.error(message);
     } finally {
-      setLoading(false);
+      if (request.current === controller) {
+        request.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    if (isOpen && tracks.length === 0 && !error) {
-      fetchLibrary();
-    }
-  }, [isOpen, tracks.length, error, fetchLibrary]);
+    if (!isOpen) return;
+    void fetchLibrary();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void fetchLibrary(true);
+    }, 30_000);
+    return () => {
+      window.clearInterval(timer);
+      request.current?.abort();
+      request.current = null;
+    };
+  }, [isOpen, fetchLibrary]);
 
   const handleSelect = (track: Track) => {
     playTrack(track);
@@ -190,12 +212,12 @@ export const LibraryDrawer: React.FC = () => {
         </div>
 
         <div className="mt-4 flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
-          {loading ? (
+          {loading && tracks.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-8 gap-3">
               <Loader2 className="h-8 w-8 animate-spin text-zinc-500" />
               <p className="text-sm text-zinc-500">Loading library...</p>
             </div>
-          ) : error ? (
+          ) : error && tracks.length === 0 ? (
             <div className="flex flex-col items-center justify-center p-8 gap-4">
               <AlertCircle className="h-8 w-8 text-red-400" />
               <p className="text-sm text-red-400">{error}</p>

@@ -472,6 +472,9 @@ async def get_track_manifest(
         logger.warning("manifest fetch failed for %s: %s", track_id, exc)
         raise HTTPException(502, "Manifest unavailable") from exc
     rewritten = media.rewrite_cloud_manifest(settings, raw, track.s3_prefix)
+    rewritten["title"] = track.title
+    if track.artist:
+        rewritten["artist"] = track.artist
     rewritten["track_id"] = str(track.id)
     rewritten["generation"] = track.generation
     return rewritten

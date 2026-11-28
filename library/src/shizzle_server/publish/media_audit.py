@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from .delivery_profile import (
@@ -82,8 +85,43 @@ def inspect_mp4_atoms(path: Path) -> AtomLayout:
     return AtomLayout(moov_offset=moov, mdat_offset=mdat, atoms=tuple(atoms))
 
 
+audit_stop: ContextVar[Event | None] = ContextVar("audit_stop", default=None)
+
+
+def _run_interruptible(
+    command: list[str], timeout: int, stop: Event
+) -> subprocess.CompletedProcess[str]:
+    if stop.is_set():
+        raise InterruptedError("media audit stopped")
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    ) as process:
+        try:
+            while not stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            raise InterruptedError("media audit stopped")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     try:
+        if (stop := audit_stop.get()) is not None:
+            return _run_interruptible(command, timeout, stop)
         return subprocess.run(
             command,
             check=False,

@@ -130,8 +130,8 @@ export async function getNodes(signal?: AbortSignal): Promise<NodeInfo[]> {
 /**
  * Fetch library of completed tracks.
  */
-export async function getLibrary(): Promise<Track[]> {
-  const response = await authFetch('/api/library');
+export async function getLibrary(signal?: AbortSignal): Promise<Track[]> {
+  const response = await authFetch('/api/library', { signal });
 
   if (!response.ok) {
     throw new Error(`Failed to fetch library: ${response.statusText}`);
